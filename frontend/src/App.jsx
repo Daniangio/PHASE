@@ -11,18 +11,18 @@ Main Application Component
 */
 
 /**
- * Main App component. Manages routing between pages.
+ * Main App component. Manages routing between pages using internal state.
  */
 export default function App() {
-  // Simple "router" state.
+  // 'page' acts as a simple router.
   const [page, setPage] = useState('submit');
-  // State to hold the job ID being tracked (the RQ job_id)
+  // 'pollingJobId' is the RQ job ID (e.g., 'analysis-uuid-...') used for status checks.
   const [pollingJobId, setPollingJobId] = useState(null);
-  // State to hold the result ID being viewed (the UUID)
+  // 'selectedResultId' is the persistent job UUID used for fetching final results.
   const [selectedResultId, setSelectedResultId] = useState(null);
 
   /**
-   * Navigate to the status page for a specific job ID.
+   * Navigate to the status page to poll a newly submitted job.
    */
   const navigateToStatus = (newJobId) => {
     setPollingJobId(newJobId);
@@ -30,14 +30,14 @@ export default function App() {
   };
 
   /**
-   * Navigate to the results list page.
+   * Navigate to the main results list.
    */
   const navigateToResults = () => {
     setPage('results');
   };
 
   /**
-   * Navigate to a specific result's detail page.
+   * Navigate to the detailed view for a single result.
    */
   const navigateToResultDetail = (resultId) => {
     setSelectedResultId(resultId);
@@ -45,7 +45,7 @@ export default function App() {
   };
 
   /**
-   * Render the currently active page based on state.
+   * Render the currently active page component based on the 'page' state.
    */
   const renderPage = () => {
     switch (page) {
@@ -104,7 +104,7 @@ const Navbar = ({ setPage, currentPage }) => {
   ];
 
   const getLinkClasses = (pageName) => {
-    // Highlight 'status' or 'result_detail' as if they are part of 'results'
+    // Highlight 'View Results' even when on a sub-page like 'status' or 'result_detail'
     const isResultsActive = currentPage === 'results' || currentPage === 'status' || currentPage === 'result_detail';
     
     let isActive = currentPage === pageName;
@@ -114,7 +114,6 @@ const Navbar = ({ setPage, currentPage }) => {
     if (pageName === 'submit' && isResultsActive) {
       isActive = false;
     }
-
 
     return `flex items-center space-x-2 px-3 py-2 rounded-md font-medium transition-colors ${
       isActive
@@ -135,7 +134,7 @@ const Navbar = ({ setPage, currentPage }) => {
           <span>{item.label}</span>
         </button>
       ))}
-      {/* Show a special 'Job Status' tab if we are polling a job */}
+      {/* Show a special 'Job Status' tab only when polling a job */}
       {currentPage === 'status' && (
         <button
           onClick={() => setPage('status')}
@@ -151,14 +150,14 @@ const Navbar = ({ setPage, currentPage }) => {
 
 /*
 ================================================================================
-Job Submission Page (Refactored)
+Job Submission Page
 ================================================================================
 */
 
 const SubmitJobPage = ({ onJobSubmitted }) => {
   const [analysisType, setAnalysisType] = useState('dynamic'); // 'static', 'qubo', 'dynamic'
   
-  // State for file inputs (shared)
+  // State for all file inputs
   const [files, setFiles] = useState({
     active_topo: null,
     active_traj: null,
@@ -170,8 +169,14 @@ const SubmitJobPage = ({ onJobSubmitted }) => {
   // State for parameters
   const [teLag, setTeLag] = useState(10);
   const [targetSwitch, setTargetSwitch] = useState('res_50'); // Example
-  
-  // State for UI
+  const [activeSlice, setActiveSlice] = useState(''); // e.g., "1000:5000:2"
+  const [inactiveSlice, setInactiveSlice] = useState('');
+
+  // State for residue selection method
+  const [selectionMode, setSelectionMode] = useState('all'); // 'file', 'manual', 'all'
+  const [manualSelections, setManualSelections] = useState('resid 50\nresid 131');
+
+  // UI state
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState(null);
 
@@ -180,33 +185,73 @@ const SubmitJobPage = ({ onJobSubmitted }) => {
     setFiles((prev) => ({ ...prev, [name]: files[0] }));
   };
 
+  const handleSliceChange = (e) => {
+    const { name, value } = e.target;
+    if (name === 'active_slice') setActiveSlice(value);
+    if (name === 'inactive_slice') setInactiveSlice(value);
+  };
+
   const handleSubmit = async (e) => {
     e.preventDefault();
     setIsLoading(true);
     setError(null);
 
-    // 1. Validate all files are present
-    if (Object.values(files).some(file => !file)) {
-      setError("Please upload all 5 required files.");
+    // 1. Validate required files (4 traj/topo files are always needed)
+    const requiredFiles = ['active_topo', 'active_traj', 'inactive_topo', 'inactive_traj'];
+    if (requiredFiles.some(key => !files[key])) {
+      setError("Please upload all 4 trajectory and topology files.");
+      setIsLoading(false);
+      return;
+    }
+
+    // Validate config file *only if* that mode is selected
+    if (selectionMode === 'file' && !files.config) {
+      setError("Please upload a config file or change the selection method.");
       setIsLoading(false);
       return;
     }
 
     // 2. Create FormData
     const formData = new FormData();
-    // Append files (keys match FastAPI endpoint arguments)
+    // Append the 4 required files
     formData.append('active_topo', files.active_topo);
     formData.append('active_traj', files.active_traj);
     formData.append('inactive_topo', files.inactive_topo);
     formData.append('inactive_traj', files.inactive_traj);
-    formData.append('config', files.config);
 
-    // 3. Set endpoint and add specific params
+    // 3. Handle residue selections based on mode
+    // This logic is the key to the frontend side.
+    if (selectionMode === 'file' && files.config) {
+      // Mode 'file': Send the config file
+      formData.append('config', files.config);
+    } else if (selectionMode === 'manual' && manualSelections.trim()) {
+      // Mode 'manual': Parse text, create a JSON dict, and send as a string
+      try {
+        const selectionsDict = manualSelections
+          .split('\n')
+          .map(line => line.trim())
+          .filter(line => line)
+          .reduce((acc, line) => {
+            const key = line.replace(/\s+/g, '_');
+            acc[key] = line;
+            return acc;
+          }, {});
+        
+        formData.append('residue_selections_json', JSON.stringify(selectionsDict));
+      } catch (err) {
+        setError("Failed to parse manual selections. Please check the format.");
+        setIsLoading(false);
+        return;
+      }
+    }
+    // Mode 'all': Send neither 'config' nor 'residue_selections_json'.
+    // The backend will interpret this as "analyze all residues".
+
+    // 4. Set endpoint and add analysis-specific params
     let endpoint = '';
     switch (analysisType) {
       case 'static':
         endpoint = '/api/v1/submit/static';
-        // No extra params
         break;
       case 'qubo':
         endpoint = '/api/v1/submit/qubo';
@@ -227,7 +272,15 @@ const SubmitJobPage = ({ onJobSubmitted }) => {
         return;
     }
 
-    // 4. Make the API request
+    // Append slicing parameters if they exist
+    if (activeSlice) {
+      formData.append('active_slice', activeSlice);
+    }
+    if (inactiveSlice) {
+      formData.append('inactive_slice', inactiveSlice);
+    }
+
+    // 5. Make the API request
     try {
       const response = await fetch(endpoint, {
         method: 'POST',
@@ -237,19 +290,22 @@ const SubmitJobPage = ({ onJobSubmitted }) => {
       const data = await response.json();
 
       if (!response.ok) {
-        throw new Error(data.detail || "Job submission failed.");
+        // FastAPI returns error details in `data.detail`
+        const errorDetail = data.detail || "Job submission failed.";
+        // Handle complex error objects
+        const errorMsg = typeof errorDetail === 'object' ? JSON.stringify(errorDetail) : errorDetail;
+        throw new Error(errorMsg);
       }
       
       if (!data.job_id) {
-          throw new Error("Job submission failed to return a job ID.");
+          throw new Error("Submission succeeded but did not return a job ID.");
       }
 
-      // 5. On success, navigate to the status page
-      onJobSubmitted(data.job_id); // Pass the RQ job_id for polling
+      // 6. On success, navigate to the status page to start polling
+      onJobSubmitted(data.job_id); 
 
     } catch (err) {
-      const errorMsg = typeof err.message === 'object' ? JSON.stringify(err.message) : err.message;
-      setError(errorMsg);
+      setError(err.message);
     } finally {
       setIsLoading(false);
     }
@@ -290,6 +346,9 @@ const SubmitJobPage = ({ onJobSubmitted }) => {
               { name: 'active_topo', label: 'Topology (PDB, GRO, ...)' },
               { name: 'active_traj', label: 'Trajectory (XTC, TRR, ...)' },
             ]}
+            sliceName="active_slice"
+            sliceValue={activeSlice}
+            onSliceChange={handleSliceChange}
             fileState={files}
             onChange={handleFileChange}
           />
@@ -299,6 +358,9 @@ const SubmitJobPage = ({ onJobSubmitted }) => {
               { name: 'inactive_topo', label: 'Topology (PDB, GRO, ...)' },
               { name: 'inactive_traj', label: 'Trajectory (XTC, TRR, ...)' },
             ]}
+            sliceName="inactive_slice"
+            sliceValue={inactiveSlice}
+            onSliceChange={handleSliceChange}
             fileState={files}
             onChange={handleFileChange}
           />
@@ -306,17 +368,49 @@ const SubmitJobPage = ({ onJobSubmitted }) => {
 
         {/* Config and Parameters (Dynamic) */}
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+          {/* Residue Selection Card */}
           <div className="bg-gray-800 p-4 rounded-lg border border-gray-700">
-            <h3 className="text-lg font-semibold mb-3 text-cyan-400">Configuration</h3>
-            <FileDropzone
-              name="config"
-              label="Residue Config (config.yml)"
-              file={files.config}
-              onChange={handleFileChange}
-            />
+            <h3 className="text-lg font-semibold mb-3 text-cyan-400">Residue Selections</h3>
+            <div className="flex space-x-1 rounded-lg bg-gray-900 p-1 mb-4">
+              <TabButton label="Analyze All" isActive={selectionMode === 'all'} onClick={() => setSelectionMode('all')} />
+              <TabButton label="Upload File" isActive={selectionMode === 'file'} onClick={() => setSelectionMode('file')} />
+              <TabButton label="Enter Manually" isActive={selectionMode === 'manual'} onClick={() => setSelectionMode('manual')} />
+            </div>
+
+            {selectionMode === 'all' && (
+              <div className="text-sm text-gray-400 p-4 bg-gray-900 rounded-md">
+                The analysis will run on all protein residues found to be common between the active and inactive states.
+              </div>
+            )}
+
+            {selectionMode === 'file' && (
+              <FileDropzone
+                name="config"
+                label="Residue Config (config.yml)"
+                file={files.config}
+                onChange={handleFileChange}
+              />
+            )}
+
+            {selectionMode === 'manual' && (
+              <div>
+                <label htmlFor="manual_selections" className="block text-sm font-medium text-gray-300 mb-1">
+                  Enter MDAnalysis Selections (one per line)
+                </label>
+                <textarea
+                  id="manual_selections"
+                  rows={4}
+                  value={manualSelections}
+                  onChange={(e) => setManualSelections(e.target.value)}
+                  className="w-full bg-gray-900 border border-gray-600 rounded-md p-2 text-white focus:ring-cyan-500 focus:border-cyan-500 font-mono text-sm"
+                  placeholder="e.g., resid 50 and name CA&#10;resid 130-140"
+                />
+                <p className="text-xs text-gray-500 mt-1">Each line will become a feature. Keys are auto-generated.</p>
+              </div>
+            )}
           </div>
           
-          {/* Conditional Parameters */}
+          {/* Parameters Card */}
           <div className="bg-gray-800 p-4 rounded-lg border border-gray-700">
             <h3 className="text-lg font-semibold mb-3 text-cyan-400">Parameters</h3>
             
@@ -367,7 +461,7 @@ const SubmitJobPage = ({ onJobSubmitted }) => {
   );
 };
 
-// --- Submit Page Helpers ---
+// --- Submit Page Helper Components ---
 
 const TabButton = ({ icon, label, isActive, onClick }) => (
   <button
@@ -384,7 +478,7 @@ const TabButton = ({ icon, label, isActive, onClick }) => (
   </button>
 );
 
-const FileInputGroup = ({ title, files, fileState, onChange }) => (
+const FileInputGroup = ({ title, files, fileState, onChange, sliceName, sliceValue, onSliceChange }) => (
   <div className="bg-gray-800 p-4 rounded-lg border border-gray-700 space-y-4">
     <h3 className="text-lg font-semibold text-cyan-400">{title}</h3>
     {files.map((file) => (
@@ -396,6 +490,24 @@ const FileInputGroup = ({ title, files, fileState, onChange }) => (
         onChange={onChange}
       />
     ))}
+    <SliceInput name={sliceName} value={sliceValue} onChange={onSliceChange} />
+  </div>
+);
+
+const SliceInput = ({ name, value, onChange }) => (
+  <div>
+    <label htmlFor={name} className="block text-sm font-medium text-gray-300 mb-1">
+      Trajectory Slice (Optional)
+    </label>
+    <input
+      type="text"
+      id={name}
+      name={name}
+      value={value}
+      onChange={onChange}
+      className="w-full bg-gray-900 border border-gray-600 rounded-md p-2 text-white focus:ring-cyan-500 focus:border-cyan-500 font-mono text-sm"
+      placeholder="start:stop:step"
+    />
   </div>
 );
 
@@ -476,6 +588,7 @@ const JobStatusPage = ({ jobId, onNavigateToResults }) => {
 
         setStatus(data);
 
+        // Stop polling if the job is finished or failed
         if (data.status === 'finished' || data.status === 'failed') {
           clearInterval(pollingInterval.current);
         }
@@ -485,8 +598,10 @@ const JobStatusPage = ({ jobId, onNavigateToResults }) => {
       }
     };
 
+    // Initial poll, then set interval
     pollStatus();
     pollingInterval.current = setInterval(pollStatus, 3000);
+    // Cleanup interval on component unmount
     return () => clearInterval(pollingInterval.current);
   }, [jobId, onNavigateToResults]);
 
@@ -499,13 +614,14 @@ const JobStatusPage = ({ jobId, onNavigateToResults }) => {
     );
   }
 
-  // Handle the different states from the API response
+  // Parse status information
   const jobStatus = status?.status || 'queued';
   const metaStatus = status?.meta?.status || (jobStatus === 'queued' ? 'Waiting in queue...' : 'Initializing...');
   const progress = status?.meta?.progress || (jobStatus === 'queued' ? 0 : 5);
   const resultPayload = status?.result; // This is the full result payload from the worker
   const jobUUID = resultPayload?.job_id; // The persistent UUID
 
+  // Render "Finished" state
   if (jobStatus === 'finished' && resultPayload) {
     return (
       <StatusDisplay
@@ -521,7 +637,7 @@ const JobStatusPage = ({ jobId, onNavigateToResults }) => {
           </pre>
         </div>
         <button
-          onClick={() => onNavigateToResults()}
+          onClick={onNavigateToResults}
           className="mt-6 w-full flex justify-center items-center space-x-2 bg-cyan-600 hover:bg-cyan-700 text-white font-bold py-3 px-6 rounded-lg transition-colors"
         >
           <span>View All Results</span>
@@ -530,6 +646,7 @@ const JobStatusPage = ({ jobId, onNavigateToResults }) => {
     );
   }
 
+  // Render "Failed" state
   if (jobStatus === 'failed') {
     const errorMsg = resultPayload?.error || "An unknown error occurred.";
     return (
@@ -549,7 +666,7 @@ const JobStatusPage = ({ jobId, onNavigateToResults }) => {
     );
   }
 
-  // Default: In Progress (queued, started)
+  // Render "In Progress" (queued, started) state
   return (
     <StatusDisplay
       icon={<Loader2 className="h-16 w-16 text-cyan-400 animate-spin" />}
@@ -585,7 +702,7 @@ const StatusDisplay = ({ icon, title, message, jobId, children }) => (
 
 /*
 ================================================================================
-NEW: Results List Page
+Results List Page
 ================================================================================
 */
 
@@ -701,7 +818,7 @@ const ResultItem = ({ item, onSelectResult }) => {
 
 /*
 ================================================================================
-NEW: Result Detail Page
+Result Detail Page
 ================================================================================
 */
 
@@ -772,7 +889,6 @@ const ResultDetailPage = ({ resultId, onBack }) => {
           <span className="font-semibold">Type:</span> <span className="capitalize">{result.analysis_type}</span>
         </p>
 
-        {/* As requested, just print the results file */}
         <h3 className="text-lg font-semibold text-cyan-400 mb-2">Raw Result Data</h3>
         <pre className="bg-gray-900 p-4 rounded-md text-gray-200 text-xs overflow-auto">
           {JSON.stringify(result, null, 2)}
@@ -785,13 +901,10 @@ const ResultDetailPage = ({ resultId, onBack }) => {
 
 /*
 ================================================================================
-System Health Page (Unchanged)
+System Health Page
 ================================================================================
 */
 
-/**
- * Page component for checking system health.
- */
 const HealthCheckPage = () => {
   const [healthReport, setHealthReport] = useState(null);
   const [isLoading, setIsLoading] = useState(false);
@@ -803,7 +916,6 @@ const HealthCheckPage = () => {
     setHealthReport(null);
 
     try {
-      // Use relative URL
       const response = await fetch('/api/v1/health/check');
       const data = await response.json();
 
@@ -866,9 +978,6 @@ const HealthCheckPage = () => {
   );
 };
 
-/**
- * Helper component to display a single health status card.
- */
 const HealthStatusCard = ({ title, status, details }) => {
   const isOk = status === 'ok';
   const displayStatus = status || 'unknown';

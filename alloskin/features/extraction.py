@@ -26,13 +26,16 @@ class FeatureExtractor:
     Handles calculation of backbone (phi, psi) and sidechain (chi1)
     dihedral angles and their sin/cos transformation.
     """
-    def __init__(self, residue_selections: Dict[str, str]):
+    def __init__(self, residue_selections: Optional[Dict[str, str]] = None):
         """
         Initializes with a dictionary of residue selections.
         Example: {'res_50': 'resid 50', 'res_131': 'resid 131'}
         """
-        self.residue_selections = residue_selections
-        print(f"FeatureExtractor initialized for {len(self.residue_selections)} residues.")
+        self.residue_selections = residue_selections if residue_selections is not None else {}
+        if residue_selections is not None:
+            print(f"FeatureExtractor initialized for {len(self.residue_selections)} residues.")
+        else:
+            print("FeatureExtractor initialized in automatic mode (will use all residues).")
 
     def _transform_to_circular(self, angles_rad: np.ndarray) -> np.ndarray:
         """
@@ -113,6 +116,91 @@ class FeatureExtractor:
         return angles
 
 
+    def extract_features_for_residues(
+        self,
+        traj: TrajectoryObject,
+        protein_residues: mda.ResidueGroup,
+        slice_obj: slice = slice(None)
+    ) -> Tuple[Optional[Dict[int, np.ndarray]], int]:
+        """
+        Performs the expensive, one-time feature extraction for all residues
+        in the provided ResidueGroup. This is the core computational step.
+
+        Args:
+            traj: The MDAnalysis Universe object.
+            protein_residues: A ResidueGroup (e.g., from u.select_atoms('protein').residues)
+                              for which to calculate all features.
+            slice_obj: A slice object for the trajectory.
+
+        Returns:
+            - A dictionary mapping residue index (.ix) to its feature array (n_frames, 1, 6).
+            - The number of frames processed.
+        """
+        n_frames = self._get_sliced_length(traj, slice_obj)
+        if n_frames == 0:
+            print("      Warning: Slice results in 0 frames. Skipping extraction.")
+            return None, 0
+
+        print(f"    Calculating dihedrals for {len(protein_residues)} residues in one pass...")
+
+        try:
+            # Get selections for ALL residues at once
+            phi_selections = protein_residues.phi_selections()
+            psi_selections = protein_residues.psi_selections()
+            chi1_selections = protein_residues.chi1_selections()
+
+            # We need to know which residue corresponds to which angle
+            phi_res_indices = [res.ix for res in protein_residues if res.phi_selection() is not None]
+            psi_res_indices = [res.ix for res in protein_residues if res.psi_selection() is not None]
+            chi1_res_indices = [res.ix for res in protein_residues if res.chi1_selection() is not None]
+
+            all_selections = phi_selections + psi_selections + chi1_selections
+            if not all_selections:
+                print("      Warning: No valid dihedrals found for the entire protein selection.")
+                return None, 0
+
+            # --- Single, expensive calculation over the trajectory slice ---
+            all_angles_deg = self._calculate_dihedral_angle(all_selections, n_frames, slice_obj)
+            # -------------------------------------------------------------
+
+            # De-multiplex the results
+            n_phi = len(phi_selections)
+            n_psi = len(psi_selections)
+            phi_angles_all = all_angles_deg[:, :n_phi]
+            psi_angles_all = all_angles_deg[:, n_phi : n_phi + n_psi]
+            chi1_angles_all = all_angles_deg[:, n_phi + n_psi :]
+
+            # Create a per-residue dictionary to store results
+            # Shape: (n_frames, 3) for phi, psi, chi1
+            res_angle_map = {res.ix: np.zeros((n_frames, 3)) for res in protein_residues}
+
+            # Populate the map
+            for i, res_ix in enumerate(phi_res_indices):
+                res_angle_map[res_ix][:, 0] = phi_angles_all[:, i]
+            for i, res_ix in enumerate(psi_res_indices):
+                res_angle_map[res_ix][:, 1] = psi_angles_all[:, i]
+            for i, res_ix in enumerate(chi1_res_indices):
+                res_angle_map[res_ix][:, 2] = chi1_angles_all[:, i]
+
+            # Now, transform to circular coordinates and store in the final dict
+            all_residue_features: Dict[int, np.ndarray] = {}
+            for res_ix, angles_deg in res_angle_map.items():
+                # Reshape to (n_frames, 1, 3) to match transform function's expectation
+                angles_deg_reshaped = angles_deg[:, np.newaxis, :]
+                angles_rad = np.deg2rad(angles_deg_reshaped)
+                # Resulting shape is (n_frames, 1, 6)
+                all_residue_features[res_ix] = self._transform_to_circular(angles_rad)
+
+            print(f"      Bulk extraction complete. Found features for {len(all_residue_features)} residues.")
+            return all_residue_features, n_frames
+
+        except Exception as e:
+            print(f"    FATAL ERROR during bulk feature extraction: {e}")
+            import traceback
+            traceback.print_exc()
+            return None, 0
+
+
     def extract_all_features(
         self, 
         traj: TrajectoryObject, 
@@ -120,78 +208,69 @@ class FeatureExtractor:
     ) -> Tuple[FeatureDict, int]:
         """
         Extracts features for all defined residues on a given slice.
-        
+
+        **MODIFIED**: This method now acts as a filter. It expects to be called
+        AFTER the expensive `extract_features_for_residues` has been run. It
+        selects the pre-computed features based on `self.residue_selections`.
+
         Args:
             traj: The MDAnalysis Universe object.
             slice_obj: A slice object (e.g., slice(1000, 5000, 2)).
-            
+
         Returns:
             - A dictionary {selection_key: feature_array}
               where each array has shape (n_sliced_frames, n_residues, 6).
             - The number of frames actually processed (n_sliced_frames).
         """
-        all_features_dict: FeatureDict = {}
-        # Calculate the number of frames that will be processed
-        n_frames = self._get_sliced_length(traj, slice_obj)
-        print(f"  Extractor: Processing {n_frames} frames from slice {slice_obj}.")
+        if not self.residue_selections:
+            print("  Warning: FeatureExtractor has no residue selections. Returning empty results.")
+            return {}, 0
 
-        STANDARD_PROTEIN_RESNAMES = {
-            "ALA", "ARG", "ASN", "ASP", "CYS", "GLN", "GLU", "GLY", "HIS", 
-            "ILE", "LEU", "LYS", "MET", "PHE", "PRO", "SER", "THR", "TRP", 
-            "TYR", "VAL", "HID", "HIE", "HSD", "HSE", "HSP", "CYX",
-        }
+        # --- This is the new, efficient "bulk" calculation ---
+        # OPTIMIZATION: Instead of selecting the whole protein, we build a
+        # single selection string for only the residues we need.
+        combined_selection_string = "protein and (" + " or ".join(f"({sel})" for sel in self.residue_selections.values()) + ")"
+        
+        # This creates a ResidueGroup of only the aligned, filtered residues.
+        target_residues = traj.select_atoms(combined_selection_string).residues
+        
+        # Now, we run the expensive calculation ONLY on this small group.
+        all_residue_features, n_frames = self.extract_features_for_residues(
+            traj, target_residues, slice_obj
+        )
 
+        if all_residue_features is None:
+            return {}, 0
+
+        # --- This section now just filters the pre-computed results ---
+        filtered_features_dict: FeatureDict = {}
+        print("  Filtering pre-computed features based on config selections...")
         for key, sel_string in self.residue_selections.items():
-            print(f"    Processing: {key} ({sel_string})...")
-            
             try:
-                user_residue_group = traj.select_atoms(sel_string)
+                # Select all residues in the group to get their indices
+                target_residues_group = traj.select_atoms(sel_string).residues
                 
-                if len(user_residue_group.residues) == 0:
-                    print(f"      Warning: Selection '{sel_string}' found no residues. Skipping.")
+                if target_residues_group.n_residues > 0:
+                    # Collect the pre-computed features for each residue in the group
+                    feature_list_for_group = []
+                    all_found = True
+                    for res in target_residues_group:
+                        if res.ix in all_residue_features:
+                            feature_list_for_group.append(all_residue_features[res.ix])
+                        else:
+                            print(f"    Warning: Feature for resid {res.resid} (part of group '{key}') not found. Skipping group.")
+                            all_found = False
+                            break
+                    
+                    # If all features were found, concatenate them
+                    if all_found and feature_list_for_group:
+                        # Concatenate along the last axis (the feature dimension)
+                        # (n_frames, 1, 6), (n_frames, 1, 6) -> (n_frames, 1, 12)
+                        filtered_features_dict[key] = np.concatenate(feature_list_for_group, axis=-1)
+                else:
+                    print(f"    Warning: Selection '{sel_string}' for key '{key}' resolved to 0 residues. Skipping.")
                     continue
-
-                protein_residues = user_residue_group.residues[
-                    np.isin(user_residue_group.residues.resnames, list(STANDARD_PROTEIN_RESNAMES))
-                ]
-                
-                if len(protein_residues) == 0:
-                    print(f"      Warning: Selection '{sel_string}' contains no standard protein residues. Skipping.")
-                    continue
-                
-                phi_sel_list = protein_residues.residues.phi_selections()
-                psi_sel_list = protein_residues.residues.psi_selections()
-                chi1_sel_list = protein_residues.residues.chi1_selections()
-
-                n_phi = len(phi_sel_list)
-                n_psi = len(psi_sel_list)
-                
-                all_selections = phi_sel_list + psi_sel_list + chi1_sel_list
-                
-                if not all_selections:
-                    print(f"      Warning: No valid dihedrals found for {key}. Skipping.")
-                    continue
-
-                # Calculate angles *using the slice*
-                all_angles_deg = self._calculate_dihedral_angle(
-                    all_selections, 
-                    n_frames, 
-                    slice_obj
-                )
-                
-                phi_angles = all_angles_deg[:, :n_phi]
-                psi_angles = all_angles_deg[:, n_phi : n_phi + n_psi]
-                chi1_angles = all_angles_deg[:, n_phi + n_psi :]
-
-                all_angles_deg_stacked = np.stack([phi_angles, psi_angles, chi1_angles], axis=-1)
-                all_angles_rad = np.deg2rad(all_angles_deg_stacked)
-                all_features_dict[key] = self._transform_to_circular(all_angles_rad)
-                print(f"      Extracted features (Zeros for missing). Shape: {all_features_dict[key].shape}")
-
             except Exception as e:
-                print(f"    FATAL ERROR processing {key} with selection '{sel_string}': {e}")
-                import traceback
-                traceback.print_exc()
-                continue
+                print(f"    Warning: Could not resolve selection '{sel_string}' for key '{key}'. Skipping. Error: {e}")
 
-        return all_features_dict, n_frames
+        return filtered_features_dict, n_frames

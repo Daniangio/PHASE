@@ -6,7 +6,7 @@ Defines endpoints for job submission, status polling, and result retrieval.
 import shutil
 import json
 from fastapi import APIRouter, HTTPException, Depends, Request, UploadFile, File, Form
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 import uuid
 from pathlib import Path
 from rq.job import Job
@@ -56,6 +56,10 @@ async def save_uploaded_files(
             print(f"Warning: Unknown file key '{key}' skipped.")
             continue 
         
+        # This check is important: if file_obj is None (from File(None)), skip it
+        if file_obj is None:
+            continue
+
         # Use the original filename for saving
         file_path = job_folder / file_obj.filename
         try:
@@ -71,9 +75,15 @@ async def save_uploaded_files(
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Failed to save file {file_obj.filename}: {e}")
 
-    if len(saved_paths) != 5:
-        # This check is still valid and important
-        raise HTTPException(status_code=400, detail=f"File mapping failed. Mapped {len(saved_paths)}/5 required files. Check form field names.")
+    # --- BUG FIX ---
+    # The old check `if len(saved_paths) != 5:` was incorrect.
+    # We must validate that the 4 *required* files are present.
+    # The 'config' file is optional.
+    required_paths = ["active_traj_path", "active_topo_path", "inactive_traj_path", "inactive_topo_path"]
+    missing_files = [key for key in required_paths if key not in saved_paths]
+    if missing_files:
+            raise HTTPException(status_code=400, detail=f"Missing required files: {', '.join(missing_files)}")
+    # --- END BUG FIX ---
     
     return saved_paths
 
@@ -142,9 +152,9 @@ async def get_job_status(job_id: str, request: Request):
 
 async def submit_job(
     analysis_type: str,
-    files_dict: Dict[str, UploadFile], # <-- CHANGED: Now accepts a dict
-    params: Dict[str, Any],
-    task_queue: Any # Dependency
+    files_dict: Dict[str, UploadFile], # Now contains 4 or 5 files
+    params: Dict[str, Any],            # Now contains optional 'residue_selections_dict'
+    task_queue: Any                    # Dependency
 ):
     """Helper function to enqueue any analysis job."""
     
@@ -154,27 +164,36 @@ async def submit_job(
     job_folder.mkdir(parents=True, exist_ok=True)
     
     try:
-        # 2. Save all 5 files using the new dict-based helper
-        if len(files_dict) != 5:
-            raise HTTPException(status_code=400, detail="Expected exactly 5 file fields.")
+        # 2. Save all uploaded files (4 or 5)
+        saved_paths = await save_uploaded_files(files_dict, job_folder)
         
-        saved_paths = await save_uploaded_files(files_dict, job_folder) # <-- Pass dict
+        # 3. Prepare arguments for the worker task
+        # --- BUG FIX ---
+        # Pop worker-specific params. `params` will be passed to the worker.
+        residue_selections_dict = params.pop("residue_selections_dict", None)
+        # Get the config_path *if it was saved*
+        config_path = saved_paths.get('config_path')
         
-        # 3. Enqueue the Master Job
+        # 4. Enqueue the Master Job
+        # The `run_analysis_job` function in tasks.py expects 6 arguments.
+        # We must pass them all, respecting their order.
         job = task_queue.enqueue(
             run_analysis_job,
             args=(
-                job_uuid,
-                analysis_type,
-                saved_paths,
-                params
+                job_uuid,                 # 1. job_uuid
+                analysis_type,            # 2. analysis_type
+                saved_paths,              # 3. file_paths
+                params,                   # 4. params (now without residue_selections_dict)
+                config_path,              # 5. config_path (can be None)
+                residue_selections_dict   # 6. residue_selections_dict (can be None)
             ),
             job_timeout='2h',
             result_ttl=86400, # Keep result in Redis for 1 day
             job_id=f"analysis-{job_uuid}" # Use a predictable RQ job ID
         )
+        # --- END BUG FIX ---
 
-        # 4. Return the RQ job ID for polling
+        # 5. Return the RQ job ID for polling
         return {"status": "queued", "job_id": job.id, "analysis_uuid": job_uuid}
 
     except Exception as e:
@@ -182,6 +201,7 @@ async def submit_job(
             shutil.rmtree(job_folder)
         if isinstance(e, HTTPException):
             raise e
+        print(f"Error during job submission: {e}") # Log for debugging
         raise HTTPException(status_code=500, detail=f"Job submission failed: {str(e)}")
 
 @api_router.post("/submit/static", summary="Submit a Static Reporters analysis")
@@ -190,16 +210,37 @@ async def submit_static_job(
     active_topo: UploadFile = File(...),
     inactive_traj: UploadFile = File(...),
     inactive_topo: UploadFile = File(...),
-    config: UploadFile = File(...),
+    # --- BUG FIX: Both config and residue_selections_json are now Optional ---
+    config: Optional[UploadFile] = File(None),
+    residue_selections_json: Optional[str] = Form(None),
+    # --- END BUG FIX ---
+    active_slice: Optional[str] = Form(None),
+    inactive_slice: Optional[str] = Form(None),
     task_queue: get_queue = Depends(),
 ):
-    # CHANGED: Create a dict to preserve file identity
+    # Create the files dict,
+    # `config` will be None if not provided by the frontend.
     files_dict = {
         "active_traj": active_traj, "active_topo": active_topo,
         "inactive_traj": inactive_traj, "inactive_topo": inactive_topo,
         "config": config
     }
-    return await submit_job("static", files_dict, {}, task_queue)
+    
+    # Prepare params for the worker
+    params = {
+        "active_slice": active_slice,
+        "inactive_slice": inactive_slice,
+    }
+    
+    # --- BUG FIX: Handle manual selections ---
+    if residue_selections_json:
+        try:
+            params["residue_selections_dict"] = json.loads(residue_selections_json)
+        except json.JSONDecodeError:
+            raise HTTPException(status_code=400, detail="Invalid JSON format for residue_selections_json.")
+    # --- END BUG FIX ---
+            
+    return await submit_job("static", files_dict, params, task_queue)
 
 @api_router.post("/submit/dynamic", summary="Submit a Dynamic (Transfer Entropy) analysis")
 async def submit_dynamic_job(
@@ -207,17 +248,34 @@ async def submit_dynamic_job(
     active_topo: UploadFile = File(...),
     inactive_traj: UploadFile = File(...),
     inactive_topo: UploadFile = File(...),
-    config: UploadFile = File(...),
+    # --- BUG FIX: Both config and residue_selections_json are now Optional ---
+    config: Optional[UploadFile] = File(None),
+    residue_selections_json: Optional[str] = Form(None),
+    # --- END BUG FIX ---
     te_lag: int = Form(10),
+    active_slice: Optional[str] = Form(None),
+    inactive_slice: Optional[str] = Form(None),
     task_queue: get_queue = Depends(),
 ):
-    # CHANGED: Create a dict
     files_dict = {
         "active_traj": active_traj, "active_topo": active_topo,
         "inactive_traj": inactive_traj, "inactive_topo": inactive_topo,
         "config": config
     }
-    params = {"te_lag": te_lag}
+    params = {
+        "te_lag": te_lag,
+        "active_slice": active_slice,
+        "inactive_slice": inactive_slice,
+    }
+
+    # --- BUG FIX: Handle manual selections ---
+    if residue_selections_json:
+        try:
+            params["residue_selections_dict"] = json.loads(residue_selections_json)
+        except json.JSONDecodeError:
+            raise HTTPException(status_code=400, detail="Invalid JSON format for residue_selections_json.")
+    # --- END BUG FIX ---
+
     return await submit_job("dynamic", files_dict, params, task_queue)
 
 @api_router.post("/submit/qubo", summary="Submit a QUBO analysis")
@@ -226,17 +284,34 @@ async def submit_qubo_job(
     active_topo: UploadFile = File(...),
     inactive_traj: UploadFile = File(...),
     inactive_topo: UploadFile = File(...),
-    config: UploadFile = File(...),
+    # --- BUG FIX: Both config and residue_selections_json are now Optional ---
+    config: Optional[UploadFile] = File(None),
+    residue_selections_json: Optional[str] = Form(None),
+    # --- END BUG FIX ---
     target_switch: str = Form(...),
+    active_slice: Optional[str] = Form(None),
+    inactive_slice: Optional[str] = Form(None),
     task_queue: get_queue = Depends(),
 ):
-    # CHANGED: Create a dict
     files_dict = {
         "active_traj": active_traj, "active_topo": active_topo,
         "inactive_traj": inactive_traj, "inactive_topo": inactive_topo,
         "config": config
     }
-    params = {"target_switch": target_switch}
+    params = {
+        "target_switch": target_switch,
+        "active_slice": active_slice,
+        "inactive_slice": inactive_slice,
+    }
+    
+    # --- BUG FIX: Handle manual selections ---
+    if residue_selections_json:
+        try:
+            params["residue_selections_dict"] = json.loads(residue_selections_json)
+        except json.JSONDecodeError:
+            raise HTTPException(status_code=400, detail="Invalid JSON format for residue_selections_json.")
+    # --- END BUG FIX ---
+
     return await submit_job("qubo", files_dict, params, task_queue)
 
 # --- Results Endpoints ---
@@ -246,7 +321,10 @@ async def get_results_list():
     # ... (existing get_results_list code remains unchanged)
     results_list = []
     try:
-        for result_file in RESULTS_DIR.glob("*.json"):
+        # Sort by mtime (newest first)
+        sorted_files = sorted(RESULTS_DIR.glob("*.json"), key=lambda f: f.stat().st_mtime, reverse=True)
+        
+        for result_file in sorted_files:
             try:
                 with open(result_file, 'r') as f:
                     data = json.load(f)
@@ -259,10 +337,9 @@ async def get_results_list():
                     "completed_at": data.get("completed_at"),
                     "error": data.get("error"),
                 })
-            except Exception:
-                print(f"Failed to read result file: {result_file}")
+            except Exception as e:
+                print(f"Failed to read result file: {result_file}. Error: {e}")
         
-        results_list.sort(key=lambda x: x.get("created_at") or "", reverse=True)
         return results_list
 
     except Exception as e:

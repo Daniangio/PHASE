@@ -6,13 +6,13 @@ import traceback
 from pathlib import Path
 from datetime import datetime
 from rq import get_current_job
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 # Import core analysis components
 from alloskin.io.readers import MDAnalysisReader
 from alloskin.features.extraction import FeatureExtractor
 from alloskin.pipeline.builder import DatasetBuilder
-from alloskin.analysis.static import StaticReporters
+from alloskin.analysis.static import StaticReportersRF
 from alloskin.analysis.qubo import QUBOSet
 from alloskin.analysis.dynamic import TransferEntropy
 
@@ -22,14 +22,25 @@ RESULTS_DIR = Path("/app/data/results")
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
 # --- Helper Function ---
-def get_builder(config_path: str) -> DatasetBuilder:
+def get_builder(
+    config_path: Optional[str] = None, 
+    residue_selections_dict: Optional[Dict[str, str]] = None
+) -> DatasetBuilder:
     """Initializes the core components."""
-    with open(config_path, 'r') as f:
-        config = yaml.safe_load(f)
-    
-    residue_selections = config.get('residue_selections')
-    if not residue_selections:
-        raise ValueError("'residue_selections' not found in config")
+    residue_selections = None
+
+    if residue_selections_dict is not None:
+        residue_selections = residue_selections_dict
+        print(f"[Worker] Using provided residue selections: {residue_selections}")
+    elif config_path:
+        print(f"[Worker] Loading config from {config_path}")
+        with open(config_path, 'r') as f:
+            config = yaml.safe_load(f) or {} # Handle empty config file
+        residue_selections = config.get('residue_selections')
+        if residue_selections is None:
+            print("[Worker] Warning: 'residue_selections' not found in config file. Will analyze all protein residues.")
+    else:
+        print("[Worker] No config file or residue selections provided. Will analyze all protein residues.")
         
     reader = MDAnalysisReader()
     extractor = FeatureExtractor(residue_selections)
@@ -42,7 +53,9 @@ def run_analysis_job(
     job_uuid: str,
     analysis_type: str, 
     file_paths: Dict[str, str],
-    params: Dict[str, Any]
+    params: Dict[str, Any],
+    config_path: Optional[str] = None, # New: Path to uploaded config file
+    residue_selections_dict: Optional[Dict[str, str]] = None # New: Direct residue selections dict
 ):
     """
     The main, long-running analysis function.
@@ -71,21 +84,28 @@ def run_analysis_job(
     try:
         # Step 1: Initialize components
         save_progress("Initializing Analysis Pipeline", 10)
-        builder = get_builder(file_paths['config_path'])
+        builder = get_builder(config_path=config_path, residue_selections_dict=residue_selections_dict)
         
         # Step 2: Prepare data based on analysis type
         analysis_data = None
+        active_slice = params.get("active_slice")
+        inactive_slice = params.get("inactive_slice")
+
         if analysis_type in ['static', 'qubo']:
             save_progress("Preparing static dataset", 30)
             analysis_data = builder.prepare_static_analysis_data(
                 file_paths['active_traj_path'], file_paths['active_topo_path'],
-                file_paths['inactive_traj_path'], file_paths['inactive_topo_path']
+                file_paths['inactive_traj_path'], file_paths['inactive_topo_path'],
+                active_slice=active_slice,
+                inactive_slice=inactive_slice
             )
         elif analysis_type == 'dynamic':
             save_progress("Preparing dynamic dataset", 30)
             analysis_data = builder.prepare_dynamic_analysis_data(
                 file_paths['active_traj_path'], file_paths['active_topo_path'],
-                file_paths['inactive_traj_path'], file_paths['inactive_topo_path']
+                file_paths['inactive_traj_path'], file_paths['inactive_topo_path'],
+                active_slice=active_slice,
+                inactive_slice=inactive_slice
             )
         else:
             raise ValueError(f"Unknown analysis type: {analysis_type}")
@@ -94,7 +114,7 @@ def run_analysis_job(
         save_progress(f"Running {analysis_type} analysis", 60)
         
         if analysis_type == 'static':
-            analyzer = StaticReporters()
+            analyzer = StaticReportersRF()
             # No extra params needed
             job_results = analyzer.run(analysis_data)
             
@@ -124,7 +144,7 @@ def run_analysis_job(
     finally:
         # Step 5: Save persistent JSON result
         save_progress("Saving persistent result", 95)
-        result_payload["completed_at"] = datetime.utcnow().isoformat()
+        result_payload["completed_at"] = datetime.utcnow().isoformat() #
         
         result_filepath = RESULTS_DIR / f"{job_uuid}.json"
         try:
@@ -139,7 +159,7 @@ def run_analysis_job(
 
         # Clean up the temporary upload folder
         try:
-            upload_dir = Path(file_paths['config_path']).parent
+            upload_dir = Path("/app/data/uploads") / job_uuid # Derive from job_uuid
             if upload_dir.exists() and upload_dir.name == job_uuid:
                 shutil.rmtree(upload_dir)
                 print(f"Cleaned up upload directory: {upload_dir}")

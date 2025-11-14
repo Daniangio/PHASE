@@ -154,21 +154,44 @@ class DatasetBuilder:
         active_selections_final = {}
         inactive_selections_final = {}
 
+        # Get the selections to iterate over. If none were provided, generate them now.
+        selections_to_process = self.config_extractor.residue_selections
+        if not selections_to_process:
+            print("  No residue selections provided. Generating selections for all protein residues...")
+            selections_to_process = {
+                f"res_{res.resid}": f"resid {res.resid}" for res in act_prot_res
+            }
+            print(f"  Generated {len(selections_to_process)} selections to check against inactive state.")
+
         # We iterate through the original selections requested by the user
-        for key, selection_str in self.config_extractor.residue_selections.items():
+        for key, selection_str in selections_to_process.items():
             try:
                 # Select the residue(s) in the active trajectory based on the user's string
-                selected_ag = u_act.select_atoms(selection_str)
-                if selected_ag.n_residues == 1:
-                    res_act = selected_ag.residues[0]
-                    # Is this residue part of our valid alignment?
-                    if res_act.ix in alignment_map:
-                        inact_res_ix = alignment_map[res_act.ix]
-                        res_inact = inact_prot_res[inact_res_ix]
-                        
-                        # Create new, specific selection strings using resid
-                        active_selections_final[key] = f"resid {res_act.resid}"
-                        inactive_selections_final[key] = f"resid {res_inact.resid}"
+                selected_residues = u_act.select_atoms(selection_str).residues
+
+                if selected_residues.n_residues > 0:
+                    aligned_active_resids = []
+                    aligned_inactive_resids = []
+                    all_residues_in_group_aligned = True
+
+                    for res_act in selected_residues:
+                        # Is this residue part of our valid alignment?
+                        if res_act.ix in alignment_map:
+                            inact_res_ix = alignment_map[res_act.ix]
+                            res_inact = inact_prot_res[inact_res_ix]
+                            aligned_active_resids.append(str(res_act.resid))
+                            aligned_inactive_resids.append(str(res_inact.resid))
+                        else:
+                            # If any residue in the group is not aligned, we must skip the whole group.
+                            print(f"  Warning: Residue {res_act.resid} in selection '{key}' is not in the alignment. Skipping this entire group.")
+                            all_residues_in_group_aligned = False
+                            break
+                    
+                    # If all residues were aligned, create the new selection strings
+                    if all_residues_in_group_aligned and aligned_active_resids:
+                        active_selections_final[key] = f"resid {' '.join(aligned_active_resids)}"
+                        inactive_selections_final[key] = f"resid {' '.join(aligned_inactive_resids)}"
+
             except Exception as e:
                 print(f"  Warning: Could not process selection '{selection_str}' for key '{key}'. Skipping. Error: {e}")
         
@@ -221,9 +244,14 @@ class DatasetBuilder:
             raise ValueError("No common aligned residues found based on config. Cannot proceed.")
             
         # --- 3. Parallel Extract (CPU Bound) ---
+        # Create new extractors with the *filtered and aligned* selections
+        print(active_selections)
+        print(inactive_selections)
         extractor_act = FeatureExtractor(active_selections)
         extractor_inact = FeatureExtractor(inactive_selections)
         
+        print(f"  Extractor for ACTIVE state initialized for {len(extractor_act.residue_selections)} residues.")
+        print(f"  Extractor for INACTIVE state initialized for {len(extractor_inact.residue_selections)} residues.")
         print("Submitting parallel feature extraction tasks...")
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
             future_act_extract = executor.submit(
@@ -265,7 +293,7 @@ class DatasetBuilder:
         - Concatenates *aligned* features into a single (time-scrambled) dataset.
         - Creates a corresponding binary state label vector Y.
         """
-        print("\n--- Preparing STATIC Analysis Dataset (Goals 1 & 2) ---")
+        print("\n--- Preparing STATIC Analysis Dataset ---")
         
         features_active, n_frames_active, \
         features_inactive, n_frames_inactive, \
@@ -312,11 +340,11 @@ class DatasetBuilder:
         inactive_slice: Optional[str] = None
     ) -> Tuple[FeatureDict, FeatureDict]:
         """
-        Prepares data for GOAL 3 (Dynamic Analysis).
+        Prepares data for Dynamic Analysis.
         - Loads/aligns/extracts active and inactive trajectories concurrently.
         - Returns two SEPARATE, TIME-ORDERED, and ALIGNED feature sets.
         """
-        print("\n--- Preparing DYNAMIC Analysis Dataset (Goal 3) ---")
+        print("\n--- Preparing DYNAMIC Analysis Dataset ---")
 
         features_active, n_frames_active, \
         features_inactive, n_frames_inactive, \
