@@ -7,11 +7,16 @@
 # These selections will be used by the FeatureExtractor.
 
 residue_selections:
-  res_10: 'resid 10'
+  res_1: 'resid 1'
+  res_2: 'resid 2'
+  res_3: 'resid 3'
+  res_4: 'resid 4'
   res_20: 'resid 20'
-  # res_50_TM1: 'resid 50'
-  # res_131_DRY: 'resid 131'
-  # res_132_DRY: 'resid 132'
-  # res_133_DRY: 'resid 133'
-  # res_320_NPxxY: 'resid 320'
-  # res_323_NPxxY: 'resid 323'
+  res_50: 'resid 50'
+  res_100: 'resid 100'
+  res_50_TM1: 'resid 50'
+  res_131_DRY: 'resid 131'
+  res_132_DRY: 'resid 132'
+  res_133_DRY: 'resid 133'
+  res_150_NPxxY: 'resid 150'
+  res_155_NPxxY: 'resid 155'

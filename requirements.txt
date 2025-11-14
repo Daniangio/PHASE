@@ -2,7 +2,9 @@
 # These are also listed in pyproject.toml,
 # but this file is useful for CI/CD and Docker.
 numpy
+biopython
 MDAnalysis
+scikit-learn
 # dadapy
 # idtxl Must install from source
 pyyaml
