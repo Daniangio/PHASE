@@ -1,17 +1,6 @@
 """
 AllosKin: Command-Line Interface (CLI)
 """
-
-# --- 1. Set Environment Variables ---
-# This MUST be done before any libraries (numpy, dadapy)
-# are imported, to prevent multiprocessing deadlocks.
-# import os
-# os.environ["OMP_NUM_THREADS"] = "1"
-# os.environ["MKL_NUM_THREADS"] = "1"
-# os.environ["OPENBLAS_NUM_THREADS"] = "1"
-# os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
-# os.environ["NUMEXPR_NUM_THREADS"] = "1"
-
 import argparse
 import yaml
 import sys
@@ -21,6 +10,7 @@ from alloskin.io.readers import MDAnalysisReader
 from alloskin.features.extraction import FeatureExtractor
 from alloskin.pipeline.builder import DatasetBuilder
 from alloskin.analysis.static import StaticReportersRF
+from alloskin.analysis.qubo import QUBOSet
 from alloskin.analysis.dynamic import TransferEntropy
 
 
@@ -63,9 +53,8 @@ def main():
         required=True, 
         help="Path to the residue_selections.yml config file."
     )
-    parser.add_argument("--te_lag", type=int, default=10, help="Lag time for TE (in frames). Default: 10.")
     
-    # --- New Arguments for Slicing and Multiprocessing ---
+    # --- Slicing and Multiprocessing ---
     parser.add_argument(
         "--active_slice", 
         type=str, 
@@ -84,7 +73,41 @@ def main():
         default=None, 
         help="Number of parallel workers for analysis. (Default: all available cores)"
     )
-    # --- End New Arguments ---
+
+    # --- QUBO Arguments ---
+    parser.add_argument(
+        '--target_residues', 
+        nargs='+', 
+        help='REQUIRED for QUBO. List of target residue keys (e.g., res_131 res_140)'
+    )
+    parser.add_argument(
+        '--qubo_lambda', 
+        type=float, 
+        default=1.0, 
+        help='QUBO redundancy penalty (lambda). Default: 1.0'
+    )
+    parser.add_argument(
+        '--qubo_solutions', 
+        type=int, 
+        default=5, 
+        help='Number of optimal solutions to find. Default: 5'
+    )
+    parser.add_argument(
+        '--qubo_cv_folds', 
+        type=int, 
+        default=3, 
+        help='CV folds for QUBO RF regressors. Default: 3'
+    )
+    parser.add_argument(
+        '--qubo_n_estimators', 
+        type=int, 
+        default=50, 
+        help='Number of trees for QUBO RF regressors. Default: 50'
+    )
+
+    # --- Dynamic Arguments ---
+    parser.add_argument("--te_lag", type=int, default=10, help="Lag time for TE (in frames). Default: 10.")
+    
 
     args = parser.parse_args()
 
@@ -109,7 +132,8 @@ def main():
     
     if args.analysis == "static":
         print("\n--- Preparing Data for Static Analysis ---")
-        static_data = builder.prepare_static_analysis_data(
+        # prepare_static_analysis_data returns (all_features_static, labels_Y, mapping)
+        static_data, labels_Y, mapping = builder.prepare_static_analysis_data(
             args.active_traj, args.active_topo,
             args.inactive_traj, args.inactive_topo,
             active_slice=args.active_slice,
@@ -117,28 +141,58 @@ def main():
         )
         print("\n--- Running Static Reporters (Random Forest) ---")
         analyzer = StaticReportersRF()
-        results = analyzer.run(static_data, num_workers=args.num_workers)
+        # The analyzer only needs the first two items
+        results = analyzer.run(
+            (static_data, labels_Y), 
+            num_workers=args.num_workers
+        )
         print("\n--- Final Static Results (Sorted by best reporter, highest accuracy) ---")
         print(results)
 
     elif args.analysis == "qubo":
         print("\n--- Preparing Data for QUBO Analysis ---")
-        static_data = builder.prepare_static_analysis_data(
+        
+        if not args.target_residues:
+            print("Error: --target_residues argument is required for QUBO analysis.", file=sys.stderr)
+            print("Example: --target_residues res_131 res_140", file=sys.stderr)
+            sys.exit(1)
+
+        # QUBO also uses the static dataset
+        static_data, labels_Y, mapping = builder.prepare_static_analysis_data(
             args.active_traj, args.active_topo,
             args.inactive_traj, args.inactive_topo,
             active_slice=args.active_slice,
             inactive_slice=args.inactive_slice
         )
-        # analyzer = QUBOSet()
-        # results = analyzer.run(static_data, target_switch='res_131', num_workers=args.num_workers)
+        
+        # Pass all data and kwargs to the analyzer
+        qubo_data_tuple = (static_data, labels_Y, mapping)
+        qubo_kwargs = {
+            "target_residues": args.target_residues,
+            "lambda_redundancy": args.qubo_lambda,
+            "num_solutions": args.qubo_solutions,
+            "qubo_cv_folds": args.qubo_cv_folds,
+            "qubo_n_estimators": args.qubo_n_estimators
+        }
+
         print("--- Running Optimal Predictive Set (QUBO) ---")
-        print("NOTE: QUBO analyzer is not implemented in this scaffold.")
-        print("It would use the same `static_data` as the 'static' analysis.")
-        results = "Not Implemented"
+        analyzer = QUBOSet()
+        results = analyzer.run(
+            qubo_data_tuple, 
+            num_workers=args.num_workers, 
+            **qubo_kwargs
+        )
+        
+        print("\n--- Final QUBO Results ---")
+        # Pretty-print the dictionary results
+        import json
+        print(json.dumps(results, indent=2))
+
 
     elif args.analysis == "dynamic":
         print("\n--- Preparing Data for Dynamic Analysis ---")
-        dynamic_data = builder.prepare_dynamic_analysis_data(
+        # prepare_dynamic_analysis_data returns (features_active, features_inactive, mapping)
+        features_active, features_inactive, mapping = builder.prepare_dynamic_analysis_data(
             args.active_traj, args.active_topo,
             args.inactive_traj, args.inactive_topo,
             active_slice=args.active_slice,
@@ -146,9 +200,14 @@ def main():
         )
         print("--- Running Dynamic 'Orchestrated Action' (Transfer Entropy) ---")
         analyzer = TransferEntropy()
-        results = analyzer.run(dynamic_data, lag=args.te_lag, num_workers=args.num_workers)
+        # The analyzer only needs the first two items
+        results = analyzer.run(
+            (features_active, features_inactive), 
+            lag=args.te_lag, 
+            num_workers=args.num_workers
+        )
         print("\n--- Final Dynamic Results ---")
         print(results)
 
-if __name__ == "__main__":
+if __name__ == "__main":
     main()

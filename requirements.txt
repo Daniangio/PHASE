@@ -5,6 +5,8 @@ numpy
 biopython
 MDAnalysis
 scikit-learn
+pyqubo
+dwave-neal
 # dadapy
 # idtxl Must install from source
 pyyaml

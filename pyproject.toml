@@ -22,6 +22,8 @@ classifiers = [
 dependencies = [
     "numpy",
     "MDAnalysis",
+    "pyqubo",
+    "dwave-neal",
     # "dadapy",
     # "idtxl", # Or "pyJIDT" if you prefer
     "pyyaml",
