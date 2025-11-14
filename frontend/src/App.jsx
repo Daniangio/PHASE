@@ -2,26 +2,29 @@ import React, { useState, useEffect, useRef } from 'react';
 import { 
   Upload, Activity, Server, CheckCircle, XCircle, AlertTriangle, 
   Loader2, Database, FileText, ChevronRight, ArrowLeft, Brain, Sliders, Zap,
-  Eye, // <-- NEW ICON
-  Palette // <-- NEW ICON
+  Eye, 
+  Palette
 } from 'lucide-react';
 
 /*
 ================================================================================
-Main Application Component
+Main Application Component (App)
 ================================================================================
 */
 
 /**
  * Main App component. Manages routing between pages using internal state.
+ * * This file is structured to simulate a modular project.
+ * Each major "Page" component is grouped with its sub-components
+ * and delineated by `// --- ... ---` comments.
  */
 export default function App() {
   const [page, setPage] = useState('submit');
-  const [pollingJobId, setPollingJobId] = useState(null);
-  const [selectedResultId, setSelectedResultId] = useState(null); // Used by Detail and Visualize pages
+  const [pollingJobId, setPollingJobId] = useState(null); // This is the RQ_JOB_ID
+  const [selectedResultId, setSelectedResultId] = useState(null); // This is the JOB_UUID
 
-  const navigateToStatus = (newJobId) => {
-    setPollingJobId(newJobId);
+  const navigateToStatus = (rqJobId) => {
+    setPollingJobId(rqJobId);
     setPage('status');
   };
 
@@ -29,17 +32,15 @@ export default function App() {
     setPage('results');
   };
 
-  const navigateToResultDetail = (resultId) => {
-    setSelectedResultId(resultId);
+  const navigateToResultDetail = (jobUUID) => {
+    setSelectedResultId(jobUUID);
     setPage('result_detail');
   };
 
-  // --- NEW NAVIGATION ---
-  const navigateToVisualize = (resultId) => {
-    setSelectedResultId(resultId);
+  const navigateToVisualize = (jobUUID) => {
+    setSelectedResultId(jobUUID);
     setPage('visualize_result');
   };
-  // --- END NEW ---
 
   /**
    * Render the currently active page component based on the 'page' state.
@@ -49,28 +50,37 @@ export default function App() {
       case 'submit':
         return <SubmitJobPage onJobSubmitted={navigateToStatus} />;
       case 'status':
-        return <JobStatusPage jobId={pollingJobId} onNavigateToResults={navigateToResults} />;
+        return (
+          <JobStatusPage 
+            jobId={pollingJobId} 
+            onNavigateToResults={navigateToResults}
+            onNavigateToResultDetail={navigateToResultDetail}
+          />
+        );
       case 'health':
         return <HealthCheckPage />;
       case 'results':
-        return <ResultsListPage onSelectResult={navigateToResultDetail} />;
+        return (
+          <ResultsListPage 
+            onSelectResult={navigateToResultDetail}
+            onSelectRunningJob={navigateToStatus}
+          />
+        );
       case 'result_detail':
         return (
           <ResultDetailPage 
             resultId={selectedResultId} 
             onBack={() => setPage('results')} 
-            onVisualize={navigateToVisualize} // <-- NEW PROP
+            onVisualize={navigateToVisualize}
           />
         );
-      // --- NEW PAGE CASE ---
       case 'visualize_result':
         return (
           <VisualizeResultPage 
             resultId={selectedResultId} 
-            onBack={() => setPage('result_detail')} // Go back to the detail page
+            onBack={() => setPage('result_detail')} 
           />
         );
-      // --- END NEW ---
       default:
         return <SubmitJobPage onJobSubmitted={navigateToStatus} />;
     }
@@ -104,7 +114,7 @@ export default function App() {
 
 /*
 ================================================================================
-Navigation Component
+Navigation Component (Navbar)
 ================================================================================
 */
 
@@ -116,7 +126,6 @@ const Navbar = ({ setPage, currentPage }) => {
   ];
 
   const getLinkClasses = (pageName) => {
-    // Highlight 'View Results' even when on a sub-page
     const isResultsActive = ['results', 'status', 'result_detail', 'visualize_result'].includes(currentPage);
     
     let isActive = currentPage === pageName;
@@ -146,7 +155,7 @@ const Navbar = ({ setPage, currentPage }) => {
           <span>{item.label}</span>
         </button>
       ))}
-      {currentPage === 'status' && (
+      {(currentPage === 'status' && !['results', 'result_detail', 'visualize_result'].includes(currentPage)) && (
         <button
           onClick={() => setPage('status')}
           className={getLinkClasses('status')}
@@ -156,16 +165,169 @@ const Navbar = ({ setPage, currentPage }) => {
         </button>
       )}
     </nav>
-  );
+  ); // <-- ERROR FIX: Added closing parenthesis for the return() statement.
 };
+
 
 /*
 ================================================================================
-Job Submission Page (Unchanged)
+Shared Utility Components (Errors, Loaders, Upload)
 ================================================================================
 */
+
+const ErrorDisplay = ({ error }) => (
+  <div className="bg-red-900 border border-red-700 text-red-100 p-3 rounded-md flex items-center space-x-2">
+    <XCircle className="h-5 w-5" /> <span>{error}</span>
+  </div>
+);
+
+const FullPageLoader = () => (
+    <div className="flex justify-center items-center h-64">
+        <Loader2 className="h-12 w-12 text-cyan-400 animate-spin" />
+    </div>
+);
+
+// --- MODIFIED: Added drag counter to fix flickering ---
+const FileDropzone = ({ name, label, file, onChange }) => {
+  const [isDragging, setIsDragging] = useState(false);
+  // Ref to track drag event depth
+  const dragCounter = useRef(0);
+
+  const handleDragEnter = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dragCounter.current++;
+    if (!isDragging) {
+      setIsDragging(true);
+    }
+  };
+
+  const handleDragLeave = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dragCounter.current--;
+    if (dragCounter.current === 0) {
+      setIsDragging(false);
+    }
+  };
+
+  const handleDragOver = (e) => {
+    e.preventDefault();
+    e.stopPropagation(); // This is crucial to mark as a drop target
+  };
+
+  const handleDrop = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(false);
+    dragCounter.current = 0; // Reset counter
+
+    const droppedFiles = e.dataTransfer.files;
+    if (droppedFiles && droppedFiles.length > 0) {
+      // Simulate the event structure that onChange expects
+      const syntheticEvent = {
+        target: {
+          name: name,
+          files: droppedFiles,
+        },
+      };
+      onChange(syntheticEvent);
+    }
+  };
+
+  return (
+    <div>
+      <label className="block text-sm font-medium text-gray-300 mb-1">{label}</label>
+      <div
+        className={`mt-1 flex justify-center px-6 pt-5 pb-6 border-2 ${
+          isDragging ? 'border-cyan-500' : 'border-gray-600' // Highlight when dragging
+        } border-dashed rounded-md transition-colors`}
+        onDragEnter={handleDragEnter}
+        onDragLeave={handleDragLeave}
+        onDragOver={handleDragOver}
+        onDrop={handleDrop}
+      >
+        <div className="space-y-1 text-center">
+          <svg className="mx-auto h-10 w-10 text-gray-500" stroke="currentColor" fill="none" viewBox="0 0 48 48" aria-hidden="true">
+            <path d="M28 8H12a4 4 0 00-4 4v20m32-12v8m0 0v8a4 4 0 01-4 4H12a4 4 0 01-4-4v-4m32-4l-3.172-3.172a4 4 0 00-5.656 0L28 28M8 32l9.172-9.172a4 4 0 015.656 0L28 28m0 0l4 4m4-24h8m-4-4v8" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+          <div className="flex text-sm text-gray-400">
+            <label htmlFor={name} className="relative cursor-pointer bg-gray-900 rounded-md font-medium text-cyan-500 hover:text-cyan-400 focus-within:outline-none focus-within:ring-2 focus-within:ring-offset-2 focus-within:ring-offset-gray-900 focus-within:ring-cyan-500">
+              <span>Upload a file</span>
+              <input id={name} name={name} type="file" className="sr-only" onChange={onChange} />
+            </label>
+            <p className="pl-1">or drag and drop</p>
+          </div>
+          {file ? (
+            <p className="text-xs text-green-400 truncate max-w-xs">{file.name}</p>
+          ) : (
+            <p className="text-xs text-gray-500">Up to 500MB</p>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+/**
+ * Utility function to handle XHR uploads with progress.
+ * Returns a Promise that resolves with the parsed JSON response or rejects with an Error.
+ */
+function xhrUpload(url, formData, onProgress) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    
+    xhr.open("POST", url, true);
+
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable) {
+        const percentComplete = Math.round((e.loaded / e.total) * 100);
+        onProgress(percentComplete);
+      }
+    };
+
+    xhr.onload = () => {
+      let responseData;
+      try {
+        if (xhr.responseText) {
+          responseData = JSON.parse(xhr.responseText);
+        } else {
+          responseData = {};
+        }
+      } catch (err) {
+        reject(new Error(`Failed to parse server response: ${xhr.responseText}`));
+        return;
+      }
+
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve(responseData);
+      } else {
+        const errorDetail = responseData.detail || "Job submission failed.";
+        const errorMsg = typeof errorDetail === 'object' ? JSON.stringify(errorDetail) : errorDetail;
+        reject(new Error(errorMsg));
+      }
+    };
+
+    xhr.onerror = () => {
+      reject(new Error("Network error occurred during upload."));
+    };
+
+    xhr.onabort = () => {
+      reject(new Error("Upload was cancelled."));
+    };
+
+    xhr.send(formData);
+  });
+}
+
+/*
+================================================================================
+Page: Submit Job (SubmitJobPage)
+================================================================================
+*/
+
 const SubmitJobPage = ({ onJobSubmitted }) => {
-  const [analysisType, setAnalysisType] = useState('dynamic');
+  const [analysisType, setAnalysisType] = useState('static');
   const [files, setFiles] = useState({
     active_topo: null, active_traj: null,
     inactive_topo: null, inactive_traj: null,
@@ -179,6 +341,7 @@ const SubmitJobPage = ({ onJobSubmitted }) => {
   const [manualSelections, setManualSelections] = useState('resid 50\nresid 131');
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState(null);
+  const [uploadProgress, setUploadProgress] = useState(0);
 
   const handleFileChange = (e) => {
     const { name, files } = e.target;
@@ -195,6 +358,7 @@ const SubmitJobPage = ({ onJobSubmitted }) => {
     e.preventDefault();
     setIsLoading(true);
     setError(null);
+    setUploadProgress(0);
 
     const requiredFiles = ['active_topo', 'active_traj', 'inactive_topo', 'inactive_traj'];
     if (requiredFiles.some(key => !files[key])) {
@@ -264,22 +428,14 @@ const SubmitJobPage = ({ onJobSubmitted }) => {
     if (inactiveSlice) formData.append('inactive_slice', inactiveSlice);
 
     try {
-      const response = await fetch(endpoint, {
-        method: 'POST',
-        body: formData,
-      });
-      const data = await response.json();
-      if (!response.ok) {
-        const errorDetail = data.detail || "Job submission failed.";
-        const errorMsg = typeof errorDetail === 'object' ? JSON.stringify(errorDetail) : errorDetail;
-        throw new Error(errorMsg);
-      }
+      const data = await xhrUpload(endpoint, formData, setUploadProgress);
+      
       if (!data.job_id) {
           throw new Error("Submission succeeded but did not return a job ID.");
       }
-      onJobSubmitted(data.job_id); 
+      onJobSubmitted(data.job_id); // This is the RQ_JOB_ID
     } catch (err) {
-      setError(err.message);
+      setError(err.message || "Upload failed. Please check the console.");
     } finally {
       setIsLoading(false);
     }
@@ -399,11 +555,19 @@ const SubmitJobPage = ({ onJobSubmitted }) => {
           </div>
         </div>
         {error && <ErrorDisplay error={error} />}
+        
+        {isLoading && (
+          <UploadProgress progress={uploadProgress} />
+        )}
+        
         <SubmitButton isLoading={isLoading} />
       </form>
     </div>
   );
 };
+
+// --- SubmitJobPage Sub-components ---
+
 const TabButton = ({ icon, label, isActive, onClick }) => (
   <button
     type="button" onClick={onClick}
@@ -414,6 +578,7 @@ const TabButton = ({ icon, label, isActive, onClick }) => (
     {icon} <span>{label}</span>
   </button>
 );
+
 const FileInputGroup = ({ title, files, fileState, onChange, sliceName, sliceValue, onSliceChange }) => (
   <div className="bg-gray-800 p-4 rounded-lg border border-gray-700 space-y-4">
     <h3 className="text-lg font-semibold text-cyan-400">{title}</h3>
@@ -426,6 +591,7 @@ const FileInputGroup = ({ title, files, fileState, onChange, sliceName, sliceVal
     <SliceInput name={sliceName} value={sliceValue} onChange={onSliceChange} />
   </div>
 );
+
 const SliceInput = ({ name, value, onChange }) => (
   <div>
     <label htmlFor={name} className="block text-sm font-medium text-gray-300 mb-1">
@@ -438,51 +604,38 @@ const SliceInput = ({ name, value, onChange }) => (
     />
   </div>
 );
-const FileDropzone = ({ name, label, file, onChange }) => (
-  <div>
-    <label className="block text-sm font-medium text-gray-300 mb-1">{label}</label>
-    <div className="mt-1 flex justify-center px-6 pt-5 pb-6 border-2 border-gray-600 border-dashed rounded-md">
-      <div className="space-y-1 text-center">
-        <svg className="mx-auto h-10 w-10 text-gray-500" stroke="currentColor" fill="none" viewBox="0 0 48 48" aria-hidden="true">
-          <path d="M28 8H12a4 4 0 00-4 4v20m32-12v8m0 0v8a4 4 0 01-4 4H12a4 4 0 01-4-4v-4m32-4l-3.172-3.172a4 4 0 00-5.656 0L28 28M8 32l9.172-9.172a4 4 0 015.656 0L28 28m0 0l4 4m4-24h8m-4-4v8" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" />
-        </svg>
-        <div className="flex text-sm text-gray-400">
-          <label htmlFor={name} className="relative cursor-pointer bg-gray-900 rounded-md font-medium text-cyan-500 hover:text-cyan-400 focus-within:outline-none focus-within:ring-2 focus-within:ring-offset-2 focus-within:ring-offset-gray-900 focus-within:ring-cyan-500">
-            <span>Upload a file</span>
-            <input id={name} name={name} type="file" className="sr-only" onChange={onChange} />
-          </label>
-          <p className="pl-1">or drag and drop</p>
-        </div>
-        {file ? (
-          <p className="text-xs text-green-400 truncate max-w-xs">{file.name}</p>
-        ) : (
-          <p className="text-xs text-gray-500">Up to 500MB</p>
-        )}
-      </div>
-    </div>
-  </div>
-);
-const ErrorDisplay = ({ error }) => (
-  <div className="bg-red-900 border border-red-700 text-red-100 p-3 rounded-md flex items-center space-x-2">
-    <XCircle className="h-5 w-5" /> <span>{error}</span>
-  </div>
-);
+
 const SubmitButton = ({ isLoading }) => (
   <button
     type="submit" disabled={isLoading}
     className="w-full flex justify-center items-center space-x-2 bg-cyan-600 hover:bg-cyan-700 text-white font-bold py-3 px-6 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
   >
     {isLoading ? <Loader2 className="h-6 w-6 animate-spin" /> : <Upload className="h-6 w-6" />}
-    <span>{isLoading ? 'Submitting...' : 'Submit Job'}</span>
+    <span>{isLoading ? 'Uploading...' : 'Submit Job'}</span>
   </button>
 );
 
+const UploadProgress = ({ progress }) => (
+  <div className="bg-gray-800 p-4 rounded-lg border border-gray-700 space-y-2">
+    <p className="text-sm font-medium text-gray-300">Uploading files...</p>
+    <div className="w-full bg-gray-700 rounded-full h-2.5">
+      <div 
+        className="bg-cyan-500 h-2.5 rounded-full transition-all duration-300" 
+        style={{ width: `${progress}%` }}
+      ></div>
+    </div>
+    <p className="text-center text-cyan-400 font-mono text-lg">{progress}%</p>
+  </div>
+);
+
+
 /*
 ================================================================================
-Job Status Page (Unchanged)
+Page: Job Status (JobStatusPage)
 ================================================================================
 */
-const JobStatusPage = ({ jobId, onNavigateToResults }) => {
+
+const JobStatusPage = ({ jobId, onNavigateToResults, onNavigateToResultDetail }) => {
   const [status, setStatus] = useState(null);
   const [error, setError] = useState(null);
   const pollingInterval = useRef(null);
@@ -524,7 +677,7 @@ const JobStatusPage = ({ jobId, onNavigateToResults }) => {
   const jobStatus = status?.status || 'queued';
   const metaStatus = status?.meta?.status || (jobStatus === 'queued' ? 'Waiting in queue...' : 'Initializing...');
   const progress = status?.meta?.progress || (jobStatus === 'queued' ? 0 : 5);
-  const resultPayload = status?.result;
+  const resultPayload = status?.result; // This is the full result JSON from the task
 
   if (jobStatus === 'finished' && resultPayload) {
     return (
@@ -533,16 +686,16 @@ const JobStatusPage = ({ jobId, onNavigateToResults }) => {
         title="Analysis Complete" jobId={jobId} message="Your results are ready."
       >
         <div className="mt-6 text-left">
-          <h3 className="text-lg font-semibold text-green-400 mb-2">Results:</h3>
+          <h3 className="text-lg font-semibold text-green-400 mb-2">Results Summary:</h3>
           <pre className="bg-gray-900 p-4 rounded-md text-gray-200 text-xs overflow-auto">
             {JSON.stringify(resultPayload.results || resultPayload, null, 2)}
           </pre>
         </div>
         <button
-          onClick={onNavigateToResults}
+          onClick={() => onNavigateToResultDetail(resultPayload.job_id)}
           className="mt-6 w-full flex justify-center items-center space-x-2 bg-cyan-600 hover:bg-cyan-700 text-white font-bold py-3 px-6 rounded-lg transition-colors"
         >
-          <span>View All Results</span>
+          <span>View Result Details</span>
         </button>
       </StatusDisplay>
     );
@@ -579,6 +732,9 @@ const JobStatusPage = ({ jobId, onNavigateToResults }) => {
     </StatusDisplay>
   );
 };
+
+// --- JobStatusPage Sub-components ---
+
 const StatusDisplay = ({ icon, title, message, jobId, children }) => (
   <div className="max-w-3xl mx-auto bg-gray-800 rounded-lg border border-gray-700 shadow-xl p-8 text-center">
     <div className="flex justify-center mb-6">{icon}</div>
@@ -591,12 +747,14 @@ const StatusDisplay = ({ icon, title, message, jobId, children }) => (
   </div>
 );
 
+
 /*
 ================================================================================
-Results List Page (Unchanged)
+Page: Results List (ResultsListPage)
 ================================================================================
 */
-const ResultsListPage = ({ onSelectResult }) => {
+
+const ResultsListPage = ({ onSelectResult, onSelectRunningJob }) => {
   const [results, setResults] = useState(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -631,9 +789,7 @@ const ResultsListPage = ({ onSelectResult }) => {
     }, {});
   };
 
-  if (isLoading) {
-    return <div className="flex justify-center items-center h-64"><Loader2 className="h-12 w-12 text-cyan-400 animate-spin" /></div>;
-  }
+  if (isLoading) return <FullPageLoader />;
   if (error) return <ErrorDisplay error={error} />;
   
   const groupedResults = groupResults(results);
@@ -655,7 +811,12 @@ const ResultsListPage = ({ onSelectResult }) => {
             <div className="bg-gray-800 rounded-lg border border-gray-700 shadow-lg">
               <ul className="divide-y divide-gray-700">
                 {items.map((item) => (
-                  <ResultItem key={item.job_id} item={item} onSelectResult={onSelectResult} />
+                  <ResultItem 
+                    key={item.job_id} 
+                    item={item} 
+                    onSelectResult={onSelectResult}
+                    onSelectRunningJob={onSelectRunningJob}
+                  />
                 ))}
               </ul>
             </div>
@@ -665,34 +826,74 @@ const ResultsListPage = ({ onSelectResult }) => {
     </div>
   );
 };
-const ResultItem = ({ item, onSelectResult }) => {
-  const isFailed = item.status === 'failed';
-  const icon = isFailed ? <XCircle className="h-5 w-5 text-red-500" /> : <CheckCircle className="h-5 w-5 text-green-500" />;
-  const formattedDate = item.completed_at ? new Date(item.completed_at).toLocaleString() : (item.created_at ? `Started ${new Date(item.created_at).toLocaleString()}` : 'No date');
+
+// --- ResultsListPage Sub-components ---
+
+const ResultItem = ({ item, onSelectResult, onSelectRunningJob }) => {
+  const status = item.status || 'unknown';
+  
+  let icon, text, date, handler, classes;
+  
+  const formattedDate = (dateStr, prefix = "") => {
+    if (!dateStr) return "No date";
+    return `${prefix}${new Date(dateStr).toLocaleString()}`;
+  };
+
+  switch (status) {
+    case 'finished':
+      icon = <CheckCircle className="h-5 w-5 text-green-500" />;
+      text = item.job_id;
+      date = formattedDate(item.completed_at, "Completed ");
+      handler = () => onSelectResult(item.job_id); // Pass JOB_UUID
+      classes = "hover:bg-gray-700 cursor-pointer";
+      break;
+    case 'started':
+    case 'queued':
+      icon = <Loader2 className="h-5 w-5 text-cyan-400 animate-spin" />;
+      text = item.job_id;
+      date = formattedDate(item.created_at, "Started ");
+      handler = () => onSelectRunningJob(item.rq_job_id); // Pass RQ_JOB_ID
+      classes = "hover:bg-gray-700 cursor-pointer";
+      break;
+    case 'failed':
+      icon = <XCircle className="h-5 w-5 text-red-500" />;
+      text = item.job_id;
+      date = formattedDate(item.completed_at, "Failed ");
+      handler = null; // Not clickable
+      classes = "opacity-60 cursor-not-allowed";
+      break;
+    default:
+      icon = <AlertTriangle className="h-5 w-5 text-yellow-500" />;
+      text = item.job_id;
+      date = "Unknown status";
+      handler = null;
+      classes = "opacity-50 cursor-not-allowed";
+  }
 
   return (
     <li
-      className={`flex items-center justify-between p-4 ${!isFailed ? 'hover:bg-gray-700 cursor-pointer' : 'opacity-60'} transition-colors`}
-      onClick={() => !isFailed && onSelectResult(item.job_id)}
+      className={`flex items-center justify-between p-4 ${classes} transition-colors`}
+      onClick={handler}
     >
       <div className="flex items-center space-x-3">
         {icon}
         <div>
-          <p className="text-sm font-medium text-white">{item.job_id}</p>
-          <p className="text-sm text-gray-400">{formattedDate}</p>
+          <p className="text-sm font-medium text-white">{text}</p>
+          <p className="text-sm text-gray-400">{date}</p>
         </div>
       </div>
-      {!isFailed && <ChevronRight className="h-5 w-5 text-gray-500" />}
+      {handler && <ChevronRight className="h-5 w-5 text-gray-500" />}
     </li>
   );
 };
 
+
 /*
 ================================================================================
-Result Detail Page (MODIFIED)
+Page: Result Detail (ResultDetailPage)
 ================================================================================
 */
-// --- ADDED onVisualize PROP ---
+
 const ResultDetailPage = ({ resultId, onBack, onVisualize }) => {
   const [result, setResult] = useState(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -723,13 +924,10 @@ const ResultDetailPage = ({ resultId, onBack, onVisualize }) => {
     fetchResult();
   }, [resultId]);
 
-  if (isLoading) {
-    return <div className="flex justify-center items-center h-64"><Loader2 className="h-12 w-12 text-cyan-400 animate-spin" /></div>;
-  }
+  if (isLoading) return <FullPageLoader />;
   if (error) return <ErrorDisplay error={error} />;
   if (!result) return <ErrorDisplay error="Result data could not be loaded." />;
 
-  // --- NEW: Check if visualization is possible ---
   const canVisualize = result.residue_selections_mapping && result.results;
 
   return (
@@ -753,7 +951,6 @@ const ResultDetailPage = ({ resultId, onBack, onVisualize }) => {
               <span className="font-semibold">Type:</span> <span className="capitalize">{result.analysis_type}</span>
             </p>
           </div>
-          {/* --- NEW VISUALIZE BUTTON --- */}
           {canVisualize && (
             <button
               onClick={() => onVisualize(result.job_id)}
@@ -774,29 +971,27 @@ const ResultDetailPage = ({ resultId, onBack, onVisualize }) => {
   );
 };
 
+
 /*
 ================================================================================
-NEW: Visualize Result Page
+Page: Visualize Result (VisualizeResultPage)
 ================================================================================
 */
+
 const VisualizeResultPage = ({ resultId, onBack }) => {
   const [resultData, setResultData] = useState(null);
-  const [structureFile, setStructureFile] = useState(null); // The user-uploaded PDB/GRO file
+  const [structureFile, setStructureFile] = useState(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState(null);
   
-  // NGL state
-  const nglStageRef = useRef(null); // Ref to hold the NGL.Stage object
-  const nglViewportRef = useRef(null); // Ref to attach the NGL viewport
+  const nglStageRef = useRef(null);
+  const nglViewportRef = useRef(null);
   
-  // Visualization params
   const [threshold, setThreshold] = useState(0.8);
   
-  // Load NGL.js script dynamically
   useEffect(() => {
     const nglScriptId = 'ngl-script';
     if (document.getElementById(nglScriptId)) {
-      // Script already loaded
       return;
     }
     const script = document.createElement('script');
@@ -804,15 +999,8 @@ const VisualizeResultPage = ({ resultId, onBack }) => {
     script.src = 'https://cdn.jsdelivr.net/npm/ngl/dist/ngl.js';
     script.async = true;
     document.body.appendChild(script);
-    
-    return () => {
-      // Clean up script if component unmounts, though we usually keep it
-      // const existingScript = document.getElementById(nglScriptId);
-      // if (existingScript) document.body.removeChild(existingScript);
-    };
   }, []);
 
-  // Fetch the result data
   useEffect(() => {
     if (!resultId) {
       setError("No result ID specified.");
@@ -841,68 +1029,57 @@ const VisualizeResultPage = ({ resultId, onBack }) => {
     fetchResult();
   }, [resultId]);
   
-  // Initialize NGL stage when file is loaded
   useEffect(() => {
-    // Wait until NGL is loaded, we have a file, and the viewport ref is set
     if (window.NGL && structureFile && nglViewportRef.current && !nglStageRef.current) {
       const stage = new window.NGL.Stage(nglViewportRef.current);
       nglStageRef.current = stage;
       
       const ext = structureFile.name.split('.').pop();
       stage.loadFile(structureFile, { ext: ext }).then((component) => {
-        component.addRepresentation("cartoon", { color: 'resname' }); // Default cartoon
-        component.addRepresentation("ball+stick", { // Add highlight layer
+        component.addRepresentation("cartoon", { color: 'resname' });
+        component.addRepresentation("ball+stick", {
           name: "highlight",
-          sele: "none", // Start with nothing selected
+          sele: "none",
           color: "red",
         });
         component.autoView();
       });
     }
     
-    // Cleanup NGL stage on unmount
     return () => {
       if (nglStageRef.current) {
         nglStageRef.current.dispose();
         nglStageRef.current = null;
       }
     };
-  }, [structureFile, resultData]); // Re-run if NGL, file, or data loads
+  }, [structureFile, resultData]);
   
-  // Update NGL highlighting when threshold changes
   useEffect(() => {
     if (!nglStageRef.current || !resultData) return;
     
     const { results, residue_selections_mapping } = resultData;
     
-    // 1. Find all keys with scores above the threshold
     const highScoringKeys = Object.keys(results).filter(
       key => results[key] >= threshold
     );
     
-    // 2. Convert keys to MDAnalysis selection strings
     const selectionStrings = highScoringKeys
       .map(key => {
-        // --- NEW FIX: Strip suffix to find the mapping key ---
-        const baseKey = key.replace(/_aligned$/, ''); // "res_50_aligned" -> "res_50"
-        return residue_selections_mapping[baseKey]; // Look up "res_50"
-        // --- END NEW FIX ---
+        const baseKey = key.replace(/_aligned$/, ''); 
+        return residue_selections_mapping[baseKey];
       })
-      .filter(Boolean); // Filter out any null/undefined mappings
+      .filter(Boolean);
       
-    // 3. Create the final NGL selection string
-    // NGL uses "resid" for residue numbers, e.g., "50 or 131"
     const nglSelection = selectionStrings
-      .map(sel => sel.replace(/resid /gi, '')) // "resid 50" -> "50"
+      .map(sel => sel.replace(/resid /gi, ''))
       .join(' or ');
 
-    // 4. Update the 'highlight' representation
     const highlightRep = nglStageRef.current.getRepresentationsByName('highlight');
     if (highlightRep) {
       if (nglSelection) {
         highlightRep.setSelection(nglSelection);
       } else {
-        highlightRep.setSelection("none"); // Hide if nothing is selected
+        highlightRep.setSelection("none");
       }
     }
     
@@ -916,9 +1093,7 @@ const VisualizeResultPage = ({ resultId, onBack }) => {
     }
   };
 
-  if (isLoading) {
-    return <div className="flex justify-center items-center h-64"><Loader2 className="h-12 w-12 text-cyan-400 animate-spin" /></div>;
-  }
+  if (isLoading) return <FullPageLoader />;
   
   return (
     <div className="max-w-7xl mx-auto">
@@ -939,20 +1114,20 @@ const VisualizeResultPage = ({ resultId, onBack }) => {
           <div className="text-center bg-gray-900 p-8 rounded-lg border-2 border-dashed border-gray-600">
             <h3 className="text-xl font-semibold text-white mb-4">Upload Structure File</h3>
             <p className="text-gray-400 mb-6">Please upload the PDB or GRO file you used for this analysis.</p>
+            {/* --- Uses the same, now-fixed FileDropzone --- */}
             <FileDropzone 
               name="structure_file"
               label="Structure (PDB, GRO, ...)"
+              file={structureFile}
               onChange={handleFileChange}
             />
           </div>
         ) : (
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-            {/* NGL Viewport */}
             <div className="lg:col-span-2 bg-black rounded-lg h-96 w-full">
               <div ref={nglViewportRef} style={{ width: '100%', height: '100%' }} />
             </div>
             
-            {/* Controls */}
             <div className="bg-gray-900 p-4 rounded-lg">
               <h3 className="text-lg font-semibold text-cyan-400 mb-4 flex items-center space-x-2">
                 <Palette className="h-5 w-5" />
@@ -987,11 +1162,13 @@ const VisualizeResultPage = ({ resultId, onBack }) => {
   );
 };
 
+
 /*
 ================================================================================
-System Health Page (Unchanged)
+Page: System Health (HealthCheckPage)
 ================================================================================
 */
+
 const HealthCheckPage = () => {
   const [healthReport, setHealthReport] = useState(null);
   const [isLoading, setIsLoading] = useState(false);
@@ -1041,6 +1218,9 @@ const HealthCheckPage = () => {
     </div>
   );
 };
+
+// --- HealthCheckPage Sub-components ---
+
 const HealthStatusCard = ({ title, status, details }) => {
   const isOk = status === 'ok';
   const displayStatus = status || 'unknown';

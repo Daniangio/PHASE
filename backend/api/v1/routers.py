@@ -318,7 +318,9 @@ async def submit_qubo_job(
 
 @api_router.get("/results", summary="List all available analysis results")
 async def get_results_list():
-    # ... (existing get_results_list code remains unchanged)
+    # --- NO CHANGE NEEDED ---
+    # This function will now automatically pick up the 'started' .json files
+    # created by the worker.
     results_list = []
     try:
         # Sort by mtime (newest first)
@@ -331,6 +333,7 @@ async def get_results_list():
                 # Return just the metadata, not the full (large) result payload
                 results_list.append({
                     "job_id": data.get("job_id"),
+                    "rq_job_id": data.get("rq_job_id"), # <-- Pass this to frontend
                     "analysis_type": data.get("analysis_type"),
                     "status": data.get("status"),
                     "created_at": data.get("created_at"),
@@ -347,10 +350,13 @@ async def get_results_list():
 
 @api_router.get("/results/{job_uuid}", summary="Get the full JSON data for a specific result")
 async def get_result_detail(job_uuid: str):
-    # ... (existing get_result_detail code remains unchanged)
     try:
         result_file = RESULTS_DIR / f"{job_uuid}.json"
         if not result_file.exists():
+            # It's possible the user is requesting a job that just started
+            # and the file hasn't been written yet.
+            # But 'started' jobs should lead to the status page.
+            # If they have a direct link, 404 is correct.
             raise HTTPException(status_code=404, detail=f"Result file for job '{job_uuid}' not found.")
         
         with open(result_file, 'r') as f:

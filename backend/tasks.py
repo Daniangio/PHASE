@@ -20,7 +20,7 @@ from alloskin.analysis.dynamic import TransferEntropy
 RESULTS_DIR = Path("/app/data/results")
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
-# --- Helper Function (MODIFIED) ---
+# --- Helper Function (Unchanged) ---
 def get_builder(
     config_path: Optional[str] = None, 
     residue_selections_dict: Optional[Dict[str, str]] = None
@@ -68,17 +68,26 @@ def run_analysis_job(
     job = get_current_job()
     start_time = datetime.utcnow()
     
+    # --- MODIFICATION: Get RQ Job ID ---
+    # This ID is needed by the frontend to link from the results page
+    # back to the live status page.
+    rq_job_id = job.id if job else f"analysis-{job_uuid}" # Reconstruct as fallback
+    
     result_payload = {
         "job_id": job_uuid,
+        "rq_job_id": rq_job_id, # <-- NEW: Store the RQ ID
         "analysis_type": analysis_type,
         "status": "started",
         "created_at": start_time.isoformat(),
         "params": params,
-        "residue_selections_mapping": None, # <-- This will be populated now
+        "residue_selections_mapping": None,
         "results": None,
-        "error": None
+        "error": None,
+        "completed_at": None, # Will be filled in 'finally'
     }
     
+    result_filepath = RESULTS_DIR / f"{job_uuid}.json"
+
     def save_progress(status_msg: str, progress: int):
         if job:
             job.meta['status'] = status_msg
@@ -86,11 +95,26 @@ def run_analysis_job(
             job.save_meta()
         print(f"[Job {job_uuid}] {status_msg}")
 
+    def write_result_to_disk(payload: Dict[str, Any]):
+        """Helper to write the result payload to the persistent JSON file."""
+        try:
+            with open(result_filepath, 'w') as f:
+                json.dump(payload, f, indent=2)
+            print(f"Saved result to {result_filepath}")
+        except Exception as e:
+            print(f"CRITICAL: Failed to save result file {result_filepath}: {e}")
+            # If saving fails, update the in-memory payload for the final RQ return
+            payload["status"] = "failed"
+            payload["error"] = f"Failed to save result file: {e}"
+
     try:
-        # --- MODIFICATION ---
+        # --- MODIFICATION: Write "started" file immediately ---
+        save_progress("Initializing...", 0)
+        write_result_to_disk(result_payload)
+        # --- END MODIFICATION ---
+
         # Step 1: Initialize components
         save_progress("Initializing Analysis Pipeline", 10)
-        # We just get the builder. The mapping is generated *by* the builder.
         builder = get_builder(
             config_path=config_path, 
             residue_selections_dict=residue_selections_dict
@@ -98,46 +122,42 @@ def run_analysis_job(
         
         # Step 2: Prepare data based on analysis type
         analysis_data = None
-        mapping = None # <-- Variable to store the mapping
+        mapping = None
         
         active_slice = params.get("active_slice")
         inactive_slice = params.get("inactive_slice")
 
         if analysis_type in ['static', 'qubo']:
             save_progress("Preparing static dataset", 30)
-            # Unpack the new 3-tuple return from the refactored builder
             all_features_static, labels_Y, mapping = builder.prepare_static_analysis_data(
                 file_paths['active_traj_path'], file_paths['active_topo_path'],
                 file_paths['inactive_traj_path'], file_paths['inactive_topo_path'],
                 active_slice=active_slice,
                 inactive_slice=inactive_slice
             )
-            # This is the 2-tuple that analyzer.run expects
             analysis_data = (all_features_static, labels_Y)
             
         elif analysis_type == 'dynamic':
             save_progress("Preparing dynamic dataset", 30)
-            # Unpack the new 3-tuple return from the refactored builder
             features_active, features_inactive, mapping = builder.prepare_dynamic_analysis_data(
                 file_paths['active_traj_path'], file_paths['active_topo_path'],
                 file_paths['inactive_traj_path'], file_paths['inactive_topo_path'],
                 active_slice=active_slice,
                 inactive_slice=inactive_slice
             )
-            # This is the 2-tuple that analyzer.run expects
             analysis_data = (features_active, features_inactive)
             
         else:
             raise ValueError(f"Unknown analysis type: {analysis_type}")
         
-        # --- END MODIFICATION ---
+        # Save the mapping as soon as we have it
+        result_payload["residue_selections_mapping"] = mapping
 
         # Step 3: Run the correct analysis
         save_progress(f"Running {analysis_type} analysis", 60)
         
         if analysis_type == 'static':
             analyzer = StaticReportersRF()
-            # analyzer.run just gets the data tuple
             job_results = analyzer.run(analysis_data)
             
         elif analysis_type == 'qubo':
@@ -157,11 +177,6 @@ def run_analysis_job(
         result_payload["status"] = "finished"
         result_payload["results"] = job_results
         
-        # --- THIS IS THE FIX ---
-        # Save the mapping we extracted from the builder
-        result_payload["residue_selections_mapping"] = mapping
-        # --- END OF FIX ---
-        
     except Exception as e:
         print(f"[Job {job_uuid}] FAILED: {e}")
         traceback.print_exc()
@@ -169,20 +184,13 @@ def run_analysis_job(
         result_payload["error"] = str(e)
     
     finally:
-        # Step 5: Save persistent JSON result
-        save_progress("Saving persistent result", 95)
+        # Step 5: Save final persistent JSON result
+        save_progress("Saving final result", 95)
         result_payload["completed_at"] = datetime.utcnow().isoformat()
         
-        result_filepath = RESULTS_DIR / f"{job_uuid}.json"
-        try:
-            with open(result_filepath, 'w') as f:
-                json.dump(result_payload, f, indent=2)
-            print(f"Saved result to {result_filepath}")
-        except Exception as e:
-            print(f"CRITICAL: Failed to save result file {result_filepath}: {e}")
-            if result_payload["status"] != "failed":
-                result_payload["status"] = "failed"
-                result_payload["error"] = f"Failed to save result file: {e}"
+        # --- MODIFICATION: Overwrite file with final status ---
+        write_result_to_disk(result_payload)
+        # --- END MODIFICATION ---
 
         # Clean up the temporary upload folder
         try:
@@ -193,4 +201,5 @@ def run_analysis_job(
         except Exception as e:
             print(f"Warning: Failed to clean up upload dir: {e}")
 
+    # This is the value returned to RQ and shown on the status page
     return result_payload
