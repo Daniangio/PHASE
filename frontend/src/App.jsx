@@ -32,6 +32,10 @@ export default function App() {
     inactiveSlice: '',
     selectionMode: 'all',
     manualSelections: 'resid 50\nresid 131',
+    quboLambda: 1.0,
+    quboSolutions: 5,
+    quboCvFolds: 3,
+    quboNEstimators: 50,
   });
 
   // State for user-defined custom selections, persisted in localStorage
@@ -352,7 +356,8 @@ const SubmitJobPage = ({ formState, setFormState, customSelections, setCustomSel
   // Destructure state and create setters for easier use
   const {
     analysisType, files, teLag, targetSelection, activeSlice,
-    inactiveSlice, selectionMode, manualSelections
+    inactiveSlice, selectionMode, manualSelections, quboLambda,
+    quboSolutions, quboCvFolds, quboNEstimators
   } = formState;
 
   const setAnalysisType = (value) => setFormState(prev => ({ ...prev, analysisType: value }));
@@ -363,6 +368,10 @@ const SubmitJobPage = ({ formState, setFormState, customSelections, setCustomSel
   const setInactiveSlice = (value) => setFormState(prev => ({ ...prev, inactiveSlice: value }));
   const setSelectionMode = (value) => setFormState(prev => ({ ...prev, selectionMode: value }));
   const setManualSelections = (value) => setFormState(prev => ({ ...prev, manualSelections: value }));
+  const setQuboLambda = (value) => setFormState(prev => ({ ...prev, quboLambda: value }));
+  const setQuboSolutions = (value) => setFormState(prev => ({ ...prev, quboSolutions: value }));
+  const setQuboCvFolds = (value) => setFormState(prev => ({ ...prev, quboCvFolds: value }));
+  const setQuboNEstimators = (value) => setFormState(prev => ({ ...prev, quboNEstimators: value }));
 
   // Persist custom selections to localStorage whenever they change
   useEffect(() => {
@@ -439,6 +448,10 @@ const SubmitJobPage = ({ formState, setFormState, customSelections, setCustomSel
             return;
         }
         formData.append('target_selection_string', targetSelection);
+        formData.append('lambda_redundancy', quboLambda);
+        formData.append('num_solutions', quboSolutions);
+        formData.append('qubo_cv_folds', quboCvFolds);
+        formData.append('qubo_n_estimators', quboNEstimators);
         break;
       case 'dynamic':
         endpoint = '/api/v1/submit/dynamic';
@@ -554,7 +567,7 @@ const SubmitJobPage = ({ formState, setFormState, customSelections, setCustomSel
               <p className="text-sm text-gray-400">No additional parameters required for Static analysis.</p>
             )}
             {analysisType === 'qubo' && (
-              <div>
+              <div className="space-y-4">
                 <SelectionField
                   label="Target Selection (MDAnalysis string)"
                   value={targetSelection}
@@ -566,6 +579,41 @@ const SubmitJobPage = ({ formState, setFormState, customSelections, setCustomSel
                 <p className="text-xs text-gray-500 mt-1">
                   The residue(s) to predict. These will be removed from the candidate pool.
                 </p>
+                <div className="grid grid-cols-2 gap-4 pt-2">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-300 mb-1">Lambda Penalty</label>
+                    <input type="number" step="0.1" value={quboLambda} onChange={(e) => setQuboLambda(e.target.value)}
+                           className="w-full bg-gray-900 border border-gray-600 rounded-md p-2 text-white focus:ring-cyan-500 focus:border-cyan-500" />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-300 mb-1"># Solutions</label>
+                    <input type="number" value={quboSolutions} onChange={(e) => setQuboSolutions(e.target.value)}
+                           className="w-full bg-gray-900 border border-gray-600 rounded-md p-2 text-white focus:ring-cyan-500 focus:border-cyan-500" />
+                  </div>
+                </div>
+                <details className="text-sm text-gray-400 mt-2">
+                  <summary className="cursor-pointer hover:text-white">Advanced RF Parameters</summary>
+                  <div className="grid grid-cols-2 gap-4 pt-2 mt-2 border-t border-gray-700">
+                    <div>
+                      <label className="block text-sm font-medium text-gray-300 mb-1">CV Folds</label>
+                      <input
+                        type="number"
+                        value={quboCvFolds}
+                        onChange={(e) => setQuboCvFolds(e.target.value)}
+                        className="w-full bg-gray-900 border border-gray-600 rounded-md p-2 text-white focus:ring-cyan-500 focus:border-cyan-500"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-300 mb-1">N Estimators</label>
+                      <input
+                        type="number"
+                        value={quboNEstimators}
+                        onChange={(e) => setQuboNEstimators(e.target.value)}
+                        className="w-full bg-gray-900 border border-gray-600 rounded-md p-2 text-white focus:ring-cyan-500 focus:border-cyan-500"
+                      />
+                    </div>
+                  </div>
+                </details>
               </div>
             )}
             {analysisType === 'dynamic' && (
