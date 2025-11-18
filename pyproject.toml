@@ -24,7 +24,7 @@ dependencies = [
     "MDAnalysis",
     "pyqubo",
     "dwave-neal",
-    # "dadapy",
+    "dadapy",
     # "idtxl", # Or "pyJIDT" if you prefer
     "pyyaml",
     "redis", # Added for worker/backend

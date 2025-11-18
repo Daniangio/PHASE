@@ -7,7 +7,7 @@ MDAnalysis
 scikit-learn
 pyqubo
 dwave-neal
-# dadapy
+dadapy
 # idtxl Must install from source
 pyyaml
 redis

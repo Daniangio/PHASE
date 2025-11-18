@@ -6,13 +6,16 @@ It is designed to be called by different entry points, such as the CLI or
 a background task worker, ensuring that the core execution path is consistent
 and centralized.
 """
+
 from typing import Dict, Any, Optional
 
 from alloskin.io.readers import MDAnalysisReader
 from alloskin.features.extraction import FeatureExtractor
 from alloskin.pipeline.builder import DatasetBuilder
-from alloskin.analysis.static import StaticReportersRF
-from alloskin.analysis.qubo import QUBOSet
+from alloskin.analysis.static_rf import StaticReportersRF
+from alloskin.analysis.static_ii import StaticReportersII
+from alloskin.analysis.qubo_rf import QUBOSetRF
+from alloskin.analysis.qubo_ii import QUBOSetII
 from alloskin.analysis.dynamic import TransferEntropy
 
 
@@ -56,6 +59,7 @@ def run_analysis(
         params: Dictionary of parameters for the analysis.
         residue_selections: Optional dictionary of residue selections.
         progress_callback: Optional function to report progress (e.g., `lambda msg, pct: print(msg)`).
+        static_method
     """
     def report_progress(message, percent):
         if progress_callback:
@@ -101,12 +105,29 @@ def run_analysis(
 
     # Run the correct analysis
     report_progress(f"Running {analysis_type} analysis", 60)
+    
     if analysis_type == 'static':
-        analyzer = StaticReportersRF()
+        method = params.get('static_method', 'ii').lower()
+        if method == 'rf':
+            print("Selected Method: Random Forest Classifier (Backup)")
+            analyzer = StaticReportersRF()
+        else:
+            print("Selected Method: Information Imbalance (Default)")
+            analyzer = StaticReportersII()
+    
     elif analysis_type == 'qubo':
-        analyzer = QUBOSet()
+        method = params.get('qubo_method', 'ii').lower()
+        
+        if method == 'rf':
+            print("Selected Method: QUBO via Random Forest (Backup)")
+            analyzer = QUBOSetRF()
+        else:
+            print("Selected Method: QUBO via Information Imbalance (Default)")
+            analyzer = QUBOSetII()
+            
         # QUBO requires the topology file path in its params
         params['active_topo_file'] = file_paths['active_topo']
+        
     elif analysis_type == 'dynamic':
         analyzer = TransferEntropy()
 

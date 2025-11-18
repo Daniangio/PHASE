@@ -69,7 +69,22 @@ def main():
         help="Number of parallel workers for analysis. (Default: all available cores)"
     )
 
+    # --- Static Analysis Arguments ---
+    parser.add_argument(
+        "--static_method",
+        choices=["ii", "rf"],
+        default="rf",
+        help="Method for static reporter detection: 'ii' (Information Imbalance, Default) or 'rf' (Random Forest)."
+    )
+
     # --- QUBO Analysis Arguments ---
+    parser.add_argument(
+        "--qubo_method",
+        choices=["ii", "rf"],
+        default="ii",
+        help="Method for QUBO feature selection: 'ii' (Information Imbalance, Default) or 'rf' (Random Forest)."
+    )
+    
     parser.add_argument(
         '--target_selection', 
         type=str,
@@ -139,11 +154,16 @@ def main():
         "active_slice": args.active_slice,
         "inactive_slice": args.inactive_slice,
         "num_workers": args.num_workers,
+        # Static
+        "static_method": args.static_method,
+        # QUBO
+        "qubo_method": args.qubo_method,
         "target_selection_string": args.target_selection,
         "lambda_redundancy": args.qubo_lambda,
         "num_solutions": args.qubo_solutions,
         "qubo_cv_folds": args.qubo_cv_folds,
         "qubo_n_estimators": args.qubo_n_estimators,
+        # Dynamic
         "lag": args.te_lag, # Renamed from te_lag for consistency
     }
 
