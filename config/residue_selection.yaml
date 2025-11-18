@@ -80,4 +80,4 @@
 # QUBO
 
 residue_selections:
-  singles: 'resid 2 to 5 [singles]'
+  singles: 'resid 1 to 300 [singles]'

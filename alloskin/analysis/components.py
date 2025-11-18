@@ -1,24 +1,18 @@
 """
 Analysis Components and Base Classes.
-
-This module defines the interfaces and common base classes for
-the analysis pipeline. It implements the Template Method pattern
-to maximize code reuse and extensibility.
+Refactored to support the Hierarchical Information Atlas pipeline.
 """
 
 import numpy as np
 import os
 import concurrent.futures
 import functools
-import multiprocessing
 from abc import ABC, abstractmethod
-from typing import Dict, Tuple, Any, Callable, List
+from typing import Dict, Tuple, Any, Callable, List, Union
 
-# --- Optional Imports for BaseQUBO ---
+# --- Optional Imports ---
 try:
     import MDAnalysis as mda
-    from MDAnalysis.core.selection import SelectionError
-    from MDAnalysis.core.groups import AtomGroup
     import pyqubo
     import neal
 except ImportError:
@@ -33,12 +27,12 @@ class AnalysisComponent(ABC):
         pass
 
 
-# --- GOAL 1: Static Reporter Base ---
+# --- GOAL 1: Static Atlas Filter (Entropy + State) ---
 
 class BaseStaticReporter(AnalysisComponent):
     """
-    Base class for Static Reporter analysis.
-    Handles parallelization over N residues.
+    Base class for Static Analysis (Goal 1).
+    Now supports returning multiple metrics (e.g., ID and Imbalance).
     """
 
     @abstractmethod
@@ -49,43 +43,25 @@ class BaseStaticReporter(AnalysisComponent):
     def _prepare_worker_params(self, n_samples: int, **kwargs) -> Dict[str, Any]:
         pass
 
-    @property
-    @abstractmethod
-    def _sort_reverse(self) -> bool:
-        pass
-
-    @property
-    @abstractmethod
-    def _metric_name(self) -> str:
-        pass
-
     def run(self, 
             data: Tuple[FeatureDict, np.ndarray], 
             num_workers: int = None, 
             **kwargs
-        ) -> Dict[str, float]:
+        ) -> Dict[str, Dict[str, float]]:
         
         method_name = self.__class__.__name__
-        metric = self._metric_name
         print(f"\n--- Running {method_name} ---")
         
         max_workers = num_workers if num_workers is not None else os.cpu_count()
-        print(f"Using max {max_workers or 'all'} workers for analysis.")
-            
         all_features_static, labels_Y = data
-        scores: Dict[str, float] = {}
+        results: Dict[str, Dict[str, float]] = {}
         
         if not all_features_static:
             print("  Warning: No features found to analyze.")
-            return scores
+            return results
 
         n_samples = labels_Y.shape[0]
         worker_params = self._prepare_worker_params(n_samples, **kwargs)
-        
-        if not worker_params:
-            return scores
-
-        print(f"Calculating {metric} for {len(all_features_static)} residues...")
         
         worker_func = functools.partial(
             self._get_worker_function(),
@@ -94,225 +70,160 @@ class BaseStaticReporter(AnalysisComponent):
             **worker_params
         )
         
-        # --- Serial vs Parallel Execution ---
+        print(f"  Analyzing {len(all_features_static)} residues with {max_workers} workers...")
+        
+        # Execution Strategy
         if max_workers is not None and max_workers <= 1:
-            print("  Running in SERIAL mode (num_workers <= 1).")
-            # Force single-threaded loop for debugging
             for item in list(all_features_static.items()):
-                res_key, score = worker_func(item)
-                scores[res_key] = score
-                if not np.isnan(score):
-                    print(f"  {metric}( {res_key} ) = {score:.4f}")
-                else:
-                    print(f"  {metric}( {res_key} ) = FAILED")
+                res_key, metrics = worker_func(item)
+                results[res_key] = metrics
         else:
-            print(f"  Running in PARALLEL mode ({max_workers} workers).")
-            
             with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
-                # Submit all jobs
                 future_to_key = {executor.submit(worker_func, item): item[0] for item in all_features_static.items()}
-                
-                # Process as they complete
                 for future in concurrent.futures.as_completed(future_to_key):
                     res_key = future_to_key[future]
                     try:
-                        key_out, score = future.result()
-                        scores[res_key] = score
-                        if not np.isnan(score):
-                            print(f"  {metric}( {res_key} ) = {score:.4f}")
-                        else:
-                            print(f"  {metric}( {res_key} ) = FAILED")
+                        key_out, metrics = future.result()
+                        results[res_key] = metrics
                     except Exception as exc:
-                        print(f"  {metric}( {res_key} ) generated an exception: {exc}")
-                        scores[res_key] = np.nan
+                        print(f"  Error analyzing {res_key}: {exc}")
+                        results[res_key] = {"error": np.nan}
 
-        default_val = float('-inf') if self._sort_reverse else float('inf')
-
-        sorted_results = dict(sorted(
-            scores.items(),
-            key=lambda item: item[1] if not np.isnan(item[1]) else default_val,
-            reverse=self._sort_reverse
-        ))
-
-        print(f"{method_name} analysis complete.")
-        return sorted_results
+        print(f"{method_name} complete.")
+        return results
 
 
-# --- GOAL 2: QUBO Base ---
+# --- GOAL 2: Maximum Coverage QUBO ---
 
 class BaseQUBO(AnalysisComponent):
     """
-    Base class for QUBO analysis (Feature Selection).
+    Base class for QUBO Analysis (Goal 2).
+    Refactored for the 'Maximum Coverage' All-vs-All formulation.
     """
     
     @abstractmethod
-    def _get_relevance_worker(self) -> Callable:
-        pass
-        
-    @abstractmethod
-    def _get_redundancy_worker(self) -> Callable:
-        pass
-
-    @abstractmethod
-    def _prepare_worker_params(self, n_samples: int, **kwargs) -> Dict[str, Any]:
-        pass
-    
-    @abstractmethod
-    def _transform_relevance_to_h(self, raw_score: float) -> float:
-        pass
-        
-    @abstractmethod
-    def _transform_redundancy_to_J(self, val_ij: float, val_ji: float, lam: float) -> float:
+    def _compute_interaction_matrix(self, features: FeatureDict, **kwargs) -> Tuple[List[str], np.ndarray]:
+        """
+        Must return:
+        1. List of keys (residue names) corresponding to matrix indices.
+        2. The NxN matrix where M[i,j] = Delta(i -> j).
+        """
         pass
 
     def run(self, 
-            data: Tuple[FeatureDict, np.ndarray, Dict[str, str]], 
+            data: Tuple[FeatureDict, Any, Any], 
             num_workers: int = None,
             **kwargs
         ) -> Dict[str, Any]:
         
-        print(f"\n--- Running {self.__class__.__name__} ---")
+        print(f"\n--- Running {self.__class__.__name__} (Maximum Coverage) ---")
         
-        all_features_static, _, mapping = data
-        max_workers = num_workers if num_workers is not None else os.cpu_count()
+        # Unpack data (Goal 2 only needs the features dictionary)
+        # We assume the runner has already filtered 'data' to the top candidates
+        features_dict = data[0] 
         
-        target_sel = kwargs.get('target_selection_string')
-        topo_file = kwargs.get('active_topo_file')
-        lambda_redundancy = float(kwargs.get('lambda_redundancy', 1.0))
-        num_solutions = int(kwargs.get('num_solutions', 5))
+        # 1. Compute All-vs-All Information Imbalance Matrix
+        print("  Computing All-vs-All Information Matrix...")
+        keys, interaction_matrix = self._compute_interaction_matrix(features_dict, num_workers=num_workers, **kwargs)
         
-        if not all_features_static or not mapping: return {}
-        if not target_sel or not topo_file: raise ValueError("QUBO requires target and topo.")
+        N = len(keys)
+        print(f"  Matrix shape: {interaction_matrix.shape} (for {N} candidates)")
 
-        n_samples = next(iter(all_features_static.values())).shape[0]
-        worker_params = self._prepare_worker_params(n_samples, **kwargs)
-        if not worker_params: return {}
+        # 2. Build Hamiltonian
+        # H(x) = alpha * sum(x) - beta * sum(coverage) + gamma * sum(redundancy)
+        alpha = kwargs.get('alpha_size', 1.0)
+        beta = kwargs.get('beta_coverage', 10.0)
+        gamma = kwargs.get('gamma_redundancy', 5.0)
+        num_solutions = kwargs.get('num_solutions', 5)
 
-        # 2. Parse Selections
-        print(f"Resolving selections using {topo_file}...")
+        print(f"  Building Hamiltonian: alpha={alpha}, beta={beta}, gamma={gamma}")
+        
+        h_linear = {} # Linear terms (h_i)
+        J_quadratic = {} # Quadratic terms (J_ij)
+
+        for i in range(N):
+            key_i = keys[i]
+            
+            # --- Term 1: Penalty for Size (alpha) ---
+            # Adds +alpha to energy for every selected residue
+            h_val = alpha
+            
+            # --- Term 2: Reward for Coverage (beta) ---
+            # We want to select 'i' if it predicts many 'j's.
+            # Gain energy: -beta * sum_{j!=i} (1 - Delta(i->j))
+            # (1 - Delta) is the "Explanation Power". 1 is perfect, 0 is none.
+            explanation_power = 0.0
+            for j in range(N):
+                if i == j: continue
+                delta_i_j = interaction_matrix[i, j]
+                if not np.isnan(delta_i_j):
+                    explanation_power += (1.0 - delta_i_j)
+            
+            h_val -= beta * explanation_power
+            h_linear[key_i] = h_val
+
+            # --- Term 3: Penalty for Redundancy (gamma) ---
+            # Only iterate j > i for upper triangle
+            for j in range(i + 1, N):
+                key_j = keys[j]
+                
+                # Calculate symmetric similarity
+                d_ij = interaction_matrix[i, j]
+                d_ji = interaction_matrix[j, i]
+                
+                if np.isnan(d_ij) or np.isnan(d_ji): continue
+                
+                avg_imbalance = 0.5 * (d_ij + d_ji)
+                symmetric_similarity = 1.0 - avg_imbalance
+                
+                # Penalty: +gamma * similarity
+                # If they are identical (sim=1), high penalty.
+                J_val = gamma * symmetric_similarity
+                
+                if key_i not in J_quadratic: J_quadratic[key_i] = {}
+                J_quadratic[key_i][key_j] = J_val
+
+        # 3. Solve
+        print("  Solving QUBO with SA...")
         try:
-            u = mda.Universe(topo_file)
-            target_ag = u.select_atoms(target_sel)
-            if target_ag.n_atoms == 0: raise ValueError("Target selection matched 0 atoms.")
-        except Exception as e:
-            raise ValueError(f"Selection error: {e}")
-
-        candidate_keys = []
-        excluded_keys = set()
-        for key, sel_str in mapping.items():
-            if key not in all_features_static: continue
-            try:
-                input_ag = u.select_atoms(sel_str)
-                if AtomGroup.intersection(target_ag, input_ag).n_residues > 0:
-                    excluded_keys.add(key)
-                else:
-                    candidate_keys.append(key)
-            except:
-                continue 
-        
-        candidate_keys = sorted(candidate_keys)
-        target_key = 'qubo_target_selection'
-        
-        if target_key not in all_features_static:
-             raise ValueError(f"Target feature '{target_key}' not found.")
-             
-        target_S = all_features_static[target_key]
-        print(f"  Candidates: {len(candidate_keys)}. Target Shape: {target_S.shape}")
-
-        # 3. Compute Relevance (h_i)
-        print("Computing Relevance...")
-        h_i_terms = {}
-        
-        relevance_func = functools.partial(
-            self._get_relevance_worker(),
-            y_target_3d=target_S,
-            n_samples=n_samples,
-            **worker_params
-        )
-        
-        items = [(k, all_features_static[k]) for k in candidate_keys]
-        
-        if max_workers is not None and max_workers <= 1:
-            results = map(relevance_func, items)
-        else:
-            with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
-                results = list(executor.map(relevance_func, items))
-        
-        for key, score in results:
-            h_i = self._transform_relevance_to_h(score)
-            h_i_terms[key] = h_i
-
-        # 4. Compute Redundancy (J_ij)
-        print("Computing Redundancy...")
-        J_ij_terms = {}
-        
-        redundancy_jobs = []
-        for i in range(len(candidate_keys)):
-            for j in range(i + 1, len(candidate_keys)):
-                redundancy_jobs.append((candidate_keys[i], candidate_keys[j]))
-        
-        redundancy_func = functools.partial(
-            self._get_redundancy_worker(),
-            all_features_static=all_features_static,
-            n_samples=n_samples,
-            **worker_params
-        )
-        
-        if max_workers is not None and max_workers <= 1:
-             results = map(redundancy_func, redundancy_jobs)
-        else:
-            with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
-                results = list(executor.map(redundancy_func, redundancy_jobs))
-        
-        for key_i, key_j, s_ij, s_ji in results:
-            J_val = self._transform_redundancy_to_J(s_ij, s_ji, lambda_redundancy)
-            if not np.isnan(J_val):
-                if key_i not in J_ij_terms: J_ij_terms[key_i] = {}
-                J_ij_terms[key_i][key_j] = J_val
-
-        # 5. Build & Solve Hamiltonian
-        print("Solving QUBO...")
-        try:
-            x_vars = {k: pyqubo.Binary(k) for k in candidate_keys}
+            x_vars = {k: pyqubo.Binary(k) for k in keys}
             H = 0.0
             
-            for k, h_val in h_i_terms.items():
-                if not np.isnan(h_val): H += h_val * x_vars[k]
+            for k, val in h_linear.items():
+                H += val * x_vars[k]
             
-            for k_i, partners in J_ij_terms.items():
-                for k_j, J_val in partners.items():
-                    H += J_val * x_vars[k_i] * x_vars[k_j]
-            
+            for k1, partners in J_quadratic.items():
+                for k2, val in partners.items():
+                    H += val * x_vars[k1] * x_vars[k2]
+
             model = H.compile()
             Q, offset = model.to_qubo()
             
             sampler = neal.SimulatedAnnealingSampler()
-            response = sampler.sample_qubo(Q, num_reads=max(num_solutions*20, 100))
+            response = sampler.sample_qubo(Q, num_reads=max(num_solutions*50, 200))
             
             solutions_list = []
             seen = set()
             for record in response.record:
                 energy = record['energy'] + offset
-                if energy >= 0 or len(solutions_list) >= num_solutions: continue
-                
                 sol_tuple = tuple(record['sample'])
+                
                 if sol_tuple not in seen:
                     seen.add(sol_tuple)
                     selected = [response.variables[i] for i, bit in enumerate(record['sample']) if bit == 1]
                     solutions_list.append({
-                        "energy": energy,
-                        "selected_residues": selected,
-                        "num_occurrences": int(record['num_occurrences'])
+                        "energy": float(energy),
+                        "size": len(selected),
+                        "residues": selected
                     })
-                    
-            print(f"Found {len(solutions_list)} solutions.")
-            return {
-                "analysis_type": self.__class__.__name__,
-                "parameters": kwargs,
-                "solutions": solutions_list,
-                "hamiltonian": {"h": h_i_terms, "J": J_ij_terms}
-            }
+                    if len(solutions_list) >= num_solutions: break
             
+            return {
+                "solutions": solutions_list,
+                "matrix_indices": keys,
+                # "interaction_matrix": interaction_matrix.tolist() # Optional: save if needed
+            }
+
         except Exception as e:
-            print(f"  Error during PyQUBO/Neal solve: {e}")
+            print(f"  Error solving QUBO: {e}")
             return {"error": str(e)}

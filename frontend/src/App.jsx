@@ -2,8 +2,8 @@ import React, { useState, useEffect, useRef } from 'react';
 import { 
   Upload, Activity, Server, CheckCircle, XCircle, AlertTriangle, 
   Loader2, Database, FileText, ChevronRight, ArrowLeft, Brain, Sliders, Zap,
-  Eye, Save, Trash2, FolderDown, Download,
-  Palette,
+  Eye, Save, Trash2, FolderDown, Download, Info,
+  Palette, 
   Target // Add Target icon for QUBO
 } from 'lucide-react';
 
@@ -12,7 +12,6 @@ import {
 Main Application Component (App)
 ================================================================================
 */
-// ... (Main App component remains unchanged) ...
 export default function App() {
   const [page, setPage] = useState('submit');
   const [pollingJobId, setPollingJobId] = useState(null); // This is the RQ_JOB_ID
@@ -26,16 +25,25 @@ export default function App() {
       inactive_topo: null, inactive_traj: null,
       config: null,
     },
-    teLag: 10,
-    targetSelection: 'resid 131',
     activeSlice: '',
     inactiveSlice: '',
-    selectionMode: 'all',
+    selectionMode: 'all', // for static/dynamic, or for QUBO pre-filter
     manualSelections: 'resid 50\nresid 131',
-    quboLambda: 1.0,
-    quboSolutions: 5,
-    quboCvFolds: 3,
-    quboNEstimators: 50,
+    stateMetric: 'auc', // Add stateMetric for static analysis
+    // QUBO specific
+    quboMode: 'new', // 'new' or 'from_static'
+    quboStaticJobId: '',
+    alpha_size: 1.0,
+    beta_hub: 2.0,
+    beta_switch: 5.0,
+    gamma_redundancy: 3.0,
+    ii_threshold: 0.4,
+    // New Dual-Stream Filter Params
+    filter_top_total: 100,
+    filter_top_jsd: 20,
+    filter_min_id: 1.5,
+    // Dynamic specific
+    teLag: 10,
   });
 
   // State for user-defined custom selections, persisted in localStorage
@@ -145,7 +153,6 @@ export default function App() {
 Navigation Component (Navbar)
 ================================================================================
 */
-// ... (Navbar component remains unchanged) ...
 const Navbar = ({ setPage, currentPage }) => {
   const navItems = [
     { name: 'submit', label: 'Submit Job', icon: <Upload className="h-4 w-4" /> },
@@ -202,7 +209,6 @@ const Navbar = ({ setPage, currentPage }) => {
 Shared Utility Components (Errors, Loaders, Upload)
 ================================================================================
 */
-// ... (ErrorDisplay, FullPageLoader, FileDropzone, xhrUpload remain unchanged) ...
 const ErrorDisplay = ({ error }) => (
   <div className="bg-red-900 border border-red-700 text-red-100 p-3 rounded-md flex items-center space-x-2">
     <XCircle className="h-5 w-5" /> <span>{error}</span>
@@ -355,23 +361,24 @@ const SubmitJobPage = ({ formState, setFormState, customSelections, setCustomSel
 
   // Destructure state and create setters for easier use
   const {
-    analysisType, files, teLag, targetSelection, activeSlice,
-    inactiveSlice, selectionMode, manualSelections, quboLambda,
-    quboSolutions, quboCvFolds, quboNEstimators
+    analysisType, files, activeSlice, inactiveSlice, selectionMode, 
+    manualSelections, stateMetric, teLag,
+    quboMode, quboStaticJobId, alpha_size, beta_hub, beta_switch, 
+    gamma_redundancy, ii_threshold, 
+    filter_top_total, filter_top_jsd, filter_min_id
   } = formState;
 
   const setAnalysisType = (value) => setFormState(prev => ({ ...prev, analysisType: value }));
   const setFiles = (updater) => setFormState(prev => ({ ...prev, files: typeof updater === 'function' ? updater(prev.files) : updater }));
-  const setTeLag = (value) => setFormState(prev => ({ ...prev, teLag: value }));
-  const setTargetSelection = (value) => setFormState(prev => ({ ...prev, targetSelection: value }));
   const setActiveSlice = (value) => setFormState(prev => ({ ...prev, activeSlice: value }));
   const setInactiveSlice = (value) => setFormState(prev => ({ ...prev, inactiveSlice: value }));
   const setSelectionMode = (value) => setFormState(prev => ({ ...prev, selectionMode: value }));
   const setManualSelections = (value) => setFormState(prev => ({ ...prev, manualSelections: value }));
-  const setQuboLambda = (value) => setFormState(prev => ({ ...prev, quboLambda: value }));
-  const setQuboSolutions = (value) => setFormState(prev => ({ ...prev, quboSolutions: value }));
-  const setQuboCvFolds = (value) => setFormState(prev => ({ ...prev, quboCvFolds: value }));
-  const setQuboNEstimators = (value) => setFormState(prev => ({ ...prev, quboNEstimators: value }));
+  const setStateMetric = (value) => setFormState(prev => ({ ...prev, stateMetric: value }));
+  const setTeLag = (value) => setFormState(prev => ({ ...prev, teLag: value }));
+  const setQuboMode = (value) => setFormState(prev => ({ ...prev, quboMode: value }));
+  const setQuboStaticJobId = (value) => setFormState(prev => ({ ...prev, quboStaticJobId: value }));
+  const setQuboParam = (param, value) => setFormState(prev => ({ ...prev, [param]: value }));
 
   // Persist custom selections to localStorage whenever they change
   useEffect(() => {
@@ -402,19 +409,22 @@ const SubmitJobPage = ({ formState, setFormState, customSelections, setCustomSel
       return;
     }
 
-    if (selectionMode === 'file' && !files.config) {
-      setError("Please upload a config file or change the selection method.");
-      setIsLoading(false);
-      return;
-    }
-
     const formData = new FormData();
     formData.append('active_topo', files.active_topo);
     formData.append('active_traj', files.active_traj);
     formData.append('inactive_topo', files.inactive_topo);
     formData.append('inactive_traj', files.inactive_traj);
 
-    if (selectionMode === 'file' && files.config) {
+    // This logic applies to 'static', 'dynamic', and QUBO 'new' mode
+    const isCandidateSelectionNeeded = (analysisType !== 'qubo') || (analysisType === 'qubo' && quboMode === 'new');
+
+    if (isCandidateSelectionNeeded && selectionMode === 'file' && !files.config) {
+      setError("Please upload a config file or change the selection method.");
+      setIsLoading(false);
+      return;
+    }
+
+    if (isCandidateSelectionNeeded && selectionMode === 'file' && files.config) {
       formData.append('config', files.config);
     } else if (selectionMode === 'manual' && manualSelections.trim()) {
       try {
@@ -439,19 +449,28 @@ const SubmitJobPage = ({ formState, setFormState, customSelections, setCustomSel
     switch (analysisType) {
       case 'static':
         endpoint = '/api/v1/submit/static';
+        formData.append('state_metric', stateMetric);
         break;
       case 'qubo':
         endpoint = '/api/v1/submit/qubo';
-        if (!targetSelection) {
-            setError("Target Selection string is required for QUBO.");
+        if (quboMode === 'from_static' && !quboStaticJobId) {
+            setError("Please select a previous static analysis job to use as input.");
             setIsLoading(false);
             return;
         }
-        formData.append('target_selection_string', targetSelection);
-        formData.append('lambda_redundancy', quboLambda);
-        formData.append('num_solutions', quboSolutions);
-        formData.append('qubo_cv_folds', quboCvFolds);
-        formData.append('qubo_n_estimators', quboNEstimators);
+        if (quboMode === 'from_static') {
+          formData.append('static_job_uuid', quboStaticJobId);
+        }
+        // QUBO Hamiltonian
+        formData.append('alpha_size', alpha_size);
+        formData.append('beta_hub', beta_hub);
+        formData.append('beta_switch', beta_switch);
+        formData.append('gamma_redundancy', gamma_redundancy);
+        formData.append('ii_threshold', ii_threshold);
+        // Filters
+        formData.append('filter_top_total', filter_top_total);
+        formData.append('filter_top_jsd', filter_top_jsd);
+        formData.append('filter_min_id', filter_min_id);
         break;
       case 'dynamic':
         endpoint = '/api/v1/submit/dynamic';
@@ -530,91 +549,58 @@ const SubmitJobPage = ({ formState, setFormState, customSelections, setCustomSel
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
           <div className="bg-gray-800 p-4 rounded-lg border border-gray-700">
-            <h3 className="text-lg font-semibold mb-3 text-cyan-400">Candidate Residues (Input Set)</h3>
-            <div className="flex space-x-1 rounded-lg bg-gray-900 p-1 mb-4">
-              <TabButton label="Analyze All" isActive={selectionMode === 'all'} onClick={() => setSelectionMode('all')} />
-              <TabButton label="Upload File" isActive={selectionMode === 'file'} onClick={() => setSelectionMode('file')} />
-              <TabButton label="Enter Manually" isActive={selectionMode === 'manual'} onClick={() => setSelectionMode('manual')} />
-            </div>
-            {selectionMode === 'all' && (
-              <div className="text-sm text-gray-400 p-4 bg-gray-900 rounded-md">
-                All common protein residues will be used as the candidate pool for analysis.
-              </div>
-            )}
-            {selectionMode === 'file' && (
-              <FileDropzone
-                name="config" label="Residue Config (config.yml)"
-                file={files.config} onChange={handleFileChange}
+            <h3 className="text-lg font-semibold mb-3 text-cyan-400">
+              {analysisType === 'qubo' ? 'QUBO Input Source' : 'Candidate Residues (Input Set)'}
+            </h3>
+            {analysisType === 'qubo' ? (
+              <QuboInputOptions 
+                quboMode={quboMode} setQuboMode={setQuboMode}
+                quboStaticJobId={quboStaticJobId} setQuboStaticJobId={setQuboStaticJobId}
+                selectionMode={selectionMode} setSelectionMode={setSelectionMode}
+                files={files} handleFileChange={handleFileChange}
+                manualSelections={manualSelections} setManualSelections={setManualSelections}
+                customSelections={customSelections} setCustomSelections={setCustomSelections}
               />
-            )}
-            {selectionMode === 'manual' && (
-              <div>
-                <SelectionField
-                  label="Enter MDAnalysis Selections (one per line)"
-                  value={manualSelections}
-                  onChange={setManualSelections}
-                  selectionType="manual"
-                  customSelections={customSelections}
-                  setCustomSelections={setCustomSelections}
-                />
-                <p className="text-xs text-gray-500 mt-1">Each line will become a feature. Keys are auto-generated.</p>
-              </div>
+            ) : (
+              <CandidateResidueInputs 
+                selectionMode={selectionMode} setSelectionMode={setSelectionMode}
+                files={files} handleFileChange={handleFileChange}
+                manualSelections={manualSelections} setManualSelections={setManualSelections}
+                customSelections={customSelections} setCustomSelections={setCustomSelections}
+              />
             )}
           </div>
           <div className="bg-gray-800 p-4 rounded-lg border border-gray-700">
             <h3 className="text-lg font-semibold mb-3 text-cyan-400">Analysis Parameters</h3>
             {analysisType === 'static' && (
-              <p className="text-sm text-gray-400">No additional parameters required for Static analysis.</p>
+              <div className="space-y-4">
+                <div>
+                  <label htmlFor="state_metric" className="block text-sm font-medium text-gray-300 mb-1">
+                    State Sensitivity Metric
+                  </label>
+                  <select
+                    id="state_metric"
+                    value={stateMetric}
+                    onChange={(e) => setStateMetric(e.target.value)}
+                    className="w-full bg-gray-900 border border-gray-600 rounded-md p-2 text-white focus:ring-cyan-500 focus:border-cyan-500"
+                  >
+                    <option value="auc">AUC (Higher is better)</option>
+                    <option value="mi">Mutual Information (Higher is better)</option>
+                    <option value="jsd">Jensen-Shannon Divergence (Higher is better)</option>
+                    <option value="mmd">Max. Mean Discrepancy (Higher is better)</option>
+                    <option value="kl">KL Divergence (Higher is better)</option>
+                  </select>
+                </div>
+                <p className="text-xs text-gray-500 mt-1">
+                  Select the statistical method to measure how predictive a residue is of the global protein state.
+                </p>
+              </div>
             )}
             {analysisType === 'qubo' && (
-              <div className="space-y-4">
-                <SelectionField
-                  label="Target Selection (MDAnalysis string)"
-                  value={targetSelection}
-                  onChange={setTargetSelection}
-                  selectionType="target"
-                  customSelections={customSelections}
-                  setCustomSelections={setCustomSelections}
-                />
-                <p className="text-xs text-gray-500 mt-1">
-                  The residue(s) to predict. These will be removed from the candidate pool.
-                </p>
-                <div className="grid grid-cols-2 gap-4 pt-2">
-                  <div>
-                    <label className="block text-sm font-medium text-gray-300 mb-1">Lambda Penalty</label>
-                    <input type="number" step="0.1" value={quboLambda} onChange={(e) => setQuboLambda(e.target.value)}
-                           className="w-full bg-gray-900 border border-gray-600 rounded-md p-2 text-white focus:ring-cyan-500 focus:border-cyan-500" />
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-300 mb-1"># Solutions</label>
-                    <input type="number" value={quboSolutions} onChange={(e) => setQuboSolutions(e.target.value)}
-                           className="w-full bg-gray-900 border border-gray-600 rounded-md p-2 text-white focus:ring-cyan-500 focus:border-cyan-500" />
-                  </div>
-                </div>
-                <details className="text-sm text-gray-400 mt-2">
-                  <summary className="cursor-pointer hover:text-white">Advanced RF Parameters</summary>
-                  <div className="grid grid-cols-2 gap-4 pt-2 mt-2 border-t border-gray-700">
-                    <div>
-                      <label className="block text-sm font-medium text-gray-300 mb-1">CV Folds</label>
-                      <input
-                        type="number"
-                        value={quboCvFolds}
-                        onChange={(e) => setQuboCvFolds(e.target.value)}
-                        className="w-full bg-gray-900 border border-gray-600 rounded-md p-2 text-white focus:ring-cyan-500 focus:border-cyan-500"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-sm font-medium text-gray-300 mb-1">N Estimators</label>
-                      <input
-                        type="number"
-                        value={quboNEstimators}
-                        onChange={(e) => setQuboNEstimators(e.target.value)}
-                        className="w-full bg-gray-900 border border-gray-600 rounded-md p-2 text-white focus:ring-cyan-500 focus:border-cyan-500"
-                      />
-                    </div>
-                  </div>
-                </details>
-              </div>
+              <QuboParamsInputs
+                params={{ alpha_size, beta_hub, beta_switch, gamma_redundancy, ii_threshold, filter_top_total, filter_top_jsd, filter_min_id }}
+                setParam={setQuboParam}
+              />
             )}
             {analysisType === 'dynamic' && (
               <div>
@@ -641,6 +627,159 @@ const SubmitJobPage = ({ formState, setFormState, customSelections, setCustomSel
     </div>
   );
 };
+
+const CandidateResidueInputs = ({ selectionMode, setSelectionMode, files, handleFileChange, manualSelections, setManualSelections, customSelections, setCustomSelections }) => (
+  <>
+    <div className="flex space-x-1 rounded-lg bg-gray-900 p-1 mb-4">
+      <TabButton label="Analyze All" isActive={selectionMode === 'all'} onClick={() => setSelectionMode('all')} />
+      <TabButton label="Upload File" isActive={selectionMode === 'file'} onClick={() => setSelectionMode('file')} />
+      <TabButton label="Enter Manually" isActive={selectionMode === 'manual'} onClick={() => setSelectionMode('manual')} />
+    </div>
+    {selectionMode === 'all' && (
+      <div className="text-sm text-gray-400 p-4 bg-gray-900 rounded-md">
+        All common protein residues will be used as the candidate pool for analysis.
+      </div>
+    )}
+    {selectionMode === 'file' && (
+      <FileDropzone
+        name="config" label="Residue Config (config.yml)"
+        file={files.config} onChange={handleFileChange}
+      />
+    )}
+    {selectionMode === 'manual' && (
+      <div>
+        <SelectionField
+          label="Enter MDAnalysis Selections (one per line)"
+          value={manualSelections}
+          onChange={setManualSelections}
+          selectionType="manual"
+          customSelections={customSelections}
+          setCustomSelections={setCustomSelections}
+        />
+        <p className="text-xs text-gray-500 mt-1">Each line will become a feature. Keys are auto-generated.</p>
+      </div>
+    )}
+  </>
+);
+
+const QuboInputOptions = (props) => {
+  const { quboMode, setQuboMode, quboStaticJobId, setQuboStaticJobId } = props;
+  const [staticJobs, setStaticJobs] = useState([]);
+  const [isLoading, setIsLoading] = useState(false);
+
+  useEffect(() => {
+    if (quboMode === 'from_static') {
+      setIsLoading(true);
+      fetch('/api/v1/results')
+        .then(res => res.json())
+        .then(data => {
+          const finishedStatic = data.filter(j => j.analysis_type === 'static' && j.status === 'finished');
+          setStaticJobs(finishedStatic);
+        })
+        .catch(console.error)
+        .finally(() => setIsLoading(false));
+    }
+  }, [quboMode]);
+
+  return (
+    <>
+      <div className="flex space-x-1 rounded-lg bg-gray-900 p-1 mb-4">
+        <TabButton label="From New Static Run" isActive={quboMode === 'new'} onClick={() => setQuboMode('new')} />
+        <TabButton label="From Existing Static Run" isActive={quboMode === 'from_static'} onClick={() => setQuboMode('from_static')} />
+      </div>
+
+      {quboMode === 'new' && (
+        <CandidateResidueInputs {...props} />
+      )}
+
+      {quboMode === 'from_static' && (
+        <div>
+          <label htmlFor="static_job_id" className="block text-sm font-medium text-gray-300 mb-1">
+            Select Previous Static Analysis
+          </label>
+          {isLoading ? <FullPageLoader /> : (
+            <select
+              id="static_job_id"
+              value={quboStaticJobId}
+              onChange={(e) => setQuboStaticJobId(e.target.value)}
+              className="w-full bg-gray-900 border border-gray-600 rounded-md p-2 text-white focus:ring-cyan-500 focus:border-cyan-500"
+            >
+              <option value="">-- Select a job --</option>
+              {staticJobs.map(job => (
+                <option key={job.job_id} value={job.job_id}>
+                  {job.job_id.substring(0, 8)}... ({new Date(job.completed_at).toLocaleDateString()})
+                </option>
+              ))}
+            </select>
+          )}
+          {staticJobs.length === 0 && !isLoading && (
+            <p className="text-xs text-yellow-400 mt-2">No completed static analysis jobs found.</p>
+          )}
+        </div>
+      )}
+    </>
+  );
+};
+
+const QuboParamsInputs = ({ params, setParam }) => (
+  <div className="space-y-4">
+    <div className="grid grid-cols-2 gap-4">
+      <div className="col-span-2 bg-gray-700 p-2 rounded-md mb-2">
+        <span className="text-cyan-400 text-sm font-bold">Candidate Filtering (The Funnel)</span>
+      </div>
+      <QuboParamInput 
+        label="Total Candidates" 
+        name="filter_top_total" 
+        value={params.filter_top_total || 100} 
+        setParam={setParam} 
+        step={10} 
+        title="Total number of residues passed to QUBO (Bandwidth)"
+      />
+      <QuboParamInput 
+        label="Guaranteed Top JSD" 
+        name="filter_top_jsd" 
+        value={params.filter_top_jsd || 20} 
+        setParam={setParam} 
+        step={5} 
+        title="Top N residues by JSD are guaranteed to be candidates"
+      />
+       <QuboParamInput 
+        label="Min. Intrinsic Dim" 
+        name="filter_min_id" 
+        value={params.filter_min_id || 1.5} 
+        setParam={setParam} 
+        step={0.1} 
+        title="Discard residues below this ID (Rocks)"
+      />
+    </div>
+
+    <div className="grid grid-cols-2 gap-4">
+      <div className="col-span-2 bg-gray-700 p-2 rounded-md mb-2 mt-2">
+        <span className="text-cyan-400 text-sm font-bold">Hamiltonian Weights</span>
+      </div>
+      <QuboParamInput label="Alpha (Parsimony Cost)" name="alpha_size" value={params.alpha_size} setParam={setParam} step={0.1} />
+      <QuboParamInput label="Beta (Hub Reward)" name="beta_hub" value={params.beta_hub} setParam={setParam} step={0.1} />
+      <QuboParamInput label="Beta (Switch Reward)" name="beta_switch" value={params.beta_switch} setParam={setParam} step={0.1} />
+      <QuboParamInput label="Gamma (Redundancy)" name="gamma_redundancy" value={params.gamma_redundancy} setParam={setParam} step={0.1} />
+      <QuboParamInput label="II Threshold (Edge Def)" name="ii_threshold" value={params.ii_threshold} setParam={setParam} step={0.05} max={1} />
+    </div>
+  </div>
+);
+
+const QuboParamInput = ({ label, name, value, setParam, ...rest }) => (
+  <div>
+    <label htmlFor={name} className="block text-sm font-medium text-gray-300 mb-1">{label}</label>
+    <input
+      id={name}
+      name={name}
+      type="number"
+      value={value}
+      onChange={(e) => setParam(name, parseFloat(e.target.value))}
+      className="w-full bg-gray-900 border border-gray-600 rounded-md p-2 text-white focus:ring-cyan-500 focus:border-cyan-500"
+      {...rest}
+    />
+  </div>
+);
 
 const SelectionField = ({ label, value, onChange, selectionType, customSelections, setCustomSelections }) => {
   const [showLoadPopup, setShowLoadPopup] = useState(false);
@@ -818,7 +957,6 @@ const UploadProgress = ({ progress }) => (
 Page: Job Status (JobStatusPage)
 ================================================================================
 */
-// ... (JobStatusPage and its sub-components remain unchanged) ...
 const JobStatusPage = ({ jobId, onNavigateToResults, onNavigateToResultDetail }) => {
   const [status, setStatus] = useState(null);
   const [error, setError] = useState(null);
@@ -869,18 +1007,18 @@ const JobStatusPage = ({ jobId, onNavigateToResults, onNavigateToResultDetail })
         icon={<CheckCircle className="h-16 w-16 text-green-500" />}
         title="Analysis Complete" jobId={jobId} message="Your results are ready."
       >
-        <div className="mt-6 text-left">
-          <h3 className="text-lg font-semibold text-green-400 mb-2">Results Summary:</h3>
-          <pre className="bg-gray-900 p-4 rounded-md text-gray-200 text-xs overflow-auto">
-            {JSON.stringify(resultPayload.results || resultPayload, null, 2)}
-          </pre>
-        </div>
         <button
           onClick={() => onNavigateToResultDetail(resultPayload.job_id)}
           className="mt-6 w-full flex justify-center items-center space-x-2 bg-cyan-600 hover:bg-cyan-700 text-white font-bold py-3 px-6 rounded-lg transition-colors"
         >
           <span>View Result Details</span>
         </button>
+        <div className="mt-6 text-left">
+          <h3 className="text-lg font-semibold text-green-400 mb-2">Results Summary:</h3>
+          <pre className="bg-gray-900 p-4 rounded-md text-gray-200 text-xs overflow-auto">
+            {JSON.stringify(resultPayload.results || resultPayload, null, 2)}
+          </pre>
+        </div>
       </StatusDisplay>
     );
   }
@@ -1114,7 +1252,6 @@ const ResultItem = ({ item, onSelectResult, onSelectRunningJob, onDelete }) => {
 Page: Result Detail (ResultDetailPage)
 ================================================================================
 */
-// ... (ResultDetailPage remains unchanged) ...
 const ResultDetailPage = ({ resultId, onBack, onVisualize }) => {
   const [result, setResult] = useState(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -1151,8 +1288,19 @@ const ResultDetailPage = ({ resultId, onBack, onVisualize }) => {
 
   // For QUBO, we now also check that the solutions array is not empty.
   const canVisualize = result.residue_selections_mapping && 
-                       (result.analysis_type === 'static' && typeof result.results === 'object') ||
-                       (result.analysis_type === 'qubo' && result.params?.target_selection_string && result.results?.solutions?.length > 0);
+                       (
+                         (result.analysis_type === 'static' && typeof result.results === 'object') ||
+                         // FIX: Removed 'target_selection_string' check which blocked visualization
+                         (result.analysis_type === 'qubo' && result.results?.solutions?.length > 0)
+                       );
+
+  const metricDescriptions = {
+    auc: { name: 'AUC', interpretation: 'Higher score is more predictive.' },
+    mi: { name: 'Mutual Information', interpretation: 'Higher score is more predictive.' },
+    jsd: { name: 'Jensen-Shannon Divergence', interpretation: 'Higher score is more predictive.' },
+    mmd: { name: 'Max. Mean Discrepancy', interpretation: 'Higher score is more predictive.' },
+    kl: { name: 'KL Divergence', interpretation: 'Higher score is more predictive.' },
+  };
 
   return (
     <div className="max-w-4xl mx-auto">
@@ -1186,6 +1334,17 @@ const ResultDetailPage = ({ resultId, onBack, onVisualize }) => {
           )}
         </div>
         
+        {result.analysis_type === 'static' && result.params?.state_metric && (
+          <div className="bg-gray-900 border border-gray-700 text-gray-300 p-3 rounded-md flex items-center space-x-2 my-4">
+            <Info className="h-5 w-5 text-cyan-400" />
+            <span>
+              Static analysis performed using the{' '}
+              <strong className="text-white">{metricDescriptions[result.params.state_metric]?.name || result.params.state_metric}</strong> metric.{' '}
+              <em className="text-gray-400">{metricDescriptions[result.params.state_metric]?.interpretation}</em>
+            </span>
+          </div>
+        )}
+
         {result.analysis_type === 'qubo' && (!result.results?.solutions || result.results.solutions.length === 0) && (
           <div className="bg-yellow-900 border border-yellow-700 text-yellow-100 p-3 rounded-md flex items-center space-x-2 my-4">
             <AlertTriangle className="h-5 w-5" />
@@ -1228,7 +1387,6 @@ const getNglSelection = (keys, mapping) => {
     
   // Final cleanup for NGL: '131 22' -> '131 or 22'
   const finalSelection = nglResidueNumbers.replace(/\s+/g, ' or ') || 'none';
-  // console.log(`Keys: ${keys}, NGL Selection: ${finalSelection}`);
   return finalSelection;
 };
 
@@ -1250,16 +1408,14 @@ const VisualizeResultPage = ({ resultId, onBack }) => {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState(null);
   
-  // --- FIX 2: Use useState for NGL stage, not useRef ---
-  // This ensures React's effects run when the stage is ready.
+  // Use useState for NGL stage to ensure React's effects run when the stage is ready
   const [nglStage, setNglStage] = useState(null);
   const nglViewportRef = useRef(null);
-  // --- END FIX 2 ---
   
   const [staticThreshold, setStaticThreshold] = useState(0.8);
   const [quboSolutionIndex, setQuboSolutionIndex] = useState(0);
   
-  // NGL script loader (unchanged)
+  // NGL script loader
   useEffect(() => {
     const nglScriptId = 'ngl-script';
     if (document.getElementById(nglScriptId)) {
@@ -1272,7 +1428,7 @@ const VisualizeResultPage = ({ resultId, onBack }) => {
     document.body.appendChild(script);
   }, []);
 
-  // Result data fetcher (unchanged)
+  // Result data fetcher
   useEffect(() => {
     if (!resultId) {
       setError("No result ID specified.");
@@ -1307,9 +1463,7 @@ const VisualizeResultPage = ({ resultId, onBack }) => {
     if (window.NGL && structureFile && nglViewportRef.current && !nglStage) {
       console.log("Initializing NGL stage...");
       const stage = new window.NGL.Stage(nglViewportRef.current);
-      // --- FIX 2: Store stage in state ---
       setNglStage(stage);
-      // --- END FIX 2 ---
       
       const ext = structureFile.name.split('.').pop();
       stage.loadFile(structureFile, { ext: ext }).then((component) => {
@@ -1318,98 +1472,100 @@ const VisualizeResultPage = ({ resultId, onBack }) => {
           color: '#555555', // Dark grey
           opacity: 0.3
         });
-        
-        // Representation for TARGET residues (e.g., QUBO target)
-        component.addRepresentation("ball+stick", {
-          name: "target_highlight",
-          sele: "none",
-          color: "#3b82f6", // Blue-500
-        });
-        
-        // Representation for SELECTED residues (e.g., Static reporters or QUBO solution)
-        component.addRepresentation("ball+stick", {
-          name: "selected_highlight",
-          sele: "none",
-          color: "#ef4444", // Red-500
-        });
-        
         component.autoView();
       });
     }
     
     // Cleanup
     return () => {
-      // --- FIX 2: Use state variable for cleanup ---
       if (nglStage) {
         console.log("Disposing NGL stage");
         nglStage.dispose();
         setNglStage(null);
       }
-      // --- END FIX 2 ---
     };
-  }, [structureFile, nglStage]); // Re-run if the structure file changes or stage is manually cleared
+  }, [structureFile, nglStage]); 
   
-  // NGL Update Effect
+  // NGL Update Effect (Dynamic Classification)
   useEffect(() => {
-    // --- FIX 2: Wait for state variable, not ref ---
     if (!nglStage || !resultData) return;
-    // --- END FIX 2 ---
     
-    // --- FIX 1: Correctly destructure 'params' not 'parameters' ---
-    const { analysis_type, results, residue_selections_mapping, params } = resultData;
+    const { analysis_type, results, residue_selections_mapping } = resultData;
     
-    const targetRep = nglStage.getRepresentationsByName('target_highlight');
-    const selectedRep = nglStage.getRepresentationsByName('selected_highlight');
+    // Use eachComponent to iterate through components safely
+    nglStage.eachComponent((comp) => {
+        comp.removeAllRepresentations(); 
+        comp.addRepresentation("cartoon", { color: '#555555', opacity: 0.3 });
     
-    if (!targetRep || !selectedRep) return;
+        if (analysis_type === 'static') {
+           // Static logic
+           const highScoringKeys = Object.keys(results).filter(key => 
+            results[key] && results[key].state_score >= staticThreshold
+          );
+          const sel = getNglSelection(highScoringKeys, residue_selections_mapping);
+          if (sel !== 'none') {
+            comp.addRepresentation("ball+stick", { sele: sel, color: "red" });
+          }
 
-    let targetSele = "none";
-    let selectedSele = "none";
+        } else if (analysis_type === 'qubo') {
+          if (!results.classification) return;
 
-    if (analysis_type === 'static') {
-      // Static Analysis Logic (unchanged)
-      const highScoringKeys = Object.keys(results).filter(
-        key => results[key] >= staticThreshold
-      );
-      selectedSele = getNglSelection(highScoringKeys, residue_selections_mapping);
-      
-    } else if (analysis_type === 'qubo') {
-      // QUBO Analysis Logic
-      if (!results.solutions || !params || !params.target_selection_string) {
-        console.error("QUBO result is missing 'solutions' or 'params.target_selection_string'");
-        return;
-      }
-      
-      // --- FIX 3: Use 'params.target_selection_string' directly, as you suggested ---
-      targetSele = getNglSelectionFromTargetString(params.target_selection_string);
-      // --- END FIX 3 ---
+          const solution = results.solutions?.[quboSolutionIndex];
+          const selectedKeys = new Set(solution?.residues || []);
+          const classification = results.classification;
 
-      // 2. Get Selected Residues R_i from the chosen solution
-      const solution = results.solutions[quboSolutionIndex];
-      if (solution) {
-        const selectedKeys = solution.selected_residues;
-        selectedSele = getNglSelection(selectedKeys, residue_selections_mapping);
-      }
-    }
-    
-    // Apply the selections
-    targetRep.setSelection(targetSele);
-    selectedRep.setSelection(selectedSele);
-    
-  // --- FIX 2: Use state variable in dependency array ---
+          // 1. Categorize Keys based on current solution
+          const switches = [];
+          const silentOps = [];
+          const decoys = [];
+
+          Object.keys(classification).forEach(key => {
+              const cls = classification[key];
+              // Re-evaluate category based on current solution selection:
+              if (selectedKeys.has(key)) {
+                  if (cls.jsd > (results.classification_threshold || 0.3)) {
+                      switches.push(key);
+                  } else {
+                      silentOps.push(key);
+                  }
+              } else {
+                  decoys.push(key); // Was a candidate, but not selected
+              }
+          });
+
+          // 2. Build Selections
+          const switchSel = getNglSelection(switches, residue_selections_mapping);
+          const silentSel = getNglSelection(silentOps, residue_selections_mapping);
+          const decoySel = getNglSelection(decoys, residue_selections_mapping);
+
+          // 3. Add Representations
+          if (switchSel !== 'none') {
+              comp.addRepresentation("ball+stick", { 
+                  sele: switchSel, color: "#ef4444", radiusScale: 1.2, name: "Switches" 
+              }); // Red
+          }
+          if (silentSel !== 'none') {
+              comp.addRepresentation("ball+stick", { 
+                  sele: silentSel, color: "#f59e0b", radiusScale: 1.0, name: "Silent Operators" 
+              }); // Orange
+          }
+          if (decoySel !== 'none') {
+              comp.addRepresentation("licorice", { 
+                  sele: decoySel, color: "#9ca3af", opacity: 0.5, name: "Decoys" 
+              }); // Grey Ghost
+          }
+        }
+    });
+
   }, [resultData, nglStage, staticThreshold, quboSolutionIndex]);
-  // --- END FIX 2 ---
 
   const handleFileChange = (e) => {
     const file = e.target.files[0];
     if (file) {
-      // If we are changing the file, dispose the old stage first
-      // --- FIX 2: Use state variable ---
       if (nglStage) {
         nglStage.dispose();
         setNglStage(null);
       }
-      // --- END FIX 2 ---
       setStructureFile(file);
       setError(null);
     }
@@ -1448,22 +1604,28 @@ const VisualizeResultPage = ({ resultId, onBack }) => {
             {/* NGL Viewport */}
             <div className="lg:col-span-2 bg-black rounded-lg h-96 w-full relative">
               <div ref={nglViewportRef} style={{ width: '100%', height: '100%' }} />
-              {/* Legend */}
-              <div className="absolute top-2 left-2 bg-gray-900 bg-opacity-70 p-2 rounded-md text-xs text-white">
-                <h4 className="font-bold mb-1">Legend</h4>
-                <div className="flex items-center space-x-2">
-                  <div className="w-3 h-3 rounded-full bg-blue-500"></div>
-                  <span>Target (S)</span>
-                </div>
-                <div className="flex items-center space-x-2 mt-1">
-                  <div className="w-3 h-3 rounded-full bg-red-500"></div>
-                  <span>Selected (R)</span>
-                </div>
-              </div>
             </div>
             
             {/* Controls */}
             <div className="bg-gray-900 p-4 rounded-lg">
+               {/* Legend for QUBO */}
+               {resultData?.analysis_type === 'qubo' && (
+                   <div className="mb-4 text-xs text-gray-300 space-y-2 border-b border-gray-700 pb-4">
+                       <h4 className="font-bold text-white">Hierarchical Graph Legend</h4>
+                       <div className="flex items-center space-x-2">
+                           <div className="w-3 h-3 rounded-full bg-red-500"></div>
+                           <span>Switch (High JSD, Selected)</span>
+                       </div>
+                       <div className="flex items-center space-x-2">
+                           <div className="w-3 h-3 rounded-full bg-yellow-500"></div>
+                           <span>Silent Operator (Hub, Selected)</span>
+                       </div>
+                       <div className="flex items-center space-x-2">
+                           <div className="w-3 h-3 rounded-full bg-gray-500 opacity-50"></div>
+                           <span>Entropic Decoy (Candidate, Rejected)</span>
+                       </div>
+                   </div>
+               )}
               <VisualizationControls
                 resultData={resultData}
                 staticThreshold={staticThreshold}
@@ -1480,8 +1642,6 @@ const VisualizeResultPage = ({ resultId, onBack }) => {
 };
 
 // --- VisualizationControls Sub-component ---
-// ... (This component remains unchanged, but is now correct
-//      due to the fixes in its parent) ...
 const VisualizationControls = ({ 
   resultData, 
   staticThreshold, 
@@ -1492,6 +1652,14 @@ const VisualizationControls = ({
   if (!resultData) return null;
 
   const { analysis_type, results } = resultData;
+
+  const metricDescriptions = {
+    auc: { name: 'AUC', interpretation: 'Higher score is more predictive.' },
+    mi: { name: 'Mutual Information', interpretation: 'Higher score is more predictive.' },
+    jsd: { name: 'Jensen-Shannon Divergence', interpretation: 'Higher score is more predictive.' },
+    mmd: { name: 'Max. Mean Discrepancy', interpretation: 'Higher score is more predictive.' },
+    kl: { name: 'KL Divergence', interpretation: 'Higher score is more predictive.' },
+  };
 
   if (analysis_type === 'static') {
     return (
@@ -1518,7 +1686,13 @@ const VisualizationControls = ({
             <div className="text-center text-cyan-400 font-mono text-lg">{staticThreshold.toFixed(2)}</div>
           </div>
           <div className="text-xs text-gray-400">
-            Showing residues with an score $\ge$ {staticThreshold.toFixed(2)}.
+            Showing residues with a score of {staticThreshold.toFixed(2)} or higher.
+            {resultData.params?.state_metric && (
+              <p className="mt-2">
+                Metric: <strong className="text-gray-300">{metricDescriptions[resultData.params.state_metric]?.name || resultData.params.state_metric}</strong>.
+                {' '}{metricDescriptions[resultData.params.state_metric]?.interpretation}
+              </p>
+            )}
           </div>
         </div>
       </>
@@ -1554,13 +1728,12 @@ const VisualizationControls = ({
             </select>
           </div>
           <div className="text-xs text-gray-400">
-            <p><span className="text-blue-400 font-bold">Blue:</span> Target residues (S)</p>
-            <p><span className="text-red-400 font-bold">Red:</span> Selected residues (R) for this solution</p>
+            <p>The graph shows selected residues based on the Hamiltonian energy minimization.</p>
           </div>
           <div className="bg-gray-800 p-2 rounded-md text-xs">
-            <p className="font-bold text-gray-300">Selected Residues:</p>
+            <p className="font-bold text-gray-300">Selected Residues (R):</p>
             <p className="text-red-400 break-all">
-              {results.solutions[quboSolutionIndex]?.selected_residues.join(', ') || 'None'}
+              {results.solutions[quboSolutionIndex]?.residues.join(', ') || 'None'}
             </p>
           </div>
         </div>
@@ -1579,7 +1752,6 @@ const VisualizationControls = ({
 Page: System Health (HealthCheckPage)
 ================================================================================
 */
-// ... (HealthCheckPage and its sub-components remain unchanged) ...
 const HealthCheckPage = () => {
   const [healthReport, setHealthReport] = useState(null);
   const [isLoading, setIsLoading] = useState(false);

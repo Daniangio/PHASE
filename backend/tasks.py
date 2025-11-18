@@ -13,6 +13,22 @@ from alloskin.pipeline.runner import run_analysis
 RESULTS_DIR = Path("/app/data/results")
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
+# Helper to convert NaN to None for JSON serialization
+def _convert_nan_to_none(obj):
+    """
+    Recursively converts numpy.nan values in dicts and lists to None.
+    """
+    import numpy as np
+    if isinstance(obj, dict):
+        return {k: _convert_nan_to_none(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [_convert_nan_to_none(elem) for elem in obj]
+    # --- FIX: Handle both nan and inf ---
+    elif isinstance(obj, float) and not np.isfinite(obj):
+        return None # Convert nan, inf, -inf to None (JSON null)
+    return obj
+
+
 # --- Master Analysis Job ---
 
 def run_analysis_job(
@@ -80,6 +96,14 @@ def run_analysis_job(
                 config = yaml.safe_load(f) or {}
             residue_selections = config.get('residue_selections')
 
+        # --- NEW: Handle pre-computed static analysis for QUBO ---
+        if analysis_type == 'qubo' and params.get('static_job_uuid'):
+            static_uuid = params['static_job_uuid']
+            static_results_path = RESULTS_DIR / f"{static_uuid}.json"
+            if not static_results_path.exists():
+                raise FileNotFoundError(f"Could not find specified static result file for job UUID: {static_uuid}")
+            params['static_results_path'] = str(static_results_path)
+
         # Step 2: Prepare arguments for the runner
         # The runner expects specific keys for file paths
         runner_file_paths = {
@@ -97,12 +121,16 @@ def run_analysis_job(
             residue_selections=residue_selections,
             progress_callback=save_progress
         )
+        # --- NEW: Persist the final mapping and params ---
         result_payload["residue_selections_mapping"] = mapping
+        # The `params` dict might have been modified by the runner,
+        # so we update it in the payload before saving.
+        result_payload["params"] = params
 
         # Step 4: Finalize
         result_payload["status"] = "finished"
         result_payload["results"] = job_results
-        
+
     except Exception as e:
         print(f"[Job {job_uuid}] FAILED: {e}")
         traceback.print_exc()
@@ -116,9 +144,11 @@ def run_analysis_job(
     finally:
         # Step 5: Save final persistent JSON result
         save_progress("Saving final result", 95)
-        result_payload["completed_at"] = datetime.utcnow().isoformat()
+        # --- FIX: Sanitize the payload *before* writing and returning ---
+        result_payload["completed_at"] = datetime.utcnow().isoformat() 
+        sanitized_payload = _convert_nan_to_none(result_payload)
         
-        write_result_to_disk(result_payload)
+        write_result_to_disk(sanitized_payload)
 
         # Clean up the temporary upload folder
         try:
@@ -130,4 +160,5 @@ def run_analysis_job(
             print(f"Warning: Failed to clean up upload dir: {e}")
 
     # This is the value returned to RQ and shown on the status page
-    return result_payload
+    # --- FIX: Return the sanitized payload ---
+    return sanitized_payload

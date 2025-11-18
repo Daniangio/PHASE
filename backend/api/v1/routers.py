@@ -219,6 +219,7 @@ async def submit_static_job(
     residue_selections_json: Optional[str] = Form(None),
     active_slice: Optional[str] = Form(None),
     inactive_slice: Optional[str] = Form(None),
+    state_metric: str = Form("auc"), # Add new parameter
     task_queue: get_queue = Depends(),
 ):
     # Create the files dict,
@@ -233,6 +234,7 @@ async def submit_static_job(
     params = {
         "active_slice": active_slice,
         "inactive_slice": inactive_slice,
+        "state_metric": state_metric, # Pass to worker
     }
     
     if residue_selections_json:
@@ -283,16 +285,22 @@ async def submit_qubo_job(
     inactive_topo: UploadFile = File(...),
     config: Optional[UploadFile] = File(None),
     residue_selections_json: Optional[str] = Form(None),
-    # --- MODIFICATION: Changed parameter name ---
-    target_selection_string: str = Form(...),
-    # --- END MODIFICATION ---
     active_slice: Optional[str] = Form(None),
     inactive_slice: Optional[str] = Form(None),
-    # Add QUBO-specific params with defaults from your previous script
-    qubo_lambda: float = Form(1.0, alias="lambda_redundancy"),
-    qubo_solutions: int = Form(5, alias="num_solutions"),
-    qubo_cv_folds: int = Form(3),
-    qubo_n_estimators: int = Form(50),
+    static_job_uuid: Optional[str] = Form(None),
+    
+    # QUBO Hamiltonian params
+    alpha_size: float = Form(1.0),
+    beta_hub: float = Form(2.0),
+    beta_switch: float = Form(5.0),
+    gamma_redundancy: float = Form(3.0),
+    ii_threshold: float = Form(0.4),
+    
+    # New Filter Params
+    filter_top_total: int = Form(100, description="Total candidates to send to QUBO"),
+    filter_top_jsd: int = Form(20, description="Number of top JSD residues guaranteed to be included"),
+    filter_min_id: float = Form(1.5, description="Minimum Intrinsic Dimension to be considered a Mover"),
+
     task_queue: get_queue = Depends(),
 ):
     files_dict = {
@@ -300,23 +308,32 @@ async def submit_qubo_job(
         "inactive_traj": inactive_traj, "inactive_topo": inactive_topo,
         "config": config
     }
-    # --- MODIFICATION: Add all QUBO params ---
+
+    if not static_job_uuid and not residue_selections_json and not config:
+         raise HTTPException(status_code=400, detail="Missing candidate source.")
+
     params = {
-        "target_selection_string": target_selection_string,
         "active_slice": active_slice,
         "inactive_slice": inactive_slice,
-        "lambda_redundancy": qubo_lambda,
-        "num_solutions": qubo_solutions,
-        "qubo_cv_folds": qubo_cv_folds,
-        "qubo_n_estimators": qubo_n_estimators
+        "alpha_size": alpha_size,
+        "beta_hub": beta_hub,
+        "beta_switch": beta_switch,
+        "gamma_redundancy": gamma_redundancy,
+        "ii_threshold": ii_threshold,
+        # New params passed to runner
+        "filter_top_total": filter_top_total,
+        "filter_top_jsd": filter_top_jsd,
+        "filter_min_id": filter_min_id, 
     }
-    # --- END MODIFICATION ---
+
+    if static_job_uuid:
+        params["static_job_uuid"] = static_job_uuid
     
     if residue_selections_json:
         try:
             params["residue_selections_dict"] = json.loads(residue_selections_json)
         except json.JSONDecodeError:
-            raise HTTPException(status_code=400, detail="Invalid JSON format for residue_selections_json.")
+            raise HTTPException(status_code=400, detail="Invalid JSON.")
 
     return await submit_job("qubo", files_dict, params, task_queue)
 
