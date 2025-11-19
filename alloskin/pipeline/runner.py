@@ -5,7 +5,7 @@ Includes Safe Handling for None/NaN values from JSON.
 """
 import json
 import numpy as np
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Tuple, List
 
 from alloskin.io.readers import MDAnalysisReader
 from alloskin.features.extraction import FeatureExtractor
@@ -20,13 +20,69 @@ def _safe_get(d: Dict, key: str, default: float = 0.0) -> float:
     Safely retrieves a float value from a dictionary.
     Handles cases where the key is missing OR the value is None (from JSON null).
     """
-    val = d.get(key)
+    val = d.get(key) if isinstance(d, dict) else None
     if val is None:
         return default
     try:
         return float(val)
     except (ValueError, TypeError):
         return default
+
+
+def _load_descriptor_features(
+    dataset_cfg: Dict[str, Any]
+) -> Tuple[Dict[str, np.ndarray], Dict[str, np.ndarray], List[str], int, int, Dict[str, str]]:
+    descriptor_keys = dataset_cfg.get("descriptor_keys") or []
+    if not descriptor_keys:
+        raise ValueError("Descriptor keys missing from dataset configuration.")
+
+    def _load(path: str) -> Dict[str, np.ndarray]:
+        data = np.load(path, allow_pickle=True)
+        return {key: data[key] for key in descriptor_keys}
+
+    active_features = _load(dataset_cfg["active_descriptors"])
+    inactive_features = _load(dataset_cfg["inactive_descriptors"])
+
+    if not active_features or not inactive_features:
+        raise ValueError("Descriptor files did not contain any residues.")
+
+    n_frames_active = dataset_cfg.get("n_frames_active") or next(iter(active_features.values())).shape[0]
+    n_frames_inactive = dataset_cfg.get("n_frames_inactive") or next(iter(inactive_features.values())).shape[0]
+    residue_mapping = dataset_cfg.get("residue_mapping") or {}
+
+    return (
+        active_features,
+        inactive_features,
+        descriptor_keys,
+        n_frames_active,
+        n_frames_inactive,
+        residue_mapping,
+    )
+
+
+def _combine_static_features(
+    active_features: Dict[str, np.ndarray],
+    inactive_features: Dict[str, np.ndarray],
+    descriptor_keys: List[str],
+    n_frames_active: int,
+    n_frames_inactive: int,
+) -> Tuple[Dict[str, np.ndarray], np.ndarray]:
+    combined: Dict[str, np.ndarray] = {}
+    for key in descriptor_keys:
+        combined[key] = np.concatenate([active_features[key], inactive_features[key]], axis=0)
+
+    labels = np.concatenate(
+        [
+            np.ones(n_frames_active, dtype=int),
+            np.zeros(n_frames_inactive, dtype=int),
+        ]
+    )
+    shuffle_idx = np.random.permutation(labels.shape[0])
+    labels = labels[shuffle_idx]
+    for key in combined:
+        combined[key] = combined[key][shuffle_idx]
+
+    return combined, labels
 
 def run_analysis(
     analysis_type: str,
@@ -40,27 +96,62 @@ def run_analysis(
         else: print(f"[{pct}%] {msg}")
 
     report("Initializing Pipeline", 5)
-    
-    reader = MDAnalysisReader()
-    extractor = FeatureExtractor(residue_selections)
-    builder = DatasetBuilder(reader, extractor)
+    use_descriptors = "active_descriptors" in file_paths
+    mapping = file_paths.get("residue_mapping") if use_descriptors else None
 
-    report(f"Loading Data for {analysis_type}", 15)
+    reader = None
+    extractor = None
+    builder = None
     active_slice = params.get("active_slice")
     inactive_slice = params.get("inactive_slice")
 
+    if not use_descriptors:
+        reader = MDAnalysisReader()
+        extractor = FeatureExtractor(residue_selections)
+        builder = DatasetBuilder(reader, extractor)
+        report(f"Loading Data for {analysis_type}", 15)
+
     if analysis_type in ['static', 'qubo']:
-        features_dict, labels_Y, mapping = builder.prepare_static_analysis_data(
-            file_paths['active_traj'], file_paths['active_topo'],
-            file_paths['inactive_traj'], file_paths['inactive_topo'],
-            active_slice=active_slice, inactive_slice=inactive_slice
-        )
+        if use_descriptors:
+            (
+                active_features_raw,
+                inactive_features_raw,
+                descriptor_keys,
+                n_frames_active,
+                n_frames_inactive,
+                mapping,
+            ) = _load_descriptor_features(file_paths)
+            features_dict, labels_Y = _combine_static_features(
+                active_features_raw,
+                inactive_features_raw,
+                descriptor_keys,
+                n_frames_active,
+                n_frames_inactive,
+            )
+        else:
+            features_dict, labels_Y, mapping = builder.prepare_static_analysis_data(
+                file_paths['active_traj'], file_paths['active_topo'],
+                file_paths['inactive_traj'], file_paths['inactive_topo'],
+                active_slice=active_slice, inactive_slice=inactive_slice
+            )
     elif analysis_type == 'dynamic':
-        features_act, features_inact, mapping = builder.prepare_dynamic_analysis_data(
-            file_paths['active_traj'], file_paths['active_topo'],
-            file_paths['inactive_traj'], file_paths['inactive_topo'],
-             active_slice=active_slice, inactive_slice=inactive_slice
-        )
+        if use_descriptors:
+            (
+                active_features_raw,
+                inactive_features_raw,
+                descriptor_keys,
+                _,
+                _,
+                mapping,
+            ) = _load_descriptor_features(file_paths)
+            features_act = {k: active_features_raw[k] for k in descriptor_keys}
+            features_inact = {k: inactive_features_raw[k] for k in descriptor_keys}
+        else:
+            features_act, features_inact, mapping = builder.prepare_dynamic_analysis_data(
+                file_paths['active_traj'], file_paths['active_topo'],
+                file_paths['inactive_traj'], file_paths['inactive_topo'],
+                active_slice=active_slice, inactive_slice=inactive_slice
+            )
 
     # --- Execution ---
     
@@ -90,7 +181,8 @@ def run_analysis(
             loaded_mapping = static_stats.get('residue_selections_mapping')
             if loaded_mapping:
                  extractor = FeatureExtractor(residue_selections=loaded_mapping)
-            
+            if reader is None:
+                reader = MDAnalysisReader()
             # We must rebuild features to get the trajectory data for the QUBO calculation
             builder = DatasetBuilder(reader, extractor)
             features_dict, labels_Y, mapping = builder.prepare_static_analysis_data(

@@ -1,17 +1,16 @@
-import os
-import shutil
-import yaml
 import json
 import traceback
 from pathlib import Path
 from datetime import datetime
 from rq import get_current_job
-from typing import Dict, Any, Optional
+from typing import Dict, Any
 from alloskin.pipeline.runner import run_analysis
+from backend.services.project_store import ProjectStore
 
 # Define the persistent results directory
 RESULTS_DIR = Path("/app/data/results")
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+project_store = ProjectStore()
 
 # Helper to convert NaN to None for JSON serialization
 def _convert_nan_to_none(obj):
@@ -34,10 +33,8 @@ def _convert_nan_to_none(obj):
 def run_analysis_job(
     job_uuid: str,
     analysis_type: str, 
-    file_paths: Dict[str, str],
+    dataset_ref: Dict[str, str],
     params: Dict[str, Any],
-    config_path: Optional[str] = None,
-    residue_selections_dict: Optional[Dict[str, str]] = None
 ):
     """
     The main, long-running analysis function.
@@ -59,6 +56,11 @@ def run_analysis_job(
         "params": params,
         "residue_selections_mapping": None,
         "results": None,
+        "system_reference": {
+            "project_id": dataset_ref.get("project_id"),
+            "system_id": dataset_ref.get("system_id"),
+            "structures": {},
+        },
         "error": None,
         "completed_at": None, # Will be filled in 'finally'
     }
@@ -88,13 +90,46 @@ def run_analysis_job(
         save_progress("Initializing...", 0)
         write_result_to_disk(result_payload)
 
-        # Step 1: Load residue selections if a config file is provided
-        residue_selections = residue_selections_dict
-        if config_path and not residue_selections:
-            print(f"[Worker] Loading config from {config_path}")
-            with open(config_path, 'r') as f:
-                config = yaml.safe_load(f) or {}
-            residue_selections = config.get('residue_selections')
+        # Step 1: Resolve the dataset (stored descriptors + PDBs)
+        project_id = dataset_ref.get("project_id")
+        system_id = dataset_ref.get("system_id")
+        if not project_id or not system_id:
+            raise ValueError("Dataset reference missing project_id or system_id.")
+
+        system_meta = project_store.get_system(project_id, system_id)
+        if system_meta.status != "ready":
+            raise ValueError(f"System '{system_id}' is not ready (status={system_meta.status}).")
+
+        active_state = system_meta.states.get("active")
+        inactive_state = system_meta.states.get("inactive")
+        if not active_state or not inactive_state:
+            raise ValueError("System is missing active or inactive descriptor state.")
+        if not active_state.descriptor_file or not inactive_state.descriptor_file:
+            raise ValueError("Descriptor files are missing for the selected system.")
+
+        dataset_paths = {
+            "project_id": project_id,
+            "system_id": system_id,
+            "active_descriptors": str(
+                project_store.resolve_path(project_id, system_id, active_state.descriptor_file)
+            ),
+            "inactive_descriptors": str(
+                project_store.resolve_path(project_id, system_id, inactive_state.descriptor_file)
+            ),
+            "descriptor_keys": system_meta.descriptor_keys,
+            "residue_mapping": system_meta.residue_selections_mapping or {},
+            "n_frames_active": active_state.n_frames,
+            "n_frames_inactive": inactive_state.n_frames,
+        }
+
+        result_payload["system_reference"] = {
+            "project_id": project_id,
+            "system_id": system_id,
+            "structures": {
+                "active": active_state.pdb_file,
+                "inactive": inactive_state.pdb_file,
+            },
+        }
 
         # --- NEW: Handle pre-computed static analysis for QUBO ---
         if analysis_type == 'qubo' and params.get('static_job_uuid'):
@@ -104,25 +139,15 @@ def run_analysis_job(
                 raise FileNotFoundError(f"Could not find specified static result file for job UUID: {static_uuid}")
             params['static_results_path'] = str(static_results_path)
 
-        # Step 2: Prepare arguments for the runner
-        # The runner expects specific keys for file paths
-        runner_file_paths = {
-            'active_traj': file_paths['active_traj_file'],
-            'active_topo': file_paths['active_topo_file'],
-            'inactive_traj': file_paths['inactive_traj_file'],
-            'inactive_topo': file_paths['inactive_topo_file'],
-        }
-        
-        # Step 3: Delegate to the core runner
+        # Step 2: Delegate to the core runner
         job_results, mapping = run_analysis(
             analysis_type=analysis_type,
-            file_paths=runner_file_paths,
+            file_paths=dataset_paths,
             params=params,
-            residue_selections=residue_selections,
             progress_callback=save_progress
         )
         # --- NEW: Persist the final mapping and params ---
-        result_payload["residue_selections_mapping"] = mapping
+        result_payload["residue_selections_mapping"] = mapping or dataset_paths.get("residue_mapping")
         # The `params` dict might have been modified by the runner,
         # so we update it in the payload before saving.
         result_payload["params"] = params
@@ -149,15 +174,6 @@ def run_analysis_job(
         sanitized_payload = _convert_nan_to_none(result_payload)
         
         write_result_to_disk(sanitized_payload)
-
-        # Clean up the temporary upload folder
-        try:
-            upload_dir = Path("/app/data/uploads") / job_uuid
-            if upload_dir.exists() and upload_dir.name == job_uuid:
-                shutil.rmtree(upload_dir)
-                print(f"Cleaned up upload directory: {upload_dir}")
-        except Exception as e:
-            print(f"Warning: Failed to clean up upload dir: {e}")
 
     # This is the value returned to RQ and shown on the status page
     # --- FIX: Return the sanitized payload ---

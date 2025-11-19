@@ -5,7 +5,9 @@ Defines endpoints for job submission, status polling, and result retrieval.
 
 import shutil
 import json, os
+from dataclasses import asdict
 from fastapi import APIRouter, HTTPException, Depends, Request, UploadFile, File, Form, Response
+from fastapi.responses import FileResponse
 from typing import Dict, Any, List, Optional
 import uuid
 from pathlib import Path
@@ -14,14 +16,301 @@ from redis import RedisError
 
 # Import the master task function
 from backend.tasks import run_analysis_job
+from backend.api.v1.schemas import (
+    ProjectCreateRequest,
+    StaticJobRequest,
+    DynamicJobRequest,
+    QUBOJobRequest,
+)
+from backend.services.project_store import (
+    ProjectStore,
+    DescriptorState,
+    ProjectMetadata,
+    SystemMetadata,
+)
+from backend.services.preprocessing import DescriptorPreprocessor
+from backend.services.descriptors import save_descriptor_npz
 
 api_router = APIRouter()
 
 # --- Directory Definitions ---
-UPLOAD_DIR = Path("/app/data/uploads")
 RESULTS_DIR = Path("/app/data/results")
-UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+project_store = ProjectStore()
+
+
+def _serialize_project(meta: ProjectMetadata) -> Dict[str, Any]:
+    return asdict(meta)
+
+
+def _serialize_system(meta: SystemMetadata) -> Dict[str, Any]:
+    return asdict(meta)
+
+
+async def _stream_upload(upload: UploadFile, destination: Path) -> None:
+    """Writes an UploadFile to disk in streaming fashion."""
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with open(destination, "wb") as buffer:
+        while chunk := await upload.read(1024 * 1024):
+            buffer.write(chunk)
+
+
+def _normalize_stride(label: str, raw_value: int) -> int:
+    try:
+        stride = int(raw_value)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail=f"Invalid stride value '{raw_value}' for {label}.")
+    if stride <= 0:
+        raise HTTPException(status_code=400, detail=f"Stride for {label} must be >= 1.")
+    return stride
+
+
+def _stride_to_slice(stride: int) -> Optional[str]:
+    return f"::{stride}" if stride > 1 else None
+
+
+def _parse_residue_selections(raw_json: Optional[str]) -> Optional[Dict[str, str]]:
+    if not raw_json:
+        return None
+    try:
+        data = json.loads(raw_json)
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="Invalid JSON for residue selections.")
+    if not isinstance(data, dict):
+        raise HTTPException(status_code=400, detail="Residue selections JSON must be an object.")
+    return data
+
+
+def _ensure_system_ready(project_id: str, system_id: str) -> SystemMetadata:
+    try:
+        system = project_store.get_system(project_id, system_id)
+    except FileNotFoundError:
+        raise HTTPException(
+            status_code=404,
+            detail=f"System '{system_id}' not found in project '{project_id}'.",
+        )
+    if system.status != "ready":
+        raise HTTPException(
+            status_code=400,
+            detail=f"System '{system_id}' is not ready (status={system.status}).",
+        )
+    if not system.descriptor_keys:
+        raise HTTPException(
+            status_code=400,
+            detail=f"System '{system_id}' has no descriptor keys. Re-run preprocessing.",
+        )
+    return system
+
+
+# --- Project & System Management ---
+
+@api_router.post("/projects", summary="Create a new project")
+async def create_project(payload: ProjectCreateRequest):
+    try:
+        project = project_store.create_project(payload.name, payload.description)
+    except Exception as exc:  # pragma: no cover - filesystem failure paths
+        raise HTTPException(status_code=500, detail=f"Failed to create project: {exc}") from exc
+    return _serialize_project(project)
+
+
+@api_router.get("/projects", summary="List all projects")
+async def list_projects():
+    projects = [_serialize_project(p) for p in project_store.list_projects()]
+    return projects
+
+
+@api_router.get("/projects/{project_id}", summary="Project detail including systems")
+async def get_project_detail(project_id: str):
+    try:
+        project = project_store.get_project(project_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found.")
+    systems = [_serialize_system(s) for s in project_store.list_systems(project_id)]
+    payload = _serialize_project(project)
+    payload["systems"] = systems
+    return payload
+
+
+@api_router.get("/projects/{project_id}/systems", summary="List systems for a project")
+async def list_systems(project_id: str):
+    try:
+        project_store.get_project(project_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found.")
+    systems = [_serialize_system(s) for s in project_store.list_systems(project_id)]
+    return systems
+
+
+@api_router.get("/projects/{project_id}/systems/{system_id}", summary="Get system metadata")
+async def get_system_detail(project_id: str, system_id: str):
+    try:
+        system = project_store.get_system(project_id, system_id)
+    except FileNotFoundError:
+        raise HTTPException(
+            status_code=404,
+            detail=f"System '{system_id}' not found in project '{project_id}'.",
+        )
+    return _serialize_system(system)
+
+
+@api_router.get(
+    "/projects/{project_id}/systems/{system_id}/structures/{state}",
+    summary="Download the stored PDB file for a system state",
+)
+async def download_structure(project_id: str, system_id: str, state: str):
+    state_key = state.lower()
+    if state_key not in ("active", "inactive"):
+        raise HTTPException(status_code=400, detail="State must be 'active' or 'inactive'.")
+    try:
+        system = project_store.get_system(project_id, system_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"System '{system_id}' not found.")
+
+    state_meta = system.states.get(state_key)
+    if not state_meta or not state_meta.pdb_file:
+        raise HTTPException(status_code=404, detail=f"No PDB stored for state '{state_key}'.")
+
+    file_path = project_store.resolve_path(project_id, system_id, state_meta.pdb_file)
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="Stored PDB file is missing on disk.")
+
+    return FileResponse(
+        file_path,
+        filename=os.path.basename(file_path),
+        media_type="chemical/x-pdb",
+    )
+
+
+@api_router.delete("/projects/{project_id}", summary="Delete a project and all its systems")
+async def delete_project(project_id: str):
+    try:
+        project_store.delete_project(project_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found.")
+    except Exception as exc:  # pragma: no cover
+        raise HTTPException(status_code=500, detail=f"Failed to delete project: {exc}") from exc
+    return {"status": "deleted", "project_id": project_id}
+
+
+@api_router.delete("/projects/{project_id}/systems/{system_id}", summary="Delete a system")
+async def delete_system(project_id: str, system_id: str):
+    try:
+        project_store.delete_system(project_id, system_id)
+    except FileNotFoundError:
+        raise HTTPException(
+            status_code=404,
+            detail=f"System '{system_id}' not found in project '{project_id}'.",
+        )
+    except Exception as exc:  # pragma: no cover
+        raise HTTPException(status_code=500, detail=f"Failed to delete system: {exc}") from exc
+    return {"status": "deleted", "system_id": system_id}
+
+
+@api_router.post(
+    "/projects/{project_id}/systems",
+    summary="Upload structures and trajectories to build descriptor files",
+)
+async def create_system_with_descriptors(
+    project_id: str,
+    name: Optional[str] = Form(None),
+    description: Optional[str] = Form(None),
+    active_pdb: UploadFile = File(...),
+    inactive_pdb: Optional[UploadFile] = File(None),
+    active_traj: UploadFile = File(...),
+    inactive_traj: UploadFile = File(...),
+    active_stride: int = Form(1),
+    inactive_stride: int = Form(1),
+    residue_selections_json: Optional[str] = Form(None),
+):
+    try:
+        project_store.get_project(project_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found.")
+
+    residue_selections = _parse_residue_selections(residue_selections_json)
+    try:
+        system_meta = project_store.create_system(
+            project_id, name=name, description=description, residue_selections=residue_selections
+        )
+    except Exception as exc:  # pragma: no cover
+        raise HTTPException(status_code=500, detail=f"Failed to create system: {exc}") from exc
+
+    dirs = project_store.ensure_directories(project_id, system_meta.system_id)
+    system_dir = dirs["system_dir"]
+    structures_dir = dirs["structures_dir"]
+    descriptors_dir = dirs["descriptors_dir"]
+    tmp_dir = dirs["tmp_dir"]
+
+    active_stride_val = _normalize_stride("active", active_stride)
+    inactive_stride_val = _normalize_stride("inactive", inactive_stride)
+    active_slice = _stride_to_slice(active_stride_val)
+    inactive_slice = _stride_to_slice(inactive_stride_val)
+
+    active_pdb_path = structures_dir / "active.pdb"
+    await _stream_upload(active_pdb, active_pdb_path)
+
+    inactive_pdb_path = structures_dir / "inactive.pdb"
+    if inactive_pdb:
+        await _stream_upload(inactive_pdb, inactive_pdb_path)
+    else:
+        shutil.copy(active_pdb_path, inactive_pdb_path)
+
+    active_traj_path = tmp_dir / f"active_{active_traj.filename or 'traj'}"
+    inactive_traj_path = tmp_dir / f"inactive_{inactive_traj.filename or 'traj'}"
+    await _stream_upload(active_traj, active_traj_path)
+    await _stream_upload(inactive_traj, inactive_traj_path)
+
+    preprocessor = DescriptorPreprocessor(residue_selections=residue_selections)
+    try:
+        build_result = preprocessor.build(
+            str(active_traj_path),
+            str(active_pdb_path),
+            str(inactive_traj_path),
+            str(inactive_pdb_path),
+            active_slice=active_slice,
+            inactive_slice=inactive_slice,
+        )
+    except Exception as exc:
+        system_meta.status = "failed"
+        project_store.save_system(system_meta)
+        raise HTTPException(status_code=500, detail=f"Descriptor pre-processing failed: {exc}") from exc
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    active_npz_path = descriptors_dir / "active_descriptors.npz"
+    inactive_npz_path = descriptors_dir / "inactive_descriptors.npz"
+    save_descriptor_npz(active_npz_path, build_result.active_features)
+    save_descriptor_npz(inactive_npz_path, build_result.inactive_features)
+
+    relative_active_pdb = str(active_pdb_path.relative_to(system_dir))
+    relative_inactive_pdb = str(inactive_pdb_path.relative_to(system_dir))
+    relative_active_npz = str(active_npz_path.relative_to(system_dir))
+    relative_inactive_npz = str(inactive_npz_path.relative_to(system_dir))
+
+    system_meta.states["active"] = DescriptorState(
+        role="active",
+        pdb_file=relative_active_pdb,
+        descriptor_file=relative_active_npz,
+        n_frames=build_result.n_frames_active,
+        stride=active_stride_val,
+        source_traj=active_traj.filename,
+        slice_spec=active_slice,
+    )
+    system_meta.states["inactive"] = DescriptorState(
+        role="inactive",
+        pdb_file=relative_inactive_pdb,
+        descriptor_file=relative_inactive_npz,
+        n_frames=build_result.n_frames_inactive,
+        stride=inactive_stride_val,
+        source_traj=inactive_traj.filename,
+        slice_spec=inactive_slice,
+    )
+    system_meta.descriptor_keys = build_result.residue_keys
+    system_meta.residue_selections_mapping = build_result.residue_mapping
+    system_meta.status = "ready"
+
+    project_store.save_system(system_meta)
+    return _serialize_system(system_meta)
 
 
 # --- Dependencies ---
@@ -30,62 +319,6 @@ def get_queue(request: Request):
     if request.app.state.task_queue is None:
         raise HTTPException(status_code=503, detail="Worker queue not initialized. Check Redis connection.")
     return request.app.state.task_queue
-
-# --- REFACTORED File Saving Helper ---
-async def save_uploaded_files(
-    files_dict: Dict[str, UploadFile], 
-    job_folder: Path
-) -> Dict[str, str]:
-    """
-    Saves uploaded files from a dictionary to a job-specific folder
-    and returns a path dict for the worker.
-    """
-    saved_paths = {}
-    
-    # Map frontend form keys to worker path keys
-    key_to_path_key = {
-        "active_traj": "active_traj_file",
-        "active_topo": "active_topo_file",
-        "inactive_traj": "inactive_traj_file",
-        "inactive_topo": "inactive_topo_file",
-        "config": "config_path",
-    }
-
-    for key, file_obj in files_dict.items():
-        if key not in key_to_path_key:
-            print(f"Warning: Unknown file key '{key}' skipped.")
-            continue 
-        
-        # This check is important: if file_obj is None (from File(None)), skip it
-        if file_obj is None:
-            continue
-
-        # Use the original filename for saving
-        file_path = job_folder / file_obj.filename
-        try:
-            with open(file_path, "wb") as buffer:
-                # Read in 1MB chunks
-                while content := await file_obj.read(1024 * 1024): 
-                    buffer.write(content)
-            
-            # Use the dict 'key' to build the path map for the worker
-            path_key = key_to_path_key[key]
-            saved_paths[path_key] = str(file_path)
-
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Failed to save file {file_obj.filename}: {e}")
-
-    # --- BUG FIX ---
-    # The old check `if len(saved_paths) != 5:` was incorrect.
-    # We must validate that the 4 *required* files are present.
-    # The 'config' file is optional.
-    required_paths = ["active_traj_file", "active_topo_file", "inactive_traj_file", "inactive_topo_file"]
-    missing_files = [key for key in required_paths if key not in saved_paths]
-    if missing_files:
-            raise HTTPException(status_code=400, detail=f"Missing required files: {', '.join(missing_files)}")
-    # --- END BUG FIX ---
-    
-    return saved_paths
 
 # --- Health Check Endpoint ---
 
@@ -155,187 +388,74 @@ async def get_job_status(job_id: str, request: Request):
     
     return response
 
-# --- REFACTORED Job Submission Endpoints ---
-
-async def submit_job(
+def submit_job(
     analysis_type: str,
-    files_dict: Dict[str, UploadFile], # Now contains 4 or 5 files
-    params: Dict[str, Any],            # Now contains optional 'residue_selections_dict'
-    task_queue: Any                    # Dependency
+    project_id: str,
+    system_id: str,
+    params: Dict[str, Any],
+    task_queue: Any,
 ):
-    """Helper function to enqueue any analysis job."""
-    
-    # 1. Create a unique ID for this analysis run
+    """Helper to enqueue a job backed by a preprocessed system."""
+    _ensure_system_ready(project_id, system_id)
     job_uuid = str(uuid.uuid4())
-    job_folder = UPLOAD_DIR / job_uuid
-    job_folder.mkdir(parents=True, exist_ok=True)
-    
+    dataset_ref = {"project_id": project_id, "system_id": system_id}
+
     try:
-        # 2. Save all uploaded files (4 or 5)
-        saved_paths = await save_uploaded_files(files_dict, job_folder)
-        
-        # 3. Prepare arguments for the worker task
-        # Pop worker-specific params. `params` will be passed to the worker.
-        residue_selections_dict = params.pop("residue_selections_dict", None)
-        # Get the config_path *if it was saved*
-        config_path = saved_paths.get('config_path')
-        
-        # 4. Enqueue the Master Job
-        # The `run_analysis_job` function in tasks.py expects 6 arguments.
-        # We must pass them all, respecting their order.
         job = task_queue.enqueue(
             run_analysis_job,
             args=(
-                job_uuid,                 # 1. job_uuid
-                analysis_type,            # 2. analysis_type
-                saved_paths,              # 3. file_paths
-                params,                   # 4. params (now contains analysis-specific args)
-                config_path,              # 5. config_path (can be None)
-                residue_selections_dict   # 6. residue_selections_dict (can be None)
+                job_uuid,
+                analysis_type,
+                dataset_ref,
+                params,
             ),
-            job_timeout='2h',
-            result_ttl=86400, # Keep result in Redis for 1 day
-            job_id=f"analysis-{job_uuid}" # Use a predictable RQ job ID
+            job_timeout="2h",
+            result_ttl=86400,
+            job_id=f"analysis-{job_uuid}",
         )
-
-        # 5. Return the RQ job ID for polling
         return {"status": "queued", "job_id": job.id, "analysis_uuid": job_uuid}
-
-    except Exception as e:
-        if job_folder.exists():
-            shutil.rmtree(job_folder)
-        if isinstance(e, HTTPException):
-            raise e
-        print(f"Error during job submission: {e}") # Log for debugging
-        raise HTTPException(status_code=500, detail=f"Job submission failed: {str(e)}")
+    except Exception as exc:  # pragma: no cover
+        raise HTTPException(status_code=500, detail=f"Job submission failed: {exc}") from exc
 
 @api_router.post("/submit/static", summary="Submit a Static Reporters analysis")
 async def submit_static_job(
-    active_traj: UploadFile = File(...),
-    active_topo: UploadFile = File(...),
-    inactive_traj: UploadFile = File(...),
-    inactive_topo: UploadFile = File(...),
-    config: Optional[UploadFile] = File(None),
-    residue_selections_json: Optional[str] = Form(None),
-    active_slice: Optional[str] = Form(None),
-    inactive_slice: Optional[str] = Form(None),
-    state_metric: str = Form("auc"), # Add new parameter
+    payload: StaticJobRequest,
     task_queue: get_queue = Depends(),
 ):
-    # Create the files dict,
-    # `config` will be None if not provided by the frontend.
-    files_dict = {
-        "active_traj": active_traj, "active_topo": active_topo,
-        "inactive_traj": inactive_traj, "inactive_topo": inactive_topo,
-        "config": config
-    }
-    
-    # Prepare params for the worker
     params = {
-        "active_slice": active_slice,
-        "inactive_slice": inactive_slice,
-        "state_metric": state_metric, # Pass to worker
+        "state_metric": payload.state_metric,
     }
-    
-    if residue_selections_json:
-        try:
-            params["residue_selections_dict"] = json.loads(residue_selections_json)
-        except json.JSONDecodeError:
-            raise HTTPException(status_code=400, detail="Invalid JSON format for residue_selections_json.")
-            
-    return await submit_job("static", files_dict, params, task_queue)
+    return submit_job("static", payload.project_id, payload.system_id, params, task_queue)
+
 
 @api_router.post("/submit/dynamic", summary="Submit a Dynamic (Transfer Entropy) analysis")
 async def submit_dynamic_job(
-    active_traj: UploadFile = File(...),
-    active_topo: UploadFile = File(...),
-    inactive_traj: UploadFile = File(...),
-    inactive_topo: UploadFile = File(...),
-    config: Optional[UploadFile] = File(None),
-    residue_selections_json: Optional[str] = Form(None),
-    te_lag: int = Form(10),
-    active_slice: Optional[str] = Form(None),
-    inactive_slice: Optional[str] = Form(None),
+    payload: DynamicJobRequest,
     task_queue: get_queue = Depends(),
 ):
-    files_dict = {
-        "active_traj": active_traj, "active_topo": active_topo,
-        "inactive_traj": inactive_traj, "inactive_topo": inactive_topo,
-        "config": config
-    }
-    params = {
-        "te_lag": te_lag,
-        "active_slice": active_slice,
-        "inactive_slice": inactive_slice,
-    }
+    params = {"te_lag": payload.te_lag}
+    return submit_job("dynamic", payload.project_id, payload.system_id, params, task_queue)
 
-    if residue_selections_json:
-        try:
-            params["residue_selections_dict"] = json.loads(residue_selections_json)
-        except json.JSONDecodeError:
-            raise HTTPException(status_code=400, detail="Invalid JSON format for residue_selections_json.")
-
-    return await submit_job("dynamic", files_dict, params, task_queue)
 
 @api_router.post("/submit/qubo", summary="Submit a QUBO analysis")
 async def submit_qubo_job(
-    active_traj: UploadFile = File(...),
-    active_topo: UploadFile = File(...),
-    inactive_traj: UploadFile = File(...),
-    inactive_topo: UploadFile = File(...),
-    config: Optional[UploadFile] = File(None),
-    residue_selections_json: Optional[str] = Form(None),
-    active_slice: Optional[str] = Form(None),
-    inactive_slice: Optional[str] = Form(None),
-    static_job_uuid: Optional[str] = Form(None),
-    
-    # QUBO Hamiltonian params
-    alpha_size: float = Form(1.0),
-    beta_hub: float = Form(2.0),
-    beta_switch: float = Form(5.0),
-    gamma_redundancy: float = Form(3.0),
-    ii_threshold: float = Form(0.4),
-    
-    # New Filter Params
-    filter_top_total: int = Form(100, description="Total candidates to send to QUBO"),
-    filter_top_jsd: int = Form(20, description="Number of top JSD residues guaranteed to be included"),
-    filter_min_id: float = Form(1.5, description="Minimum Intrinsic Dimension to be considered a Mover"),
-
+    payload: QUBOJobRequest,
     task_queue: get_queue = Depends(),
 ):
-    files_dict = {
-        "active_traj": active_traj, "active_topo": active_topo,
-        "inactive_traj": inactive_traj, "inactive_topo": inactive_topo,
-        "config": config
-    }
-
-    if not static_job_uuid and not residue_selections_json and not config:
-         raise HTTPException(status_code=400, detail="Missing candidate source.")
-
     params = {
-        "active_slice": active_slice,
-        "inactive_slice": inactive_slice,
-        "alpha_size": alpha_size,
-        "beta_hub": beta_hub,
-        "beta_switch": beta_switch,
-        "gamma_redundancy": gamma_redundancy,
-        "ii_threshold": ii_threshold,
-        # New params passed to runner
-        "filter_top_total": filter_top_total,
-        "filter_top_jsd": filter_top_jsd,
-        "filter_min_id": filter_min_id, 
+        "alpha_size": payload.alpha_size,
+        "beta_hub": payload.beta_hub,
+        "beta_switch": payload.beta_switch,
+        "gamma_redundancy": payload.gamma_redundancy,
+        "ii_threshold": payload.ii_threshold,
+        "filter_top_total": payload.filter_top_total,
+        "filter_top_jsd": payload.filter_top_jsd,
+        "filter_min_id": payload.filter_min_id,
     }
+    if payload.static_job_uuid:
+        params["static_job_uuid"] = payload.static_job_uuid
 
-    if static_job_uuid:
-        params["static_job_uuid"] = static_job_uuid
-    
-    if residue_selections_json:
-        try:
-            params["residue_selections_dict"] = json.loads(residue_selections_json)
-        except json.JSONDecodeError:
-            raise HTTPException(status_code=400, detail="Invalid JSON.")
-
-    return await submit_job("qubo", files_dict, params, task_queue)
+    return submit_job("qubo", payload.project_id, payload.system_id, params, task_queue)
 
 # --- Results Endpoints ---
 
@@ -355,6 +475,7 @@ async def get_results_list():
                 with open(result_file, 'r') as f:
                     data = json.load(f)
                 # Return just the metadata, not the full (large) result payload
+                system_ref = data.get("system_reference") or {}
                 results_list.append({
                     "job_id": data.get("job_id"),
                     "rq_job_id": data.get("rq_job_id"), # <-- Pass this to frontend
@@ -363,6 +484,9 @@ async def get_results_list():
                     "created_at": data.get("created_at"),
                     "completed_at": data.get("completed_at"),
                     "error": data.get("error"),
+                    "project_id": system_ref.get("project_id"),
+                    "system_id": system_ref.get("system_id"),
+                    "structures": system_ref.get("structures"),
                 })
             except Exception as e:
                 print(f"Failed to read result file: {result_file}. Error: {e}")
@@ -402,28 +526,15 @@ async def get_result_detail(job_uuid: str):
 @api_router.delete("/results/{job_uuid}", summary="Delete a job and its associated data")
 async def delete_result(job_uuid: str):
     """
-    Deletes a job's result JSON file and its uploaded data folder.
+    Deletes a job's persisted JSON file.
     """
     result_file = RESULTS_DIR / f"{job_uuid}.json"
-    upload_folder = UPLOAD_DIR / job_uuid
-
-    file_existed = False
-    folder_existed = False
 
     try:
-        if result_file.exists():
-            result_file.unlink()
-            file_existed = True
-
-        if upload_folder.exists() and upload_folder.is_dir():
-            shutil.rmtree(upload_folder)
-            folder_existed = True
-
-        if not file_existed and not folder_existed:
+        if not result_file.exists():
             raise HTTPException(status_code=404, detail=f"No data found for job UUID '{job_uuid}'.")
-
+        result_file.unlink()
         return {"status": "deleted", "job_id": job_uuid}
-
     except Exception as e:
         if isinstance(e, HTTPException):
             raise e

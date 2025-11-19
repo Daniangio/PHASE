@@ -39,3 +39,11 @@ This is the simplest way to run the backend and frontend.# From the root AllosKi
 docker-compose up --build
 API will be available at http://127.0.0.1:8000/docsFrontend will be available at http://127.0.0.1:30004. Running the Web Server Manually# From the root AllosKin/ directory
 uvicorn backend.main:app --reload
+
+## Project & System Workflow
+The backend now stores uploaded data as reusable systems inside projects. Each system contains the active and inactive PDB files plus compressed descriptor NPZ files so analyses can be queued without re-uploading trajectories.
+
+1. **Create a project** – `POST /api/v1/projects` with a JSON body such as `{ "name": "My GPCR Project" }`.
+2. **Preprocess a system** – `POST /api/v1/projects/{project_id}/systems` as multipart form data containing the active/inactive PDBs, trajectories, and optional stride/residue-selection fields. The server runs the descriptor pipeline and persists the generated NPZ files next to the stored PDBs.
+3. **Queue analyses** – call `/api/v1/submit/static`, `/submit/qubo`, or `/submit/dynamic` with a JSON payload that includes the `project_id`, `system_id`, and analysis parameters. Workers now load the stored descriptors instead of the raw trajectories.
+4. **Download structures for visualization** – retrieve system metadata via `GET /api/v1/projects/{project_id}/systems/{system_id}` and download the prepared PDBs from `/projects/{project_id}/systems/{system_id}/structures/{state}` (`state` is `active` or `inactive`) so the frontend can switch between conformations without additional uploads.
