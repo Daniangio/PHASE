@@ -8,6 +8,7 @@ from typing import Dict, List, Optional, Union
 from alloskin.features.extraction import FeatureDict, FeatureExtractor
 from alloskin.io.readers import MDAnalysisReader
 from alloskin.pipeline.builder import DatasetBuilder
+from alloskin.pipeline.selection_parser import parse_and_expand_selections
 
 
 @dataclass
@@ -16,6 +17,14 @@ class DescriptorBuildResult:
     inactive_features: FeatureDict
     n_frames_active: int
     n_frames_inactive: int
+    residue_keys: List[str]
+    residue_mapping: Dict[str, str]
+
+
+@dataclass
+class SingleDescriptorBuildResult:
+    features: FeatureDict
+    n_frames: int
     residue_keys: List[str]
     residue_mapping: Dict[str, str]
 
@@ -32,6 +41,8 @@ class DescriptorPreprocessor:
     def __init__(self, residue_selections: Optional[SelectionInput] = None):
         reader = MDAnalysisReader()
         extractor = FeatureExtractor(residue_selections)
+        self.reader = reader
+        self.extractor = extractor
         self.builder = DatasetBuilder(reader, extractor)
 
     def build(
@@ -72,4 +83,37 @@ class DescriptorPreprocessor:
             n_frames_inactive=n_frames_inactive,
             residue_keys=sorted(common_keys),
             residue_mapping=mapping,
+        )
+
+    def build_single(
+        self,
+        traj_path: str,
+        topo_path: str,
+        slice_spec: Optional[str] = None,
+    ) -> SingleDescriptorBuildResult:
+        """
+        Extracts descriptors for a single state.
+        """
+        universe = self.reader.load_trajectory(traj_path, topo_path)
+        if universe is None:
+            raise ValueError("Failed to load trajectory for descriptor extraction.")
+
+        selections = parse_and_expand_selections(universe, self.extractor.residue_selections)
+        if not selections:
+            raise ValueError("No residues matched the configured selections for this state.")
+
+        extractor = FeatureExtractor(selections)
+        slice_obj = self.builder._parse_slice(slice_spec)  # pylint: disable=protected-access
+        features, n_frames = extractor.extract_all_features(universe, slice_obj)
+        if not features or n_frames == 0:
+            raise ValueError("Descriptor extraction returned no frames.")
+
+        residue_keys = sorted(features.keys())
+        residue_mapping = {key: selections[key] for key in residue_keys}
+
+        return SingleDescriptorBuildResult(
+            features=features,
+            n_frames=n_frames,
+            residue_keys=residue_keys,
+            residue_mapping=residue_mapping,
         )

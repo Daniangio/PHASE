@@ -50,6 +50,8 @@ class AnalysisJobBase(BaseModel):
     """Shared fields for analysis job submissions."""
     project_id: str
     system_id: str
+    state_a_id: str
+    state_b_id: str
 
 
 class StaticJobRequest(AnalysisJobBase):

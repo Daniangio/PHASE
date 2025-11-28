@@ -1,4 +1,5 @@
 import json
+import os
 import traceback
 from pathlib import Path
 from datetime import datetime
@@ -7,8 +8,9 @@ from typing import Dict, Any
 from alloskin.pipeline.runner import run_analysis
 from backend.services.project_store import ProjectStore
 
-# Define the persistent results directory
-RESULTS_DIR = Path("/app/data/results")
+# Define the persistent results directory (aligned with ALLOSKIN_DATA_ROOT).
+DATA_ROOT = Path(os.getenv("ALLOSKIN_DATA_ROOT", "/app/data"))
+RESULTS_DIR = DATA_ROOT / "results"
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 project_store = ProjectStore()
 
@@ -64,7 +66,10 @@ def run_analysis_job(
         "system_reference": {
             "project_id": dataset_ref.get("project_id"),
             "system_id": dataset_ref.get("system_id"),
+            "project_name": dataset_ref.get("project_name"),
+            "system_name": dataset_ref.get("system_name"),
             "structures": {},
+            "states": {},
         },
         "error": None,
         "completed_at": None, # Will be filled in 'finally'
@@ -98,41 +103,54 @@ def run_analysis_job(
         # Step 1: Resolve the dataset (stored descriptors + PDBs)
         project_id = dataset_ref.get("project_id")
         system_id = dataset_ref.get("system_id")
-        if not project_id or not system_id:
-            raise ValueError("Dataset reference missing project_id or system_id.")
+        state_a_id = dataset_ref.get("state_a_id")
+        state_b_id = dataset_ref.get("state_b_id")
+        if not project_id or not system_id or not state_a_id or not state_b_id:
+            raise ValueError("Dataset reference missing project_id/system_id/state pair.")
 
         system_meta = project_store.get_system(project_id, system_id)
-        if system_meta.status != "ready":
-            raise ValueError(f"System '{system_id}' is not ready (status={system_meta.status}).")
+        state_a = system_meta.states.get(state_a_id)
+        state_b = system_meta.states.get(state_b_id)
+        if not state_a or not state_b:
+            raise ValueError("Selected states not found on the system.")
+        if not state_a.descriptor_file or not state_b.descriptor_file:
+            raise ValueError("Descriptor files are missing for the selected states.")
 
-        active_state = system_meta.states.get("active")
-        inactive_state = system_meta.states.get("inactive")
-        if not active_state or not inactive_state:
-            raise ValueError("System is missing active or inactive descriptor state.")
-        if not active_state.descriptor_file or not inactive_state.descriptor_file:
-            raise ValueError("Descriptor files are missing for the selected system.")
+        # Determine common descriptor keys across the selected states
+        common_keys = sorted(set(state_a.residue_keys or []) & set(state_b.residue_keys or []))
+        if not common_keys:
+            raise ValueError("Selected states do not share descriptor keys. Rebuild descriptors.")
+
+        mapping_a = state_a.residue_mapping or {}
+        mapping_b = state_b.residue_mapping or {}
 
         dataset_paths = {
             "project_id": project_id,
             "system_id": system_id,
             "active_descriptors": str(
-                project_store.resolve_path(project_id, system_id, active_state.descriptor_file)
+                project_store.resolve_path(project_id, system_id, state_a.descriptor_file)
             ),
             "inactive_descriptors": str(
-                project_store.resolve_path(project_id, system_id, inactive_state.descriptor_file)
+                project_store.resolve_path(project_id, system_id, state_b.descriptor_file)
             ),
-            "descriptor_keys": system_meta.descriptor_keys,
-            "residue_mapping": system_meta.residue_selections_mapping or {},
-            "n_frames_active": active_state.n_frames,
-            "n_frames_inactive": inactive_state.n_frames,
+            "descriptor_keys": common_keys,
+            "residue_mapping": {k: mapping_a.get(k) or mapping_b.get(k) for k in common_keys},
+            "n_frames_active": state_a.n_frames,
+            "n_frames_inactive": state_b.n_frames,
         }
 
         result_payload["system_reference"] = {
             "project_id": project_id,
             "system_id": system_id,
+            "project_name": dataset_ref.get("project_name"),
+            "system_name": dataset_ref.get("system_name"),
             "structures": {
-                "active": active_state.pdb_file,
-                "inactive": inactive_state.pdb_file,
+                state_a.state_id: state_a.pdb_file,
+                state_b.state_id: state_b.pdb_file,
+            },
+            "states": {
+                "state_a": {"id": state_a.state_id, "name": state_a.name},
+                "state_b": {"id": state_b.state_id, "name": state_b.name},
             },
         }
 

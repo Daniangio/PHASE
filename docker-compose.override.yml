@@ -11,7 +11,7 @@ services:
       - ./alloskin:/app/alloskin
       - ./backend:/app/backend
       - ./config:/app/config
-      - ./data:/app/data
+      - /scratch/docker/alloskin-data:/data/alloskin
 
   frontend:
     # Use the dev-specific Dockerfile

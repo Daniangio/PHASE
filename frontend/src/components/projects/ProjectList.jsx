@@ -1,5 +1,3 @@
-import { CheckCircle, Clock } from 'lucide-react';
-
 export default function ProjectList({ projects, selectedId, onSelect }) {
   if (!projects.length) {
     return <p className="text-gray-400 text-sm">No projects yet.</p>;

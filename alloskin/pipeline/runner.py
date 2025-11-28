@@ -129,49 +129,77 @@ def run_analysis(
     extractor = None
     builder = None
 
-    if not use_descriptors:
+    # Datasets for downstream steps
+    features_static = None
+    labels_Y = None
+    mapping: Dict[str, str] = {}
+    descriptor_keys: List[str] = []
+    active_features_raw: Dict[str, np.ndarray] = {}
+    inactive_features_raw: Dict[str, np.ndarray] = {}
+    n_frames_active = None
+    n_frames_inactive = None
+
+    def _build_combined(static_act, static_inact, keys, n_act, n_inact):
+        feats, labs = _combine_static_features(static_act, static_inact, keys, n_act, n_inact)
+        if params.get("shuffle_static", True):
+            shuffle_idx = np.random.permutation(labs.shape[0])
+            labs = labs[shuffle_idx]
+            for k in feats:
+                feats[k] = feats[k][shuffle_idx]
+        return feats, labs
+
+    if use_descriptors:
+        (
+            active_features_raw,
+            inactive_features_raw,
+            descriptor_keys,
+            n_frames_active,
+            n_frames_inactive,
+            mapping,
+        ) = _load_descriptor_features(file_paths)
+        features_static, labels_Y = _build_combined(
+            active_features_raw,
+            inactive_features_raw,
+            descriptor_keys,
+            n_frames_active,
+            n_frames_inactive,
+        )
+    else:
         reader = MDAnalysisReader()
         extractor = FeatureExtractor(residue_selections)
         builder = DatasetBuilder(reader, extractor)
         report("Loading trajectories", 10)
 
-    if analysis_type in ['static', 'qubo']:
-        if use_descriptors:
-            (
-                active_features_raw,
-                inactive_features_raw,
-                descriptor_keys,
-                n_frames_active,
-                n_frames_inactive,
-                mapping,
-            ) = _load_descriptor_features(file_paths)
-            features_dict, labels_Y = _combine_static_features(
-                active_features_raw,
-                inactive_features_raw,
-                descriptor_keys,
-                n_frames_active,
-                n_frames_inactive,
-            )
-        else:
-            features_dict, labels_Y, mapping = builder.prepare_static_analysis_data(
-                file_paths["active_traj"], file_paths["active_topo"],
-                file_paths["inactive_traj"], file_paths["inactive_topo"],
-                active_slice=params.get("active_slice"),
-                inactive_slice=params.get("inactive_slice"),
-            )
-        # Build static dataset (active only / inactive only / combined)
-        # Split state-wise
-        features_act = {k: features_dict[k][labels_Y == 1] for k in features_dict}
-        features_inact = {k: features_dict[k][labels_Y == 0] for k in features_dict}
+        # Always extract per-state features; combine only when needed.
+        active_features_raw, inactive_features_raw, mapping = builder.prepare_dynamic_analysis_data(
+            file_paths["active_traj"], file_paths["active_topo"],
+            file_paths["inactive_traj"], file_paths["inactive_topo"],
+            active_slice=params.get("active_slice"),
+            inactive_slice=params.get("inactive_slice"),
+        )
+        descriptor_keys = sorted(active_features_raw.keys())
+        if not descriptor_keys:
+            raise ValueError("No features found for analysis.")
+        n_frames_active = next(iter(active_features_raw.values())).shape[0]
+        n_frames_inactive = next(iter(inactive_features_raw.values())).shape[0]
+        features_static, labels_Y = _build_combined(
+            active_features_raw,
+            inactive_features_raw,
+            descriptor_keys,
+            n_frames_active,
+            n_frames_inactive,
+        )
 
     # ==================================================================
     # GOAL 1 — Static state sensitivity
     # ==================================================================
     if analysis_type == "static":
+        if features_static is None or labels_Y is None:
+            raise ValueError("Static analysis dataset could not be prepared.")
         report("Running Static State Sensitivity (Goal 1)", 20)
 
         static = StaticStateSensitivity()
-        stats = static.run((features_dict, labels_Y), **params)
+        stats = static.run((features_static, labels_Y), **params)
 
         # Fail fast only if *all* state_score values are missing/non-finite.
         def _is_finite(val) -> bool:
@@ -218,10 +246,12 @@ def run_analysis(
     else:
         report("Running Static State Sensitivity (Goal 1)", 30)
         static = StaticStateSensitivity()
-        static_results = static.run((features_dict, labels_Y), **params)
+        if features_static is None or labels_Y is None:
+            raise ValueError("Static analysis dataset could not be prepared for QUBO.")
+        static_results = static.run((features_static, labels_Y), **params)
 
     # =============================================================
-    # 2. RUN THE THREE QUBOS
+    # 2. RUN QUBOs per-state
     # =============================================================
 
     qubo = QUBOMaxCoverage()
@@ -241,6 +271,12 @@ def run_analysis(
         qubo_params["alpha"] = qubo_params.pop("alpha_size")
     final_qubo_params = {k: v for k, v in qubo_params.items() if k in qubo_allowed_params}
 
+    # Prepare per-state feature dictionaries
+    if not active_features_raw or not inactive_features_raw:
+        raise ValueError("Active/inactive features missing for QUBO analysis.")
+    features_act = {k: active_features_raw[k] for k in descriptor_keys if k in active_features_raw}
+    features_inact = {k: inactive_features_raw[k] for k in descriptor_keys if k in inactive_features_raw}
+
     # A) ACTIVE only → use_per_state_imbalance=False (Δ_act only)
     report("Running QUBO_active (only active-state Δ)", 40)
     res_act = qubo.run(
@@ -257,75 +293,64 @@ def run_analysis(
         **final_qubo_params
     )
 
-    # C) COMBINED
-    report("Running QUBO_combined (avg Δ across states)", 80)
-    res_comb = qubo.run(
-        features_dict,
-        static_results=static_results,
-        **final_qubo_params
-    )
-
-
     # ==================================================================
-    # 4. CLASSIFICATION USING THE 9-LABEL TAXONOMY
+    # 4. CLASSIFICATION USING ACTIVE/INACTIVE ONLY (no combined run)
     # ==================================================================
+    report("Assigning taxonomy labels", 80)
 
-    report("Assigning taxonomy labels", 90)
-
-    candidates = res_comb.get("matrix_indices", [])
-    candidate_state_scores = res_comb.get("raw_state_scores", {})
+    cand_act = res_act.get("matrix_indices", []) if isinstance(res_act, dict) else []
+    cand_inact = res_inact.get("matrix_indices", []) if isinstance(res_inact, dict) else []
+    candidates = sorted(set(cand_act) | set(cand_inact))
 
     if not candidates:
         return {
             "qubo_active": res_act,
             "qubo_inactive": res_inact,
-            "qubo_combined": res_comb,
             "classification": {},
             "mapping": mapping,
         }
 
-    # Extract selections
-    sel_act = set(res_act["solutions"][0]["selected"]) if "solutions" in res_act else set()
-    sel_inact = set(res_inact["solutions"][0]["selected"]) if "solutions" in res_inact else set()
-    sel_comb = set(res_comb["solutions"][0]["selected"]) if "solutions" in res_comb else set()
+    sel_act = set(res_act.get("solutions", [{}])[0].get("selected", [])) if "solutions" in res_act else set()
+    sel_inact = set(res_inact.get("solutions", [{}])[0].get("selected", [])) if "solutions" in res_inact else set()
 
-    # hub scores
-    hub_act = res_act.get("hub_scores", {})
-    hub_inact = res_inact.get("hub_scores", {})
-    hub_comb = res_comb.get("hub_scores", {})
+    hub_act = res_act.get("hub_scores", {}) if isinstance(res_act, dict) else {}
+    hub_inact = res_inact.get("hub_scores", {}) if isinstance(res_inact, dict) else {}
 
-    # thresholds
+    raw_scores_act = res_act.get("raw_state_scores", {}) if isinstance(res_act, dict) else {}
+    raw_scores_inact = res_inact.get("raw_state_scores", {}) if isinstance(res_inact, dict) else {}
+    reg_scores_act = res_act.get("regularized_state_scores", {}) if isinstance(res_act, dict) else {}
+    reg_scores_inact = res_inact.get("regularized_state_scores", {}) if isinstance(res_inact, dict) else {}
+
+    cov_act = np.array(res_act.get("coverage_weights", []), float) if isinstance(res_act, dict) and "coverage_weights" in res_act else np.empty((0, 0))
+    cov_inact = np.array(res_inact.get("coverage_weights", []), float) if isinstance(res_inact, dict) and "coverage_weights" in res_inact else np.empty((0, 0))
+    idx_act = {k: i for i, k in enumerate(cand_act)}
+    idx_inact = {k: i for i, k in enumerate(cand_inact)}
+
     switch_high = params.get("taxonomy_switch_high", 0.8)
     switch_low = params.get("taxonomy_switch_low", 0.3)
 
-    # For hub cutoffs, we use active/inactive distributions
-    hub_act_vals = np.array([hub_act.get(k,0.0) for k in candidates])
-    hub_inact_vals = np.array([hub_inact.get(k,0.0) for k in candidates])
+    hub_act_vals = np.array([hub_act.get(k, 0.0) for k in candidates])
+    hub_inact_vals = np.array([hub_inact.get(k, 0.0) for k in candidates])
     delta_vals = np.abs(hub_act_vals - hub_inact_vals)
 
-    # percentiles
     hub_high_act = np.percentile(hub_act_vals, params.get("taxonomy_hub_high_percentile", 80))
     hub_high_inact = np.percentile(hub_inact_vals, params.get("taxonomy_hub_high_percentile", 80))
     hub_low_act = np.percentile(hub_act_vals, params.get("taxonomy_hub_low_percentile", 50))
     hub_low_inact = np.percentile(hub_inact_vals, params.get("taxonomy_hub_low_percentile", 50))
     delta_high = np.percentile(delta_vals, params.get("taxonomy_delta_hub_high_percentile", 80))
 
-
     classification = {}
 
-    reg_scores = res_comb.get("regularized_state_scores", {})
-
     for k in candidates:
-        s_raw = float(candidate_state_scores.get(k, 0.0))
-        s_reg = reg_scores.get(k, s_raw)
+        s_raw = max(float(raw_scores_act.get(k, 0.0)), float(raw_scores_inact.get(k, 0.0)))
+        s_reg = max(reg_scores_act.get(k, s_raw), reg_scores_inact.get(k, s_raw))
 
-        ha = hub_act.get(k, 0.0)
-        hi = hub_inact.get(k, 0.0)
+        ha = float(hub_act.get(k, 0.0))
+        hi = float(hub_inact.get(k, 0.0))
         dH = abs(ha - hi)
 
         in_act = k in sel_act
         in_inact = k in sel_inact
-        in_comb = k in sel_comb
 
         # ------------------------------------------------------------
         # Determine taxonomy
@@ -336,8 +361,7 @@ def run_analysis(
             if ha >= hub_high_act and hi >= hub_high_inact:
                 role = "Global Hub"
             else:
-                role = "Global Hub [minor]"  # fallback
-
+                role = "Global Hub [minor]"
         elif in_act and not in_inact:
             if ha >= hub_high_act and hi <= hub_low_inact:
                 role = "Active Hub"
@@ -345,7 +369,6 @@ def run_analysis(
                 role = "State-Switch Hub"
             else:
                 role = "Relay"
-
         elif in_inact and not in_act:
             if hi >= hub_high_inact and ha <= hub_low_act:
                 role = "Inactive Hub"
@@ -353,46 +376,50 @@ def run_analysis(
                 role = "State-Switch Hub"
             else:
                 role = "Relay"
-
         else:
             # Not selected in either active or inactive QUBO
-            # → Evaluate redundancy using combined QUBO coverage
-            idx = candidates.index(k)
-            W = np.array(res_comb["coverage_weights"], float)
-            sel = [candidates.index(x) for x in sel_comb]
-            if len(sel)>0:
-                union_cov = np.max(W[sel,:],axis=0)
-                unique = float(np.maximum(W[idx]-union_cov,0).sum())
-            else:
-                unique = float(W[idx].sum())
-
-            if unique<1e-6:
-                role="Redundant"
-            else:
-                # Distinguish local switches, passive scaffold
-                if s_reg >= switch_high:
-                    role="Local Switch"
-                elif s_reg<switch_low:
-                    role="Passive Scaffold"
+            unique = 0.0
+            if k in idx_act and cov_act.size:
+                idx = idx_act[k]
+                sel_idx = [idx_act[x] for x in sel_act if x in idx_act]
+                if sel_idx:
+                    union_cov = np.max(cov_act[sel_idx, :], axis=0)
+                    unique = float(np.maximum(cov_act[idx] - union_cov, 0).sum())
                 else:
-                    role="Entropic Decoy"
+                    unique = float(cov_act[idx].sum())
+            elif k in idx_inact and cov_inact.size:
+                idx = idx_inact[k]
+                sel_idx = [idx_inact[x] for x in sel_inact if x in idx_inact]
+                if sel_idx:
+                    union_cov = np.max(cov_inact[sel_idx, :], axis=0)
+                    unique = float(np.maximum(cov_inact[idx] - union_cov, 0).sum())
+                else:
+                    unique = float(cov_inact[idx].sum())
+
+            if unique < 1e-3:
+                role = "Redundant"
+            else:
+                if s_reg >= switch_high:
+                    role = "Local Switch"
+                elif s_reg < switch_low:
+                    role = "Passive Scaffold"
+                else:
+                    role = "Entropic Decoy"
 
         classification[k] = {
             "label": role,
             "s_reg": float(s_reg),
-            "hub_active": float(ha),
-            "hub_inactive": float(hi),
-            "delta_hub": float(dH),
+            "hub_active": ha,
+            "hub_inactive": hi,
+            "delta_hub": dH,
             "selected_active": in_act,
             "selected_inactive": in_inact,
-            "selected_combined": in_comb,
         }
 
     report("Returning results", 100)
     return {
         "qubo_active": res_act,
         "qubo_inactive": res_inact,
-        "qubo_combined": res_comb,
         "classification": classification,
         "mapping": mapping,
     }

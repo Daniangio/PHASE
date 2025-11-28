@@ -70,8 +70,12 @@ export default function ResultsPage() {
               </div>
             </div>
             <div className="mt-2 text-xs text-gray-400 flex flex-wrap gap-2">
-              {result.project_id && <span>Project: {result.project_id.slice(0, 8)}</span>}
-              {result.system_id && <span>System: {result.system_id.slice(0, 8)}</span>}
+              {(result.project_name || result.project_id) && (
+                <span>Project: {result.project_name || result.project_id.slice(0, 8)}</span>
+              )}
+              {(result.system_name || result.system_id) && (
+                <span>System: {result.system_name || result.system_id.slice(0, 8)}</span>
+              )}
               {result.created_at && <span>Submitted: {new Date(result.created_at).toLocaleString()}</span>}
             </div>
           </div>

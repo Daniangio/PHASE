@@ -43,6 +43,12 @@ export default function VisualizePage() {
   const [structureError, setStructureError] = useState(null);
   const [staticThreshold, setStaticThreshold] = useState(0.8);
   const [structureVersion, setStructureVersion] = useState(0);
+  const availableStates = Object.values(resultData?.system_reference?.states || {});
+  const structureKeys = Object.keys(resultData?.system_reference?.structures || {});
+  const stateButtons =
+    availableStates.length > 0
+      ? availableStates
+      : structureKeys.map((key) => ({ id: key, name: key }));
 
   // Fetch job/result metadata to locate the system and structures
   useEffect(() => {
@@ -147,7 +153,7 @@ export default function VisualizePage() {
     }
   }, []);
 
-  const loadStructure = async (state = 'active') => {
+  const loadStructure = async (stateId) => {
     if (!pluginRef.current || !resultData) return;
     const { project_id, system_id } = resultData.system_reference || {};
     if (!project_id || !system_id) {
@@ -162,7 +168,7 @@ export default function VisualizePage() {
     try {
       await pluginRef.current.clear(); // reset any previous state tree
       await pluginRef.current.dataTransaction(async () => {
-        const url = `/api/v1/projects/${project_id}/systems/${system_id}/structures/${state}`;
+        const url = `/api/v1/projects/${project_id}/systems/${system_id}/structures/${stateId}`;
         const data = await pluginRef.current.builders.data.download(
           { url: Asset.Url(url), isBinary: false },
           { state: { isGhost: true } }
@@ -192,7 +198,7 @@ export default function VisualizePage() {
       setStatus('ready');
     } catch (err) {
       console.error('Structure load failed', err);
-      setStructureError(err.message || `Failed to load ${state} structure.`);
+      setStructureError(err.message || 'Failed to load structure.');
       setStatus('ready');
     }
   };
@@ -222,13 +228,34 @@ export default function VisualizePage() {
       </button>
       <h1 className="text-2xl font-bold text-white">Visualization: {jobId}</h1>
       <p className="text-sm text-gray-400">
-        Use the buttons below to load the stored active or inactive structure for this system. Once working, we will add
-        the highlighting controls back in.
+        Use the buttons below to load the stored structures for this system. Once working, we will add the highlighting
+        controls back in.
       </p>
 
       {(structureError || status === 'error') && (
         <ErrorMessage message={structureError || error || 'Viewer error'} />
       )}
+
+      <div className="bg-gray-800 border border-gray-700 rounded-lg p-4 space-y-3">
+        <h2 className="text-lg font-semibold text-white">Load structures</h2>
+        {stateButtons.length === 0 ? (
+          <p className="text-sm text-gray-400">No states referenced in this result.</p>
+        ) : (
+          <div className="flex flex-wrap gap-2">
+            {stateButtons.map((state) => (
+              <button
+                key={state.id || state.state_id}
+                type="button"
+                onClick={() => loadStructure(state.id || state.state_id)}
+                disabled={status !== 'ready'}
+                className="px-4 py-2 rounded-md bg-cyan-600 text-white text-sm disabled:opacity-50"
+              >
+                {status === 'loading-structure' ? 'Loading...' : `Load ${state.name || state.id?.slice(0, 8)}`}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
 
       <div className="bg-gray-800 border border-gray-700 rounded-lg p-4 space-y-2">
         {status === 'initializing' && <Loader message="Initializing Mol* plugin..." />}
@@ -255,27 +282,6 @@ export default function VisualizePage() {
         </div>
       )}
 
-      <div className="bg-gray-800 border border-gray-700 rounded-lg p-4 space-y-3">
-        <h2 className="text-lg font-semibold text-white">Load structures</h2>
-        <div className="flex flex-wrap gap-2">
-          <button
-            type="button"
-            onClick={() => loadStructure('active')}
-            disabled={status !== 'ready'}
-            className="px-4 py-2 rounded-md bg-cyan-600 text-white text-sm disabled:opacity-50"
-          >
-            {status === 'loading-structure' ? 'Loading...' : 'Load Active'}
-          </button>
-          <button
-            type="button"
-            onClick={() => loadStructure('inactive')}
-            disabled={status !== 'ready'}
-            className="px-4 py-2 rounded-md bg-purple-600 text-white text-sm disabled:opacity-50"
-          >
-            {status === 'loading-structure' ? 'Loading...' : 'Load Inactive'}
-          </button>
-        </div>
-      </div>
     </div>
   );
 }

@@ -11,14 +11,17 @@ import json
 import uuid
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 import shutil
 
 
-DATA_ROOT = Path("/app/data")
+# Allow overriding the data root (e.g., to point to a larger, persistent volume).
+DATA_ROOT = Path(os.getenv("ALLOSKIN_DATA_ROOT", "/app/data"))
 PROJECTS_DIR = DATA_ROOT / "projects"
 PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
+SelectionInput = Union[Dict[str, str], List[str]]
 
 
 def _read_json(path: Path) -> Dict[str, Any]:
@@ -40,15 +43,22 @@ def _utc_now() -> str:
 
 @dataclass
 class DescriptorState:
-    """Metadata about one state (active/inactive) inside a system."""
+    """Metadata about one state inside a system."""
 
-    role: str
+    state_id: str
+    name: str
     pdb_file: Optional[str] = None
     descriptor_file: Optional[str] = None
+    descriptor_metadata_file: Optional[str] = None
+    trajectory_file: Optional[str] = None
     n_frames: int = 0
     stride: int = 1
     source_traj: Optional[str] = None
     slice_spec: Optional[str] = None
+    residue_keys: List[str] = field(default_factory=list)
+    residue_mapping: Dict[str, str] = field(default_factory=dict)
+    role: Optional[str] = None  # Legacy compatibility
+    created_at: str = field(default_factory=_utc_now)
 
 
 @dataclass
@@ -64,6 +74,7 @@ class SystemMetadata:
     residue_selections: Optional[SelectionInput] = None
     residue_selections_mapping: Dict[str, str] = field(default_factory=dict)
     descriptor_keys: List[str] = field(default_factory=list)
+    descriptor_metadata_file: Optional[str] = None
     states: Dict[str, DescriptorState] = field(default_factory=dict)
 
 
@@ -164,16 +175,30 @@ class ProjectStore:
         return self._decode_system(payload)
 
     def _decode_system(self, payload: Dict[str, Any]) -> SystemMetadata:
-        states_payload = {
-            role: DescriptorState(**state_payload)
-            for role, state_payload in payload.get("states", {}).items()
-        }
-        payload = {**payload, "states": states_payload}
+        decoded_states: Dict[str, DescriptorState] = {}
+        for key, state_payload in (payload.get("states") or {}).items():
+            # Backward compatibility with legacy payloads that keyed states by role.
+            state_id = state_payload.get("state_id") or key
+            name = state_payload.get("name") or state_payload.get("role") or state_id
+            merged_payload = {
+                **state_payload,
+                "state_id": state_id,
+                "name": name,
+            }
+            decoded_states[state_id] = DescriptorState(**merged_payload)
+
+        payload = {**payload, "states": decoded_states}
         return SystemMetadata(**payload)
 
     def _encode_system(self, metadata: SystemMetadata) -> Dict[str, Any]:
         payload = asdict(metadata)
-        # Nested dataclasses are now dicts; no further conversion needed.
+        encoded_states: Dict[str, Any] = {}
+        for key, state in metadata.states.items():
+            state_id = getattr(state, "state_id", None) or key
+            state_dict = asdict(state)
+            state_dict["state_id"] = state_id
+            encoded_states[state_id] = state_dict
+        payload["states"] = encoded_states
         return payload
 
     def create_system(
@@ -218,14 +243,17 @@ class ProjectStore:
         system_dir = self._system_dir(project_id, system_id)
         structures_dir = system_dir / "structures"
         descriptors_dir = system_dir / "descriptors"
+        trajectories_dir = system_dir / "trajectories"
         tmp_dir = system_dir / "tmp"
         structures_dir.mkdir(parents=True, exist_ok=True)
         descriptors_dir.mkdir(parents=True, exist_ok=True)
+        trajectories_dir.mkdir(parents=True, exist_ok=True)
         tmp_dir.mkdir(parents=True, exist_ok=True)
         return {
             "system_dir": system_dir,
             "structures_dir": structures_dir,
             "descriptors_dir": descriptors_dir,
+            "trajectories_dir": trajectories_dir,
             "tmp_dir": tmp_dir,
         }
 
@@ -248,4 +276,3 @@ class ProjectStore:
         if not project_dir.exists():
             raise FileNotFoundError(f"Project '{project_id}' not found.")
         shutil.rmtree(project_dir)
-SelectionInput = Union[Dict[str, str], List[str]]

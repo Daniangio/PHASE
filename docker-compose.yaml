@@ -10,12 +10,14 @@ services:
       - ./alloskin:/app/alloskin
       - ./backend:/app/backend
       - ./config:/app/config
-      # Mount the shared data directory
-      - ./data:/app/data
+      # Persist application data (projects, trajectories, descriptors) on /scratch
+      - /scratch/docker/alloskin-data:/data/alloskin
     environment:
       - PYTHONUNBUFFERED=1
       # Note: We use the internal service name 'redis' and its default internal port '6379'
       - REDIS_URL=redis://redis:6379/0
+      - ALLOSKIN_DATA_ROOT=/data/alloskin
+      - TMPDIR=/data/alloskin/tmp
     depends_on:
       - redis
 
@@ -39,9 +41,11 @@ services:
       - ./alloskin:/app/alloskin
       - ./backend:/app/backend
       - ./config:/app/config
-      - ./data:/app/data
+      - /scratch/docker/alloskin-data:/data/alloskin
     environment:
       - PYTHONUNBUFFERED=1
+      - ALLOSKIN_DATA_ROOT=/data/alloskin
+      - TMPDIR=/data/alloskin/tmp
     depends_on:
       - redis
 

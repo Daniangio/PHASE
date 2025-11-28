@@ -39,6 +39,8 @@ export default function ResultDetailPage() {
   if (error) return <ErrorMessage message={error} />;
   if (!result) return null;
 
+  const systemRef = result.system_reference || {};
+
   const canVisualize =
     result.residue_selections_mapping &&
     ((result.analysis_type === 'static' && typeof result.results === 'object') ||
@@ -60,6 +62,22 @@ export default function ResultDetailPage() {
           <div>
             <dt className="text-gray-400">Status</dt>
             <dd className="capitalize">{result.status}</dd>
+          </div>
+          <div>
+            <dt className="text-gray-400">Project</dt>
+            <dd>{systemRef.project_name || systemRef.project_id || '—'}</dd>
+          </div>
+          <div>
+            <dt className="text-gray-400">System</dt>
+            <dd>{systemRef.system_name || systemRef.system_id || '—'}</dd>
+          </div>
+          <div>
+            <dt className="text-gray-400">State A</dt>
+            <dd>{systemRef.states?.state_a?.name || systemRef.states?.state_a?.id || '—'}</dd>
+          </div>
+          <div>
+            <dt className="text-gray-400">State B</dt>
+            <dd>{systemRef.states?.state_b?.name || systemRef.states?.state_b?.id || '—'}</dd>
           </div>
           <div>
             <dt className="text-gray-400">Created</dt>
