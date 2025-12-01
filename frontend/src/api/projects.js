@@ -217,3 +217,11 @@ export function deleteState(projectId, systemId, stateId) {
     method: 'DELETE',
   });
 }
+
+export function fetchStateDescriptors(projectId, systemId, stateId, params = {}) {
+  const qs = new URLSearchParams();
+  if (params.residue_keys) qs.set('residue_keys', params.residue_keys);
+  if (params.max_points) qs.set('max_points', params.max_points);
+  const suffix = qs.toString() ? `?${qs.toString()}` : '';
+  return requestJSON(`/projects/${projectId}/systems/${systemId}/states/${stateId}/descriptors${suffix}`);
+}

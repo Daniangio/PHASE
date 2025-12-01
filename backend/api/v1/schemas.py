@@ -65,6 +65,8 @@ class DynamicJobRequest(AnalysisJobBase):
 
 class QUBOJobRequest(AnalysisJobBase):
     static_job_uuid: Optional[str] = None
+    imbalance_matrix_paths_active: Optional[list[str]] = None
+    imbalance_matrix_paths_inactive: Optional[list[str]] = None
     alpha_size: float = 1.0
     beta_hub: float = 1.0
     beta_switch: float = 5.0

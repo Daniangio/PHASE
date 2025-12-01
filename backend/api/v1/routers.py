@@ -7,7 +7,7 @@ import shutil
 import functools
 import json, os
 from dataclasses import asdict
-from fastapi import APIRouter, HTTPException, Depends, Request, UploadFile, File, Form, Response
+from fastapi import APIRouter, HTTPException, Depends, Request, UploadFile, File, Form, Response, Query
 from fastapi.responses import FileResponse
 from fastapi.concurrency import run_in_threadpool
 from typing import Dict, Any, List, Optional, Tuple
@@ -15,6 +15,7 @@ import uuid
 from pathlib import Path
 from rq.job import Job
 from redis import RedisError
+import MDAnalysis as mda
 
 # Import the master task function
 from backend.tasks import run_analysis_job
@@ -31,7 +32,7 @@ from backend.services.project_store import (
     SystemMetadata,
 )
 from backend.services.preprocessing import DescriptorPreprocessor
-from backend.services.descriptors import save_descriptor_npz
+from backend.services.descriptors import save_descriptor_npz, load_descriptor_npz
 
 api_router = APIRouter()
 
@@ -311,6 +312,106 @@ async def download_structure(project_id: str, system_id: str, state_id: str):
         filename=download_name,
         media_type="chemical/x-pdb",
     )
+
+
+@api_router.get(
+    "/projects/{project_id}/systems/{system_id}/states/{state_id}/descriptors",
+    summary="Preview descriptor angles for a state (for visualization)",
+)
+async def get_state_descriptors(
+    project_id: str,
+    system_id: str,
+    state_id: str,
+    residue_keys: Optional[str] = Query(
+        None,
+        description="Comma-separated residue keys to include; defaults to all keys for the state.",
+    ),
+    max_points: int = Query(
+        2000,
+        ge=10,
+        le=50000,
+        description="Maximum number of points returned per residue (down-sampled evenly).",
+    ),
+):
+    """
+    Returns a down-sampled set of phi/psi/chi1 angles (in degrees) for the requested state.
+    Intended for client-side scatter plotting; not for bulk export.
+    """
+    try:
+        system = project_store.get_system(project_id, system_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"System '{system_id}' not found.")
+
+    state_meta = _get_state_or_404(system, state_id)
+    if not state_meta.descriptor_file:
+        raise HTTPException(status_code=404, detail="No descriptors stored for this state.")
+
+    descriptor_path = project_store.resolve_path(project_id, system_id, state_meta.descriptor_file)
+    if not descriptor_path.exists():
+        raise HTTPException(status_code=404, detail="Descriptor file missing on disk.")
+
+    try:
+        feature_dict = load_descriptor_npz(descriptor_path)
+    except Exception as exc:  # pragma: no cover
+        raise HTTPException(status_code=500, detail=f"Failed to load descriptor file: {exc}") from exc
+
+    keys_to_use = list(feature_dict.keys())
+    if residue_keys:
+        requested = [key.strip() for key in residue_keys.split(",") if key.strip()]
+        keys_to_use = [k for k in keys_to_use if k in requested]
+        if not keys_to_use:
+            raise HTTPException(status_code=400, detail="No matching residue keys found in descriptor file.")
+
+    angles_payload: Dict[str, Any] = {}
+    residue_labels: Dict[str, str] = {}
+    sample_stride = 1
+    n_frames = 0
+
+    # Try to resolve residue names from the stored PDB for nicer labels
+    resname_map: Dict[int, str] = {}
+    if state_meta.pdb_file:
+        try:
+            pdb_path = project_store.resolve_path(project_id, system_id, state_meta.pdb_file)
+            if pdb_path.exists():
+                u = mda.Universe(str(pdb_path))
+                for res in u.residues:
+                    resname_map[int(res.resid)] = str(res.resname).strip()
+        except Exception:
+            resname_map = {}
+
+    for key in keys_to_use:
+        arr = feature_dict[key]
+        # Expected shape: (n_frames, 1, 3) in radians
+        if arr.ndim != 3 or arr.shape[2] < 3:
+            continue
+        n_frames = arr.shape[0]
+        sample_stride = max(1, n_frames // max_points) if n_frames > max_points else 1
+        sampled = arr[::sample_stride, 0, :]
+        phi = (sampled[:, 0] * 180.0 / 3.141592653589793).tolist()
+        psi = (sampled[:, 1] * 180.0 / 3.141592653589793).tolist()
+        chi1 = (sampled[:, 2] * 180.0 / 3.141592653589793).tolist()
+        angles_payload[key] = {"phi": phi, "psi": psi, "chi1": chi1}
+        label = key
+        selection = (state_meta.residue_mapping or {}).get(key) or ""
+        resid_tokens = [
+            tok for tok in selection.replace("resid", "").split() if tok.strip().lstrip("-").isdigit()
+        ]
+        resid_val = int(resid_tokens[0]) if resid_tokens else None
+        if resid_val is not None and resid_val in resname_map:
+            label = f"{key}_{resname_map[resid_val]}"
+        residue_labels[key] = label
+
+    if not angles_payload:
+        raise HTTPException(status_code=500, detail="Descriptor file contained no usable angle data.")
+
+    return {
+        "residue_keys": keys_to_use,
+        "residue_mapping": state_meta.residue_mapping or {},
+        "residue_labels": residue_labels,
+        "n_frames": n_frames,
+        "sample_stride": sample_stride,
+        "angles": angles_payload,
+    }
 
 
 @api_router.delete("/projects/{project_id}", summary="Delete a project and all its systems")

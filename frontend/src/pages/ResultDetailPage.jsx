@@ -44,7 +44,9 @@ export default function ResultDetailPage() {
   const canVisualize =
     result.residue_selections_mapping &&
     ((result.analysis_type === 'static' && typeof result.results === 'object') ||
-      (result.analysis_type === 'qubo' && result.results?.solutions?.length > 0));
+      (result.analysis_type === 'qubo' &&
+        (result.results?.qubo_active?.solutions?.length > 0 ||
+          result.results?.qubo_inactive?.solutions?.length > 0)));
 
   return (
     <div className="space-y-6">

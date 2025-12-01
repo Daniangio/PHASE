@@ -42,6 +42,8 @@ export default function VisualizePage() {
   const [status, setStatus] = useState('initializing'); // initializing | ready | loading-structure | error
   const [structureError, setStructureError] = useState(null);
   const [staticThreshold, setStaticThreshold] = useState(0.8);
+  const [quboSolutionIdx, setQuboSolutionIdx] = useState({ active: 0, inactive: 0 });
+  const [loadedStateId, setLoadedStateId] = useState(null);
   const [structureVersion, setStructureVersion] = useState(0);
   const availableStates = Object.values(resultData?.system_reference?.states || {});
   const structureKeys = Object.keys(resultData?.system_reference?.structures || {});
@@ -195,6 +197,7 @@ export default function VisualizePage() {
       }
       await clearHighlights();
       setStructureVersion((prev) => prev + 1);
+      setLoadedStateId(stateId);
       setStatus('ready');
     } catch (err) {
       console.error('Structure load failed', err);
@@ -216,6 +219,37 @@ export default function VisualizePage() {
     };
     applyStaticHighlights();
   }, [resultData, structureVersion, staticThreshold, clearHighlights, createHighlightComponent]);
+
+  useEffect(() => {
+    const applyQuboHighlights = async () => {
+      if (!pluginRef.current || !pluginRef.current.managers?.structure || !resultData || structureVersion === 0) return;
+      if (resultData.analysis_type !== 'qubo') return;
+      if (!loadedStateId) return;
+      const mapping = resultData.results?.mapping || resultData.residue_selections_mapping;
+      if (!mapping) return;
+
+      const states = resultData.system_reference?.states || {};
+      const isActive = loadedStateId === states.state_a?.id;
+      const solIdx = isActive ? quboSolutionIdx.active : quboSolutionIdx.inactive;
+      const quboKey = isActive ? 'qubo_active' : 'qubo_inactive';
+      const solutions = resultData.results?.[quboKey]?.solutions || [];
+      const solution = solutions[solIdx] || solutions[0];
+      if (!solution) return;
+
+      const residues = convertKeysToResidues(solution.selected || [], mapping);
+      await clearHighlights();
+      await createHighlightComponent(residues, '#ef4444');
+    };
+    applyQuboHighlights();
+  }, [
+    resultData,
+    structureVersion,
+    quboSolutionIdx.active,
+    quboSolutionIdx.inactive,
+    loadedStateId,
+    clearHighlights,
+    createHighlightComponent,
+  ]);
 
   if (isLoading) return <Loader message="Preparing visualization..." />;
   if (error) return <ErrorMessage message={error} />;
@@ -279,6 +313,45 @@ export default function VisualizePage() {
             className="w-full"
           />
           <p className="text-sm text-gray-400 mt-1">{staticThreshold.toFixed(2)}</p>
+        </div>
+      )}
+
+      {resultData.analysis_type === 'qubo' && (
+        <div className="bg-gray-800 border border-gray-700 rounded-lg p-4 space-y-4">
+          <div>
+            <label className="block text-sm text-gray-300 mb-1">Active solutions</label>
+            <select
+              value={quboSolutionIdx.active}
+              onChange={(e) => setQuboSolutionIdx((prev) => ({ ...prev, active: Number(e.target.value) }))}
+              className="w-full bg-gray-900 border border-gray-700 rounded-md px-3 py-2 text-white"
+            >
+              {(resultData.results?.qubo_active?.solutions || []).map((sol, idx) => (
+                <option key={`act-${idx}`} value={idx}>
+                  Solution {idx + 1} • E={sol.energy?.toFixed?.(2) ?? sol.energy}
+                  {sol.union_coverage !== undefined ? ` • cov=${sol.union_coverage.toFixed?.(1)}` : ''}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className="block text-sm text-gray-300 mb-1">Inactive solutions</label>
+            <select
+              value={quboSolutionIdx.inactive}
+              onChange={(e) => setQuboSolutionIdx((prev) => ({ ...prev, inactive: Number(e.target.value) }))}
+              className="w-full bg-gray-900 border border-gray-700 rounded-md px-3 py-2 text-white"
+            >
+              {(resultData.results?.qubo_inactive?.solutions || []).map((sol, idx) => (
+                <option key={`inact-${idx}`} value={idx}>
+                  Solution {idx + 1} • E={sol.energy?.toFixed?.(2) ?? sol.energy}
+                  {sol.union_coverage !== undefined ? ` • cov=${sol.union_coverage.toFixed?.(1)}` : ''}
+                </option>
+              ))}
+            </select>
+          </div>
+          <p className="text-xs text-gray-400">
+            Load a structure above, then choose a solution. Active solutions highlight when the active state is loaded,
+            and inactive solutions when the inactive state is loaded.
+          </p>
         </div>
       )}
 

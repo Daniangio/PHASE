@@ -4,7 +4,6 @@ Refactored runner for two-state QUBO analysis.
 This implements:
   • QUBO_active   (Δ_act only)
   • QUBO_inactive (Δ_inact only)
-  • QUBO_combined (Δ_avg, your original mode)
 
 Classification uses all 3 QUBOs based on 9-label taxonomy:
   Global Hub, Active Hub, Inactive Hub,
@@ -15,6 +14,7 @@ We heavily comment classification logic for clarity.
 """
 
 import json
+from pathlib import Path
 import numpy as np
 from typing import Dict, Any, Optional, Tuple, List
 
@@ -251,16 +251,15 @@ def run_analysis(
         static_results = static.run((features_static, labels_Y), **params)
 
     # =============================================================
-    # 2. RUN QUBOs per-state
+    # 2. RUN QUBOs per-state (active and inactive separately)
     # =============================================================
 
     qubo = QUBOMaxCoverage()
     qubo_allowed_params = [
-        "alpha", "beta_switch", "beta_hub",
+        "alpha", "beta_switch", "beta_hub", "beta_coverage",
         "gamma_redundancy", "ii_threshold",
         "ii_scale", "soft_threshold_power",
         "num_reads", "num_solutions", "seed",
-        "use_per_state_imbalance",
         "filter_min_id", "filter_top_jsd", "filter_top_total",
         "static_results_path", "maxk",
     ]
@@ -277,11 +276,35 @@ def run_analysis(
     features_act = {k: active_features_raw[k] for k in descriptor_keys if k in active_features_raw}
     features_inact = {k: inactive_features_raw[k] for k in descriptor_keys if k in inactive_features_raw}
 
-    # A) ACTIVE only → use_per_state_imbalance=False (Δ_act only)
+    # Cache paths for imbalance matrices (so we can reuse across runs)
+    active_cache_npz = Path(file_paths["active_descriptors"]).with_suffix(".imbalance.npz")
+    inactive_cache_npz = Path(file_paths["inactive_descriptors"]).with_suffix(".imbalance.npz")
+    active_cache_npy_legacy = Path(file_paths["active_descriptors"]).with_suffix(".imbalance.npy")
+    inactive_cache_npy_legacy = Path(file_paths["inactive_descriptors"]).with_suffix(".imbalance.npy")
+
+    def _normalize_cache_paths(paths):
+        seen = []
+        for p in paths:
+            path = Path(p)
+            if path.exists() and path not in seen:
+                seen.append(path)
+        return seen
+
+    active_cache_paths = _normalize_cache_paths([active_cache_npz, active_cache_npy_legacy])
+    inactive_cache_paths = _normalize_cache_paths([inactive_cache_npz, inactive_cache_npy_legacy])
+
+    extra_active = params.get("imbalance_matrix_paths_active") or []
+    extra_inactive = params.get("imbalance_matrix_paths_inactive") or []
+    active_cache_paths = _normalize_cache_paths([*active_cache_paths, *extra_active])
+    inactive_cache_paths = _normalize_cache_paths([*inactive_cache_paths, *extra_inactive])
+
+    # A) ACTIVE only
     report("Running QUBO_active (only active-state Δ)", 40)
     res_act = qubo.run(
         features_act,   # active only
         static_results=static_results,
+        imbalance_matrix_paths=active_cache_paths,
+        save_imbalance_path=active_cache_npz,
         **final_qubo_params
     )
 
@@ -290,11 +313,13 @@ def run_analysis(
     res_inact = qubo.run(
         features_inact,
         static_results=static_results,
+        imbalance_matrix_paths=inactive_cache_paths,
+        save_imbalance_path=inactive_cache_npz,
         **final_qubo_params
     )
 
     # ==================================================================
-    # 4. CLASSIFICATION USING ACTIVE/INACTIVE ONLY (no combined run)
+    # 4. CLASSIFICATION USING ACTIVE/INACTIVE RESULTS
     # ==================================================================
     report("Assigning taxonomy labels", 80)
 
@@ -308,7 +333,7 @@ def run_analysis(
             "qubo_inactive": res_inact,
             "classification": {},
             "mapping": mapping,
-        }
+        }, mapping
 
     sel_act = set(res_act.get("solutions", [{}])[0].get("selected", [])) if "solutions" in res_act else set()
     sel_inact = set(res_inact.get("solutions", [{}])[0].get("selected", [])) if "solutions" in res_inact else set()
@@ -417,9 +442,18 @@ def run_analysis(
         }
 
     report("Returning results", 100)
-    return {
+    results = {
         "qubo_active": res_act,
         "qubo_inactive": res_inact,
         "classification": classification,
         "mapping": mapping,
+        "hyperparameters": {
+            "qubo_active": res_act.get("parameters") if isinstance(res_act, dict) else None,
+            "qubo_inactive": res_inact.get("parameters") if isinstance(res_inact, dict) else None,
+        },
+        "imbalance_cache_paths": {
+            "active": [str(p) for p in active_cache_paths] or [str(active_cache_npz)],
+            "inactive": [str(p) for p in inactive_cache_paths] or [str(inactive_cache_npz)],
+        },
     }
+    return results, mapping

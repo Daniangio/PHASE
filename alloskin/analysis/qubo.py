@@ -1,24 +1,24 @@
 """
 Goal 2: The Static Atlas (Set Cover / Dominating Set).
 
-QUBO implementation with:
-
-- Optional per-state Information Imbalance (active / inactive).
-- Soft weighting of coverage instead of hard Δ threshold.
-- Explicit hub scores based on soft coverage weights.
-- Regularization of state scores via a threshold.
-- Per-state hub / coverage exported for downstream classification.
+This version builds a pooled Information-Imbalance atlas (single feature set)
+and biases selection with state-sensitivity scores from Goal 1. Coverage is
+soft (no hard Δ threshold) and explicitly rewarded in the QUBO via a
+facility-location-style surrogate plus redundancy penalties.
 
 Expected input from runner:
     analyzer = QUBOMaxCoverage()
-    res = analyzer.run((features_act, features_inact),
-                       candidate_indices=...,
-                       candidate_state_scores=...,
-                       **params)
+    res = analyzer.run(
+        features,
+        candidate_indices=...,
+        candidate_state_scores=...,
+        **params,
+    )
 
 Where:
-    features_act, features_inact : FeatureDict
-        Mapping residue index -> np.ndarray of shape (n_frames, d).
+    features : FeatureDict
+        Mapping residue index -> np.ndarray of shape (n_frames, d) built from
+        the pooled simulations.
     candidate_indices : List[int] or List[str]
         Indices of residues considered in the QUBO.
     candidate_state_scores : Dict[index, float]
@@ -28,9 +28,10 @@ Where:
 from __future__ import annotations
 
 import json
+from pathlib import Path
 import numpy as np
 import multiprocessing as mp
-from typing import Tuple, List, Dict, Any, Sequence, Hashable
+from typing import Optional, Tuple, List, Dict, Any, Sequence, Hashable, Iterable
 
 from alloskin.common.types import FeatureDict
 
@@ -54,14 +55,16 @@ _IMBALANCE_SHARED = {
     "keys_list": None,
     "coords": None,
     "ranks": None,
+    "missing": None,
 }
 
 
-def _init_imbalance_worker(keys_list, coords, ranks):
+def _init_imbalance_worker(keys_list, coords, ranks, missing_map=None):
     """Store shared data in globals for pool workers to avoid large pickling."""
     _IMBALANCE_SHARED["keys_list"] = keys_list
     _IMBALANCE_SHARED["coords"] = coords
     _IMBALANCE_SHARED["ranks"] = ranks
+    _IMBALANCE_SHARED["missing"] = missing_map
 
 
 def _compute_imbalance_row(task_args):
@@ -70,11 +73,17 @@ def _compute_imbalance_row(task_args):
     keys_list = _IMBALANCE_SHARED["keys_list"]
     coords = _IMBALANCE_SHARED["coords"]
     ranks = _IMBALANCE_SHARED["ranks"]
+    missing_map = _IMBALANCE_SHARED.get("missing")
 
     dim_indices = list(range(coords[k_i].shape[1]))
 
+    cols = None
+    if missing_map is not None:
+        cols = missing_map.get(a)
+
     row_results = []
-    for b in range(a + 1, len(keys_list)):
+    targets = cols if cols is not None else range(a + 1, len(keys_list))
+    for b in targets:
         k_j = keys_list[b]
         ranks_j = ranks[k_j]
 
@@ -100,39 +109,233 @@ class QUBOMaxCoverage:
 
     Let x_i be a binary variable indicating whether residue i is in the Basis Set.
 
-    We define:
+    Definitions (pooled features):
 
         w_ij  : soft coverage weight of child j by parent i,
-                derived from Information Imbalance Δ(i→j).
+                derived from pooled Information Imbalance Δ(i→j).
         hub_i = sum_j w_ij  (hub score)
 
     Objective (to minimize):
 
         H =  sum_i [ + alpha * x_i
-                     - beta_switch * s_i * x_i
-                     - beta_hub    * hub_i * x_i ]
-             + sum_{i<j} [ gamma_overlap * overlap_ij * x_i * x_j
-                           + gamma_direct * direct_ij * x_i * x_j ]
+                     - beta_switch   * s_i     * x_i
+                     - beta_hub      * hub_i   * x_i ]
+             + sum_{i<j} [ beta_coverage   * cov_overlap_ij * x_i * x_j
+                           + gamma_redundancy * overlap_ij  * x_i * x_j ]
 
     where:
-        s_i         : regularized state sensitivity score of residue i
-                      (after applying ii_threshold).
-        overlap_ij  : weighted overlap of domains of i and j:
-                      sum_k min(w_ik, w_jk).
-        direct_ij   : redundancy from mutual direct coverage:
-                      1 if w_ij>0 or w_ji>0, else 0.
+        s_i              : max-normalized state-sensitivity score.
+        cov_overlap_ij   : product overlap sum_k w_ik * w_jk (Noisy-OR surrogate
+                           for the facility-location max).
+        overlap_ij       : normalized weighted overlap of coverage domains
+                           (sum_k min(w_ik, w_jk) / min(hub_i, hub_j)).
 
     Soft coverage weights:
 
-        Δ_eff(i→j) = combination of per-state Δ_act, Δ_inact (here average).
-        w_ij = max(0, 1 - (Δ_eff(i→j)/ii_scale)) ** p
+        w_ij = max(0, 1 - (Δ(i→j)/ii_scale)) ** p
 
     With ii_scale ≈ 0.6, any Δ ≥ 0.6 yields w_ij = 0 → no coverage, no hub.
     """
 
     def __init__(self) -> None:
-        # Used to store per-state imbalance matrices on last run
+        # Used to store imbalance matrices on last run (pooled features)
         self._IIM_list: List[np.ndarray] = []
+
+    @staticmethod
+    def _normalize_key(key: Hashable) -> Hashable:
+        """Coerce residue identifiers (e.g., '123' vs 123) to a stable type."""
+        if isinstance(key, str):
+            try:
+                return int(key)
+            except (TypeError, ValueError):
+                return key
+        if isinstance(key, (np.integer,)):
+            return int(key)
+        return key
+
+    def _normalize_feature_keys(self, features: FeatureDict) -> Dict[Hashable, np.ndarray]:
+        """
+        Normalize feature keys to avoid silent drops from str/int mismatches.
+
+        Raises if two distinct keys collapse to the same normalized key.
+        """
+        normalized: Dict[Hashable, np.ndarray] = {}
+        reverse: Dict[Hashable, Hashable] = {}
+
+        for key, val in features.items():
+            norm_key = self._normalize_key(key)
+            if norm_key in normalized and reverse[norm_key] != key:
+                raise ValueError(
+                    f"Feature keys {reverse[norm_key]} and {key} both map to normalized id {norm_key}."
+                )
+            normalized[norm_key] = val
+            reverse[norm_key] = key
+
+        return normalized
+
+    def _normalize_mapping_keys(self, mapping: Dict[Hashable, Any]) -> Dict[Hashable, Any]:
+        """
+        Normalize arbitrary mapping keys (e.g., static results, state scores).
+        """
+        normalized: Dict[Hashable, Any] = {}
+        reverse: Dict[Hashable, Hashable] = {}
+
+        for key, val in mapping.items():
+            norm_key = self._normalize_key(key)
+            if norm_key in normalized and reverse[norm_key] != key:
+                raise ValueError(
+                    f"Keys {reverse[norm_key]} and {key} both map to normalized id {norm_key}."
+                )
+            normalized[norm_key] = val
+            reverse[norm_key] = key
+
+        return normalized
+
+    # ------------------------------------------------------------------
+    # Imbalance cache helpers
+    # ------------------------------------------------------------------
+    def _load_imbalance_cache_file(self, path: Path) -> Dict[str, Any] | None:
+        """
+        Load an imbalance cache file. Supports npz with 'imbalance_matrix' and 'keys'
+        or legacy npy (assumed aligned to caller-provided keys).
+        """
+        if not path.exists() or not path.is_file():
+            return None
+        try:
+            data = np.load(path, allow_pickle=True)
+            if isinstance(data, np.lib.npyio.NpzFile):
+                mat = np.asarray(data["imbalance_matrix"], dtype=float)
+                keys_arr = data.get("keys")
+                keys_list = list(keys_arr.tolist()) if keys_arr is not None else None
+                return {"matrix": mat, "keys": keys_list, "source": str(path)}
+            elif isinstance(data, np.ndarray):
+                return {"matrix": np.asarray(data, dtype=float), "keys": None, "source": str(path)}
+        except Exception as exc:  # pragma: no cover - defensive
+            print(f"[QUBO] Warning: failed to load imbalance cache {path}: {exc}")
+        return None
+
+    def _prefill_from_cache(
+        self,
+        keys: Sequence[Hashable],
+        cache_entries: Sequence[Dict[str, Any]],
+    ) -> Tuple[np.ndarray | None, Dict[str, Any]]:
+        """
+        Merge cached imbalance values onto the candidate key set.
+
+        Returns the prefill matrix (nan where missing) and metadata on reuse.
+        """
+        if not cache_entries:
+            return None, {"cached_pairs": 0, "sources": []}
+
+        keys_list = list(keys)
+        key_to_idx = {k: i for i, k in enumerate(keys_list)}
+        n = len(keys_list)
+        prefill = np.full((n, n), np.nan, dtype=float)
+        np.fill_diagonal(prefill, 0.0)
+
+        cached_pairs = 0
+        sources = []
+
+        for entry in cache_entries:
+            mat = np.asarray(entry.get("matrix"), dtype=float)
+            entry_keys = entry.get("keys")
+            source = entry.get("source")
+            if entry_keys is None:
+                # Legacy: assume caller alignment if shape matches.
+                if mat.shape != (n, n):
+                    continue
+                entry_keys = keys_list
+            if len(entry_keys) != mat.shape[0] or mat.shape[0] != mat.shape[1]:
+                continue
+
+            entry_keys = [self._normalize_key(k) for k in entry_keys]
+            sources.append(source)
+
+            for i, ki in enumerate(entry_keys):
+                ti = key_to_idx.get(ki)
+                if ti is None:
+                    continue
+                row = mat[i]
+                for j, kj in enumerate(entry_keys):
+                    tj = key_to_idx.get(kj)
+                    if tj is None:
+                        continue
+                    val = row[j]
+                    if np.isnan(prefill[ti, tj]):
+                        prefill[ti, tj] = float(val)
+                        cached_pairs += 1
+
+        return prefill, {"cached_pairs": cached_pairs, "sources": sources}
+
+    def _build_union_cache(
+        self,
+        current_keys: Sequence[Hashable],
+        current_matrix: np.ndarray,
+        cache_entries: Sequence[Dict[str, Any]],
+    ) -> Tuple[List[Hashable], np.ndarray]:
+        """
+        Build a union cache over previous entries and the current matrix.
+        """
+        union_keys: List[Hashable] = []
+
+        def _add_keys(seq: Iterable[Hashable]):
+            for k in seq:
+                if k not in union_keys:
+                    union_keys.append(k)
+
+        for entry in cache_entries:
+            entry_keys = entry.get("keys") or []
+            entry_keys = [self._normalize_key(k) for k in entry_keys]
+            _add_keys(entry_keys)
+        _add_keys(current_keys)
+
+        n_union = len(union_keys)
+        union_mat = np.full((n_union, n_union), np.nan, dtype=float)
+        np.fill_diagonal(union_mat, 0.0)
+
+        def _fill_from(keys_src: Sequence[Hashable], mat_src: np.ndarray):
+            if mat_src.shape[0] != mat_src.shape[1]:
+                return
+            if len(keys_src) != mat_src.shape[0]:
+                return
+            idx_map = {k: i for i, k in enumerate(union_keys)}
+            for i, ki in enumerate(keys_src):
+                ui = idx_map.get(self._normalize_key(ki))
+                if ui is None:
+                    continue
+                for j, kj in enumerate(keys_src):
+                    uj = idx_map.get(self._normalize_key(kj))
+                    if uj is None:
+                        continue
+                    if np.isnan(union_mat[ui, uj]):
+                        union_mat[ui, uj] = float(mat_src[i, j])
+
+        for entry in cache_entries:
+            entry_keys = entry.get("keys")
+            if entry_keys is None:
+                continue
+            entry_keys = [self._normalize_key(k) for k in entry_keys]
+            _fill_from(entry_keys, np.asarray(entry.get("matrix"), dtype=float))
+
+        _fill_from(current_keys, current_matrix)
+
+        return union_keys, union_mat
+
+    def _save_imbalance_cache(
+        self,
+        path: Path,
+        keys: Sequence[Hashable],
+        matrix: np.ndarray,
+    ) -> None:
+        """Persist imbalance cache with keys."""
+        try:
+            np.savez_compressed(
+                path,
+                imbalance_matrix=matrix,
+                keys=np.array(list(keys), dtype=object),
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            print(f"[QUBO] Warning: failed to save imbalance cache to {path}: {exc}")
 
     # ------------------------------------------------------------------
     # Public entry point
@@ -148,6 +351,12 @@ class QUBOMaxCoverage:
         filter_min_id: float = 1.5,
         filter_top_jsd: int | None = 20,
         filter_top_total: int | None = 120,
+        # Imbalance reuse / persistence
+        imbalance_matrix: np.ndarray | None = None,
+        imbalance_matrix_path: str | Path | None = None,
+        imbalance_matrix_paths: Sequence[str | Path] | None = None,
+        imbalance_entries: Sequence[Dict[str, Any]] | None = None,
+        save_imbalance_path: str | Path | None = None,
         # Info imbalance / coverage hyperparameters
         ii_scale: float = 0.6,
         soft_threshold_power: float = 2.0,
@@ -158,18 +367,23 @@ class QUBOMaxCoverage:
         alpha: float = 1.0,
         beta_switch: float = 5.0,
         beta_hub: float = 1.0,
+        beta_coverage: float = 1.0,
         gamma_redundancy: float = 2.0,
         # Solver
         num_solutions: int = 5,
         num_reads: int = 2000,
         seed: int | None = None,
+        # Logging
+        progress_callback: Optional[callable] = None
     ) -> Dict[str, Any]:
         """
         Parameters
         ----------
         features
             FeatureDict mapping residue index -> array of shape (n_frames, d).
-            Represents the combined feature set to optimize over.
+            Represents the combined (pooled) feature set to optimize over.
+            Residue identifiers are normalized (e.g., "123" → 123) to avoid
+            silent mismatches.
         candidate_indices
             Residues to be considered in the QUBO.
         candidate_state_scores
@@ -178,7 +392,7 @@ class QUBOMaxCoverage:
         static_results
             Optional static analysis results used to pre-filter candidates and
             populate state scores when candidate_indices is not provided.
-        static_results_path
+            static_results_path
             Path to a JSON file with static analysis results; used only when
             static_results is not provided.
         filter_min_id
@@ -190,6 +404,19 @@ class QUBOMaxCoverage:
         filter_top_total
             Cap on total residues kept after filling by intrinsic dimension
             (None keeps all passing filter_min_id).
+        imbalance_matrix
+            Optional precomputed imbalance matrix (aligned to `candidate_indices`).
+        imbalance_matrix_path
+            If provided and exists, load imbalance matrix from this path (legacy).
+            Shape must match (N, N) for the candidate set unless keys are stored.
+        imbalance_matrix_paths
+            Optional list of cache paths (npz preferred) that include matrix + keys.
+        imbalance_entries
+            Optional list of explicit cache entries of the form
+            {"matrix": ndarray, "keys": List[Hashable]}.
+        save_imbalance_path
+            If provided, save/merge imbalance data (matrix + residue keys) to this path
+            to reuse in future runs.
         ii_scale
             Scale / threshold parameter for normalizing Δ before soft
             coverage. If Δ >= ii_scale → w_ij = 0 (no coverage, no hub).
@@ -197,10 +424,8 @@ class QUBOMaxCoverage:
             Exponent p in w_ij = max(0, 1 - Δ/ii_scale)^p. Higher p sharpens
             the distinction between strong and weak coverage.
         ii_threshold
-            State-score regularization threshold. If provided:
-              - scores > ii_threshold  → mapped to 1.0
-              - scores <= ii_threshold → mapped to score / ii_threshold
-            so that all s_i lie in [0, 1].
+            Optional lower-bound for the max-normalization denominator. Scores
+            are mapped to s_i = score / max(max_score, ii_threshold) ∈ [0, 1].
         maxk
             Maximum neighborhood size for dadapy MetricComparisons
             (defaults to n_samples - 1).
@@ -209,9 +434,12 @@ class QUBOMaxCoverage:
         beta_switch
             Linear reward for state sensitivity (switch-like behavior).
         beta_hub
-            Linear reward for hub score (total coverage).
+            Linear reward for hub score (total coverage surrogate).
+        beta_coverage
+            Pairwise penalty weight from the Noisy-OR coverage surrogate:
+            rewards union coverage by penalizing product overlaps.
         gamma_redundancy
-            Quadratic penalty for direct redundancy (mutual coverage).
+            Quadratic penalty for normalized redundancy (mutual coverage).
         num_solutions
             Number of unique solutions to report from the annealer.
         num_reads
@@ -227,12 +455,24 @@ class QUBOMaxCoverage:
             - "imbalance_matrix": Δ_avg(i→j) as nested list
             - "coverage_weights": w_ij (avg) as nested list
             - "hub_scores": hub_i (avg) per residue index
-            - "regularized_state_scores": s_i after applying ii_threshold
+            - "regularized_state_scores": max-normalized s_i
             - "parameters": hyperparameters used
+            - "imbalance_cache": metadata about load/save paths
             - "error": only present if QUBO stack not available or failure
         """
         if not QUBO_AVAILABLE:
             return {"error": "pyqubo / neal not available; cannot run QUBO."}
+        
+        # ------------------------------------------------------------
+        # Helpers for printing / callback
+        # ------------------------------------------------------------
+        def report(msg, pct):
+            if progress_callback:
+                progress_callback(msg, pct)
+            else:
+                print(f"[{pct}%] {msg}")
+
+        features = self._normalize_feature_keys(features)
 
         # Determine candidate pool and accompanying state scores.
         keys, candidate_state_scores = self._prepare_candidates(
@@ -252,20 +492,20 @@ class QUBOMaxCoverage:
         raw_state_scores = {k: float(candidate_state_scores.get(k, 0.0)) for k in keys}
 
         # --------------------------------------------------------------
-        # 0. Regularize state scores with ii_threshold (if provided)
+        # 0. Regularize state scores with max-normalization (optional floor)
         # --------------------------------------------------------------
+        max_score = max(raw_state_scores.values()) if raw_state_scores else 0.0
+        denom_candidates = [max_score]
         if ii_threshold is not None and ii_threshold > 0.0:
-            reg_scores: Dict[Hashable, float] = {}
-            for k in keys:
-                s_raw = raw_state_scores.get(k, 0.0)
-                if s_raw > ii_threshold:
-                    s_reg = 1.0
-                else:
-                    s_reg = s_raw / ii_threshold
-                reg_scores[k] = s_reg
-            candidate_state_scores = reg_scores
+            denom_candidates.append(ii_threshold)
+        denom = max(denom_candidates) if denom_candidates else 1.0
+
+        if denom <= 0.0:
+            candidate_state_scores = {k: 0.0 for k in keys}
         else:
-            candidate_state_scores = raw_state_scores
+            candidate_state_scores = {
+                k: min(1.0, raw_state_scores.get(k, 0.0) / denom) for k in keys
+            }
 
         # --------------------------------------------------------------
         # 1. Build feature arrays for each candidate
@@ -290,16 +530,57 @@ class QUBOMaxCoverage:
             feat_act[k] = arr_act
 
         # --------------------------------------------------------------
-        # 2. Compute Information Imbalance Δ(i→j)
+        # 2. Compute or load Information Imbalance Δ(i→j)
         # --------------------------------------------------------------
-        print(f"[QUBO] Computing Information Imbalance for {len(keys)} candidates...")
+        cache_entries: List[Dict[str, Any]] = []
+        cache_sources: List[str] = []
+
+        if imbalance_entries:
+            cache_entries.extend(list(imbalance_entries))
+
+        if imbalance_matrix is not None:
+            cache_entries.append({"matrix": np.asarray(imbalance_matrix, dtype=float), "keys": list(keys)})
+
+        combined_paths: List[Path] = []
+        if imbalance_matrix_paths:
+            combined_paths.extend([Path(p) for p in imbalance_matrix_paths])
+        if imbalance_matrix_path:
+            combined_paths.append(Path(imbalance_matrix_path))
+
+        for p in combined_paths:
+            entry = self._load_imbalance_cache_file(p)
+            if entry:
+                cache_entries.append(entry)
+                if entry.get("source"):
+                    cache_sources.append(entry["source"])
+
+        prefill, cache_meta = self._prefill_from_cache(keys, cache_entries)
+        cached_pairs = cache_meta.get("cached_pairs", 0)
+        cache_sources = cache_sources or cache_meta.get("sources", [])
+
+        if prefill is not None:
+            missing_pairs = int(np.isnan(prefill).sum())
+        else:
+            missing_pairs = len(keys) * len(keys) - len(keys)
+
+        print(f"[QUBO] Computing Information Imbalance for {len(keys)} candidates... "
+              f"(cached pairs reused: {cached_pairs})")
 
         imbalance_matrix = self._compute_imbalance_matrix(
             keys,
             feat_act,
             maxk=maxk,
+            prefill=prefill,
         )
+
         self._IIM_list.append(imbalance_matrix)
+
+        # Update union cache for persistence
+        union_size = None
+        if save_imbalance_path:
+            union_keys, union_mat = self._build_union_cache(keys, imbalance_matrix, cache_entries)
+            union_size = len(union_keys)
+            self._save_imbalance_cache(Path(save_imbalance_path), union_keys, union_mat)
 
         # --------------------------------------------------------------
         # 3. Convert Δ to soft coverage weights w_ij (avg)
@@ -322,6 +603,7 @@ class QUBOMaxCoverage:
             alpha=alpha,
             beta_switch=beta_switch,
             beta_hub=beta_hub,
+            beta_coverage=beta_coverage,
             gamma_redundancy=gamma_redundancy,
         )
 
@@ -396,14 +678,24 @@ class QUBOMaxCoverage:
                     "alpha": alpha,
                     "beta_switch": beta_switch,
                     "beta_hub": beta_hub,
+                    "beta_coverage": beta_coverage,
                     "gamma_redundancy": gamma_redundancy,
                     "ii_scale": ii_scale,
                     "ii_threshold": ii_threshold,
                     "soft_threshold_power": soft_threshold_power,
+                    "maxk": maxk,
                     "num_reads": num_reads,
                     "num_solutions": num_solutions,
                 },
-            }
+            "imbalance_cache": {
+                "cached_pairs": int(cached_pairs),
+                "missing_pairs_after_cache": int(missing_pairs),
+                "sources": list(cache_sources),
+                "save_path": str(save_imbalance_path) if save_imbalance_path else None,
+                "loaded_paths": [str(p) for p in combined_paths],
+                "union_size": int(union_size) if union_size is not None else None,
+            },
+        }
 
             return result
 
@@ -457,7 +749,15 @@ class QUBOMaxCoverage:
           1) static_results/static_results_path → apply filtering
           2) explicit candidate_indices
           3) fallback to all residues in `features`
+
+        Residue identifiers are normalized (e.g., "123" → 123) to avoid
+        silent drops from type mismatches.
         """
+        if candidate_state_scores is not None:
+            candidate_state_scores = self._normalize_mapping_keys(candidate_state_scores)
+        else:
+            candidate_state_scores = {}
+
         static_data = static_results
         if static_data is None and static_results_path:
             try:
@@ -469,6 +769,9 @@ class QUBOMaxCoverage:
                 )
 
         parsed_static = self._normalize_static_results(static_data) if static_data else None
+        parsed_static = (
+            self._normalize_mapping_keys(parsed_static) if parsed_static is not None else None
+        )
 
         if parsed_static:
             movers = []
@@ -508,11 +811,15 @@ class QUBOMaxCoverage:
 
         # No static filtering → use user-provided candidates or everything
         if candidate_indices is not None:
-            keys = [k for k in candidate_indices if k in features]
+            keys = []
+            for k in candidate_indices:
+                norm_k = self._normalize_key(k)
+                if norm_k in features:
+                    keys.append(norm_k)
         else:
             keys = list(features.keys())
 
-        base_scores = candidate_state_scores or {}
+        base_scores = candidate_state_scores
         state_scores = {k: float(base_scores.get(k, 0.0)) for k in keys}
         return keys, state_scores
 
@@ -522,6 +829,7 @@ class QUBOMaxCoverage:
         feat_act: Dict[Hashable, np.ndarray],
         *,
         maxk: int | None,
+        prefill: np.ndarray | None = None,
     ) -> np.ndarray:
         """
         Compute Information Imbalance Δ(i→j) using dadapy, averaging
@@ -550,11 +858,27 @@ class QUBOMaxCoverage:
             comps[key] = mc
             ranks[key] = mc.dist_indices
 
-        IIM = np.zeros((n, n), dtype=float)
+        # Initialize with prefill if provided (nan indicates missing)
+        if prefill is not None:
+            IIM = np.asarray(prefill, dtype=float).copy()
+        else:
+            IIM = np.full((n, n), np.nan, dtype=float)
+
+        np.fill_diagonal(IIM, 0.0)
+
+        # Determine missing pairs
+        missing_map: Dict[int, List[int]] = {}
+        for i in range(n):
+            for j in range(i + 1, n):
+                if np.isnan(IIM[i, j]) or np.isnan(IIM[j, i]):
+                    missing_map.setdefault(i, []).append(j)
+
+        if not missing_map:
+            return IIM
 
         # Parallelize imbalance computation row-wise; each worker receives
-        # one MetricComparisons instance (mc_i) and computes all k_js.
-        tasks = [(a, keys_list[a], comps[keys_list[a]]) for a in range(n)]
+        # one MetricComparisons instance (mc_i) and computes missing k_js.
+        tasks = [(a, keys_list[a], comps[keys_list[a]]) for a in missing_map.keys()]
         cpu_total = mp.cpu_count() or 1
         num_workers = min(len(tasks), max(1, cpu_total))
 
@@ -566,18 +890,18 @@ class QUBOMaxCoverage:
         try:
             if num_workers == 1:
                 # Avoid Pool startup cost when only one worker is available.
-                _init_imbalance_worker(keys_list, coords, ranks)
+                _init_imbalance_worker(keys_list, coords, ranks, missing_map)
                 results = [_compute_imbalance_row(task) for task in tasks]
             else:
                 with ctx.Pool(
                     processes=num_workers,
                     initializer=_init_imbalance_worker,
-                    initargs=(keys_list, coords, ranks),
+                    initargs=(keys_list, coords, ranks, missing_map),
                 ) as pool:
                     results = pool.map(_compute_imbalance_row, tasks)
         except Exception:
             # Fallback to sequential computation if multiprocessing fails.
-            _init_imbalance_worker(keys_list, coords, ranks)
+            _init_imbalance_worker(keys_list, coords, ranks, missing_map)
             results = [_compute_imbalance_row(task) for task in tasks]
 
         for a, row_results in results:
@@ -630,10 +954,11 @@ class QUBOMaxCoverage:
         alpha,
         beta_switch,
         beta_hub,
+        beta_coverage,
         gamma_redundancy,   # NEW unified redundancy term
     ):
         """
-        Build QUBO with a single redundancy penalty γ * overlap.
+        Build QUBO combining a coverage surrogate with normalized redundancy.
         """
 
         N = len(keys)
@@ -663,11 +988,24 @@ class QUBOMaxCoverage:
         for i in range(N):
             for j in range(i + 1, N):
 
-                # domain overlap (= redundancy)
-                R_ij = float(np.minimum(W[i], W[j]).sum())
+                # Coverage surrogate (Noisy-OR truncated at pairwise order):
+                # penalize joint selections that cover the same children.
+                coverage_overlap = float(np.dot(W[i], W[j]))
 
-                if R_ij > 0:
-                    J_quadratic[(keys_list[i], keys_list[j])] = gamma_redundancy * R_ij
+                # Normalized redundancy: penalize local overlap without
+                # over-penalizing global hubs.
+                raw_overlap = float(np.minimum(W[i], W[j]).sum())
+                denom = max(min(hub_scores[i], hub_scores[j]), 1e-12)
+                normalized_overlap = raw_overlap / denom if denom > 0 else 0.0
+
+                coeff = 0.0
+                if coverage_overlap > 0.0:
+                    coeff += beta_coverage * coverage_overlap
+                if normalized_overlap > 0.0:
+                    coeff += gamma_redundancy * normalized_overlap
+
+                if coeff > 0.0:
+                    J_quadratic[(keys_list[i], keys_list[j])] = coeff
 
         return h_linear, J_quadratic
 

@@ -10,7 +10,7 @@ import {
   addSystemState,
   deleteState,
 } from '../api/projects';
-import { submitStaticJob, submitDynamicJob, submitQuboJob, fetchResults } from '../api/jobs';
+import { submitStaticJob, submitDynamicJob, submitQuboJob, fetchResults, fetchResult } from '../api/jobs';
 import StaticAnalysisForm from '../components/analysis/StaticAnalysisForm';
 import DynamicAnalysisForm from '../components/analysis/DynamicAnalysisForm';
 import QuboAnalysisForm from '../components/analysis/QuboAnalysisForm';
@@ -25,6 +25,7 @@ export default function SystemDetailPage() {
   const [analysisError, setAnalysisError] = useState(null);
   const [downloadError, setDownloadError] = useState(null);
   const [staticResults, setStaticResults] = useState([]);
+  const [quboCachePaths, setQuboCachePaths] = useState({ active: [], inactive: [] });
   const [staticError, setStaticError] = useState(null);
   const [uploadingState, setUploadingState] = useState(null);
   const [addingState, setAddingState] = useState(false);
@@ -92,6 +93,49 @@ export default function SystemDetailPage() {
       setStatePair({ a: states[0].state_id, b: states[1].state_id });
     }
   }, [states, descriptorStates, statePair.a, statePair.b]);
+
+  useEffect(() => {
+    const loadQuboCaches = async () => {
+      if (!projectId || !systemId || !statePair.a || !statePair.b) {
+        setQuboCachePaths({ active: [], inactive: [] });
+        return;
+      }
+      try {
+        const allResults = await fetchResults();
+        const matching = allResults.filter(
+          (res) =>
+            res.analysis_type === 'qubo' &&
+            res.system_id === systemId &&
+            res.state_a_id === statePair.a &&
+            res.state_b_id === statePair.b &&
+            res.status === 'finished'
+        );
+        if (!matching.length) {
+          setQuboCachePaths({ active: [], inactive: [] });
+          return;
+        }
+        const details = await Promise.all(
+          matching.map((res) => fetchResult(res.job_id).catch(() => null))
+        );
+        const active = new Set();
+        const inactive = new Set();
+        details.forEach((detail) => {
+          const paths = detail?.results?.imbalance_cache_paths;
+          if (paths?.active) {
+            paths.active.forEach((p) => active.add(p));
+          }
+          if (paths?.inactive) {
+            paths.inactive.forEach((p) => inactive.add(p));
+          }
+        });
+        setQuboCachePaths({ active: Array.from(active), inactive: Array.from(inactive) });
+      } catch (err) {
+        console.warn('Failed to load QUBO cache paths', err);
+        setQuboCachePaths({ active: [], inactive: [] });
+      }
+    };
+    loadQuboCaches();
+  }, [projectId, systemId, statePair.a, statePair.b]);
 
   const refreshSystem = async () => {
     try {
@@ -227,7 +271,19 @@ export default function SystemDetailPage() {
       <section className="bg-gray-800 border border-gray-700 rounded-lg p-4 space-y-4">
         <div className="flex items-center justify-between">
           <h2 className="text-lg font-semibold text-white">States</h2>
-          <p className="text-xs text-gray-400">Status: {system.status}</p>
+          <div className="flex items-center space-x-3">
+            <p className="text-xs text-gray-400">Status: {system.status}</p>
+            {descriptorStates.length > 0 && (
+              <button
+                onClick={() =>
+                  navigate(`/projects/${projectId}/systems/${systemId}/descriptors/visualize`)
+                }
+                className="text-xs px-3 py-1 rounded-md border border-cyan-500 text-cyan-300 hover:bg-cyan-500/10"
+              >
+                Visualize descriptors
+              </button>
+            )}
+          </div>
         </div>
         {downloadError && <ErrorMessage message={downloadError} />}
         {actionError && <ErrorMessage message={actionError} />}
@@ -277,7 +333,11 @@ export default function SystemDetailPage() {
           </div>
           <div className="bg-gray-900 border border-gray-700 rounded-lg p-4">
             <h3 className="text-md font-semibold text-white mb-2">QUBO</h3>
-            <QuboAnalysisForm staticOptions={staticResults} onSubmit={(params) => enqueueJob(submitQuboJob, params)} />
+            <QuboAnalysisForm
+              staticOptions={staticResults}
+              cachePaths={quboCachePaths}
+              onSubmit={(params) => enqueueJob(submitQuboJob, params)}
+            />
           </div>
           <div className="bg-gray-900 border border-gray-700 rounded-lg p-4">
             <h3 className="text-md font-semibold text-white mb-2">Dynamic TE</h3>

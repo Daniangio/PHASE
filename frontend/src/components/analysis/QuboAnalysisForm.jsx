@@ -24,7 +24,7 @@ const defaultParams = {
   static_job_uuid: '',
 };
 
-export default function QuboAnalysisForm({ onSubmit, staticOptions = [] }) {
+export default function QuboAnalysisForm({ onSubmit, staticOptions = [], cachePaths = { active: [], inactive: [] } }) {
   const [form, setForm] = useState(defaultParams);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState(null);
@@ -76,6 +76,13 @@ export default function QuboAnalysisForm({ onSubmit, staticOptions = [] }) {
 
       if (form.static_job_uuid) {
         payload.static_job_uuid = form.static_job_uuid;
+      }
+
+      if (cachePaths?.active?.length) {
+        payload.imbalance_matrix_paths_active = cachePaths.active;
+      }
+      if (cachePaths?.inactive?.length) {
+        payload.imbalance_matrix_paths_inactive = cachePaths.inactive;
       }
 
       await onSubmit(payload);
