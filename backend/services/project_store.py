@@ -57,6 +57,7 @@ class DescriptorState:
     slice_spec: Optional[str] = None
     residue_keys: List[str] = field(default_factory=list)
     residue_mapping: Dict[str, str] = field(default_factory=dict)
+    metastable_labels_file: Optional[str] = None
     role: Optional[str] = None  # Legacy compatibility
     created_at: str = field(default_factory=_utc_now)
 
@@ -75,6 +76,8 @@ class SystemMetadata:
     residue_selections_mapping: Dict[str, str] = field(default_factory=dict)
     descriptor_keys: List[str] = field(default_factory=list)
     descriptor_metadata_file: Optional[str] = None
+    metastable_model_dir: Optional[str] = None
+    metastable_states: List[Dict[str, Any]] = field(default_factory=list)
     states: Dict[str, DescriptorState] = field(default_factory=dict)
 
 

@@ -9,6 +9,9 @@ import {
   deleteStateTrajectory,
   addSystemState,
   deleteState,
+  fetchMetastableStates,
+  recomputeMetastableStates,
+  renameMetastableState,
 } from '../api/projects';
 import { submitStaticJob, submitDynamicJob, submitQuboJob, fetchResults, fetchResult } from '../api/jobs';
 import StaticAnalysisForm from '../components/analysis/StaticAnalysisForm';
@@ -33,6 +36,19 @@ export default function SystemDetailPage() {
   const [uploadProgress, setUploadProgress] = useState({});
   const [processingState, setProcessingState] = useState(null);
   const [statePair, setStatePair] = useState({ a: null, b: null });
+  const [metastable, setMetastable] = useState({ states: [], model_dir: null });
+  const [metaLoading, setMetaLoading] = useState(false);
+  const [metaError, setMetaError] = useState(null);
+  const [metaActionError, setMetaActionError] = useState(null);
+  const [metaParamsOpen, setMetaParamsOpen] = useState(false);
+  const [metaParams, setMetaParams] = useState({
+    n_microstates: 20,
+    k_meta_min: 1,
+    k_meta_max: 4,
+    tica_lag_frames: 5,
+    tica_dim: 5,
+    random_state: 0,
+  });
   const navigate = useNavigate();
 
   useEffect(() => {
@@ -43,6 +59,10 @@ export default function SystemDetailPage() {
         const data = await fetchSystem(projectId, systemId);
         setSystem(data);
         setActionMessage(null);
+        setMetastable({
+          states: data.metastable_states || [],
+          model_dir: data.metastable_model_dir || null,
+        });
       } catch (err) {
         setPageError(err.message);
       } finally {
@@ -50,6 +70,11 @@ export default function SystemDetailPage() {
       }
     };
     loadSystem();
+  }, [projectId, systemId]);
+
+  useEffect(() => {
+    loadMetastable();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectId, systemId]);
 
   useEffect(() => {
@@ -71,28 +96,37 @@ export default function SystemDetailPage() {
 
   const states = useMemo(() => Object.values(system?.states || {}), [system]);
   const descriptorStates = useMemo(() => states.filter((s) => s.descriptor_file), [states]);
+  const metastableStates = useMemo(() => metastable.states || [], [metastable.states]);
+
+  const analysisStateOptions = useMemo(() => {
+    const macroOpts = descriptorStates.map((s) => ({
+      kind: 'macro',
+      id: s.state_id,
+      macroId: s.state_id,
+      label: s.name,
+    }));
+    const metaOpts = metastableStates
+      .filter((m) => m.macro_state_id)
+      .map((m) => ({
+        kind: 'meta',
+        id: m.metastable_id,
+        macroId: m.macro_state_id,
+        label: `[Meta] ${m.name || m.default_name || m.metastable_id} (${m.macro_state})`,
+      }));
+    return [...macroOpts, ...metaOpts];
+  }, [descriptorStates, metastableStates]);
 
   useEffect(() => {
-    if (!states.length) {
+    const macroOpts = analysisStateOptions.filter((o) => o.kind === 'macro');
+    if (!macroOpts.length) {
       setStatePair({ a: null, b: null });
       return;
     }
-    const currentA = descriptorStates.find((s) => s.state_id === statePair.a);
-    const currentB = descriptorStates.find((s) => s.state_id === statePair.b);
-    if (descriptorStates.length >= 2) {
-      if (currentA && currentB) return;
-      setStatePair({ a: descriptorStates[0].state_id, b: descriptorStates[1].state_id });
-      return;
-    }
-    if (descriptorStates.length === 1) {
-      if (currentA && !statePair.b) return;
-      setStatePair({ a: descriptorStates[0].state_id, b: null });
-      return;
-    }
-    if (!statePair.a && states.length >= 2) {
-      setStatePair({ a: states[0].state_id, b: states[1].state_id });
-    }
-  }, [states, descriptorStates, statePair.a, statePair.b]);
+    if (statePair.a && statePair.b) return;
+    const a = macroOpts[0] || null;
+    const b = macroOpts[1] || null;
+    setStatePair({ a, b });
+  }, [analysisStateOptions, statePair.a, statePair.b]);
 
   useEffect(() => {
     const loadQuboCaches = async () => {
@@ -141,25 +175,47 @@ export default function SystemDetailPage() {
     try {
       const data = await fetchSystem(projectId, systemId);
       setSystem(data);
+      setMetastable({
+        states: data.metastable_states || [],
+        model_dir: data.metastable_model_dir || null,
+      });
     } catch (err) {
       setActionError(err.message);
     }
   };
 
+  const loadMetastable = async () => {
+    setMetaLoading(true);
+    setMetaError(null);
+    try {
+      const data = await fetchMetastableStates(projectId, systemId);
+      setMetastable({ states: data.metastable_states || [], model_dir: data.model_dir || null });
+    } catch (err) {
+      setMetaError(err.message);
+    } finally {
+      setMetaLoading(false);
+    }
+  };
+
   const enqueueJob = async (runner, params) => {
-    const stateA = descriptorStates.find((s) => s.state_id === statePair.a);
-    const stateB = descriptorStates.find((s) => s.state_id === statePair.b);
+    const stateAId = statePair.a?.macroId;
+    const stateBId = statePair.b?.macroId;
+    const stateA = descriptorStates.find((s) => s.state_id === stateAId);
+    const stateB = descriptorStates.find((s) => s.state_id === stateBId);
     if (!stateA || !stateB) {
       setAnalysisError('Pick two states with built descriptors to run analysis.');
       return;
     }
+    const extraParams = { ...params };
+    if (statePair.a?.kind === 'meta') extraParams.metastable_a_id = statePair.a.id;
+    if (statePair.b?.kind === 'meta') extraParams.metastable_b_id = statePair.b.id;
     setAnalysisError(null);
     const response = await runner({
       project_id: projectId,
       system_id: systemId,
       state_a_id: stateA.state_id,
       state_b_id: stateB.state_id,
-      ...params,
+      ...extraParams,
     });
     navigate(`/jobs/${response.job_id}`, { state: { analysis_uuid: response.analysis_uuid } });
   };
@@ -258,6 +314,35 @@ export default function SystemDetailPage() {
   if (pageError) return <ErrorMessage message={pageError} />;
   if (!system) return null;
 
+  const handleRunMetastable = async () => {
+    setMetaActionError(null);
+    setMetaLoading(true);
+    try {
+      const payload = {
+        ...metaParams,
+        k_meta_max: Math.max(metaParams.k_meta_min, metaParams.k_meta_max),
+      };
+      await recomputeMetastableStates(projectId, systemId, payload);
+      await refreshSystem();
+      await loadMetastable();
+    } catch (err) {
+      setMetaActionError(err.message);
+    } finally {
+      setMetaLoading(false);
+    }
+  };
+
+  const handleRenameMetastable = async (metastableId, name) => {
+    if (!name.trim()) return;
+    setMetaActionError(null);
+    try {
+      await renameMetastableState(projectId, systemId, metastableId, name.trim());
+      await loadMetastable();
+    } catch (err) {
+      setMetaActionError(err.message);
+    }
+  };
+
   return (
     <div className="space-y-8">
       <div>
@@ -311,6 +396,78 @@ export default function SystemDetailPage() {
 
       <section className="bg-gray-800 border border-gray-700 rounded-lg p-4 space-y-4">
         <div className="flex items-center justify-between">
+          <h2 className="text-lg font-semibold text-white">Metastable States (VAMP/TICA)</h2>
+          <div className="flex items-center space-x-2">
+            <button
+              onClick={() => setMetaParamsOpen((prev) => !prev)}
+              className="text-xs px-3 py-1 rounded-md border border-gray-600 text-gray-200 hover:bg-gray-700/60"
+            >
+              Hyperparams
+            </button>
+            <button
+              onClick={handleRunMetastable}
+              disabled={metaLoading}
+              className="text-xs px-3 py-1 rounded-md border border-cyan-500 text-cyan-300 hover:bg-cyan-500/10 disabled:opacity-50"
+            >
+              {metaLoading ? 'Running…' : 'Recompute'}
+            </button>
+            <button
+              onClick={() => navigate(`/projects/${projectId}/systems/${systemId}/metastable/visualize`)}
+              className="text-xs px-3 py-1 rounded-md border border-emerald-500 text-emerald-300 hover:bg-emerald-500/10"
+            >
+              Visualize
+            </button>
+          </div>
+        </div>
+        {metaParamsOpen && (
+          <div className="bg-gray-900 border border-gray-700 rounded-md p-3 space-y-3 text-sm">
+            <div className="grid md:grid-cols-3 gap-3">
+              {[
+                { key: 'n_microstates', label: 'Microstates (k-means)', min: 2 },
+                { key: 'k_meta_min', label: 'Metastable min k', min: 1 },
+                { key: 'k_meta_max', label: 'Metastable max k', min: 1 },
+                { key: 'tica_lag_frames', label: 'TICA lag (frames)', min: 1 },
+                { key: 'tica_dim', label: 'TICA dims', min: 1 },
+                { key: 'random_state', label: 'Random seed', min: 0 },
+              ].map((field) => (
+                <label key={field.key} className="space-y-1">
+                  <span className="block text-xs text-gray-400">{field.label}</span>
+                  <input
+                    type="number"
+                    min={field.min}
+                    value={metaParams[field.key]}
+                    onChange={(e) =>
+                      setMetaParams((prev) => ({
+                        ...prev,
+                        [field.key]: Number(e.target.value),
+                      }))
+                    }
+                    className="w-full bg-gray-800 border border-gray-700 rounded-md px-2 py-1 text-white"
+                  />
+                </label>
+              ))}
+            </div>
+          </div>
+        )}
+        {metaError && <ErrorMessage message={`Failed to load metastable states: ${metaError}`} />}
+        {metaActionError && <ErrorMessage message={metaActionError} />}
+        {metaLoading && <Loader message="Computing metastable states..." />}
+        {!metaLoading && metastable.states.length === 0 && (
+          <p className="text-sm text-gray-400">
+            Run metastable analysis after uploading trajectories and building descriptors.
+          </p>
+        )}
+        {!metaLoading && metastable.states.length > 0 && (
+          <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-3">
+            {metastable.states.map((m) => (
+              <MetastableCard key={m.metastable_id || `${m.macro_state}-${m.metastable_index}`} meta={m} onRename={handleRenameMetastable} />
+            ))}
+          </div>
+        )}
+      </section>
+
+      <section className="bg-gray-800 border border-gray-700 rounded-lg p-4 space-y-4">
+        <div className="flex items-center justify-between">
           <h2 className="text-lg font-semibold text-white">Run Analysis</h2>
           <p className="text-xs text-gray-400">
             Choose two descriptor-ready states (found {descriptorStates.length}).
@@ -319,7 +476,7 @@ export default function SystemDetailPage() {
         {staticError && <ErrorMessage message={`Failed to load static jobs: ${staticError}`} />}
         {analysisError && <ErrorMessage message={analysisError} />}
         <StatePairSelector
-          states={descriptorStates}
+          options={analysisStateOptions}
           value={statePair}
           onChange={(updater) => {
             setAnalysisError(null);
@@ -451,25 +608,80 @@ function StateCard({ state, onDownload, onUpload, onDeleteTrajectory, onDeleteSt
   );
 }
 
-function StatePairSelector({ states, value, onChange }) {
-  if (states.length < 2) {
+function MetastableCard({ meta, onRename }) {
+  const [name, setName] = useState(meta.name || meta.default_name || `Meta ${meta.metastable_index}`);
+  const [isSaving, setIsSaving] = useState(false);
+
+  const handleSave = async () => {
+    if (!meta.metastable_id) return;
+    setIsSaving(true);
+    try {
+      await onRename(meta.metastable_id, name);
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  return (
+    <div className="bg-gray-900 border border-gray-700 rounded-lg p-3 space-y-2">
+      <div className="flex items-center justify-between">
+        <p className="text-xs text-gray-400">{meta.macro_state}</p>
+        <span className="text-xs text-gray-500">Frames: {meta.n_frames ?? '—'}</span>
+      </div>
+      <div>
+        <label className="block text-xs text-gray-400 mb-1">Name</label>
+        <input
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          className="w-full bg-gray-800 border border-gray-700 rounded-md px-2 py-1 text-white text-sm"
+        />
+      </div>
+      <div className="flex items-center justify-between text-xs text-gray-400">
+        <span>ID: {meta.metastable_id || meta.metastable_index}</span>
+        <button
+          onClick={handleSave}
+          disabled={isSaving || !meta.metastable_id}
+          className="text-cyan-400 hover:text-cyan-300 disabled:opacity-50"
+        >
+          {isSaving ? 'Saving…' : 'Save'}
+        </button>
+      </div>
+      {meta.representative_pdb && (
+        <p className="text-xs text-cyan-400 break-all">
+          Representative PDB: {meta.representative_pdb}
+        </p>
+      )}
+    </div>
+  );
+}
+
+function StatePairSelector({ options, value, onChange }) {
+  if (options.length < 2) {
     return <p className="text-sm text-gray-400">Upload trajectories for at least two states to run analyses.</p>;
   }
+
+  const toValue = (opt) => (opt ? `${opt.kind}:${opt.id}` : '');
+
+  const handleChange = (key, raw) => {
+    const next = options.find((o) => `${o.kind}:${o.id}` === raw) || null;
+    onChange((prev) => ({ ...prev, [key]: next }));
+  };
+
   return (
     <div className="bg-gray-900 border border-gray-700 rounded-lg p-4">
-      <p className="text-sm text-gray-200 mb-2">Select two states to compare</p>
+      <p className="text-sm text-gray-200 mb-2">Select two states or metastable states to compare</p>
       <div className="grid md:grid-cols-2 gap-3">
         <div>
           <label className="block text-xs text-gray-400 mb-1">State A</label>
           <select
-            value={value.a || ''}
-            onChange={(e) => onChange((prev) => ({ ...prev, a: e.target.value || null }))}
+            value={toValue(value.a)}
+            onChange={(e) => handleChange('a', e.target.value)}
             className="w-full bg-gray-800 border border-gray-700 rounded-md px-3 py-2 text-white focus:ring-cyan-500"
           >
-            <option value="">Choose state</option>
-            {states.map((state) => (
-              <option key={state.state_id} value={state.state_id}>
-                {state.name}
+            <option value="">Choose</option>
+            {options.map((opt) => (
+              <option key={`${opt.kind}-${opt.id}`} value={`${opt.kind}:${opt.id}`}>
+                {opt.label}
               </option>
             ))}
           </select>
@@ -477,14 +689,14 @@ function StatePairSelector({ states, value, onChange }) {
         <div>
           <label className="block text-xs text-gray-400 mb-1">State B</label>
           <select
-            value={value.b || ''}
-            onChange={(e) => onChange((prev) => ({ ...prev, b: e.target.value || null }))}
+            value={toValue(value.b)}
+            onChange={(e) => handleChange('b', e.target.value)}
             className="w-full bg-gray-800 border border-gray-700 rounded-md px-3 py-2 text-white focus:ring-cyan-500"
           >
-            <option value="">Choose state</option>
-            {states.map((state) => (
-              <option key={state.state_id} value={state.state_id}>
-                {state.name}
+            <option value="">Choose</option>
+            {options.map((opt) => (
+              <option key={`${opt.kind}-${opt.id}`} value={`${opt.kind}:${opt.id}`}>
+                {opt.label}
               </option>
             ))}
           </select>

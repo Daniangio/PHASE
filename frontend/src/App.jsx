@@ -6,6 +6,7 @@ import ResultsPage from './pages/ResultsPage';
 import ResultDetailPage from './pages/ResultDetailPage';
 import VisualizePage from './pages/VisualizePage';
 import DescriptorVizPage from './pages/DescriptorVizPage';
+import MetastableVizPage from './pages/MetastableVizPage';
 import MolstarDebugPage from './pages/MolstarDebugPage';
 import HealthPage from './pages/HealthPage';
 import JobStatusPage from './pages/JobStatusPage';
@@ -21,6 +22,10 @@ export default function App() {
           <Route
             path="/projects/:projectId/systems/:systemId/descriptors/visualize"
             element={<DescriptorVizPage />}
+          />
+          <Route
+            path="/projects/:projectId/systems/:systemId/metastable/visualize"
+            element={<MetastableVizPage />}
           />
           <Route path="/results" element={<ResultsPage />} />
           <Route path="/results/:jobId" element={<ResultDetailPage />} />

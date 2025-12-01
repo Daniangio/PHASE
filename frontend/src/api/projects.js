@@ -225,3 +225,34 @@ export function fetchStateDescriptors(projectId, systemId, stateId, params = {})
   const suffix = qs.toString() ? `?${qs.toString()}` : '';
   return requestJSON(`/projects/${projectId}/systems/${systemId}/states/${stateId}/descriptors${suffix}`);
 }
+
+export function fetchMetastableStates(projectId, systemId) {
+  return requestJSON(`/projects/${projectId}/systems/${systemId}/metastable`);
+}
+
+export function recomputeMetastableStates(projectId, systemId, params = {}) {
+  const qs = new URLSearchParams();
+  if (params.n_microstates) qs.set('n_microstates', params.n_microstates);
+  if (params.k_meta_min) qs.set('k_meta_min', params.k_meta_min);
+  if (params.k_meta_max) qs.set('k_meta_max', params.k_meta_max);
+  if (params.tica_lag_frames) qs.set('tica_lag_frames', params.tica_lag_frames);
+  if (params.tica_dim) qs.set('tica_dim', params.tica_dim);
+  if (params.random_state !== undefined) qs.set('random_state', params.random_state);
+  const suffix = qs.toString() ? `?${qs.toString()}` : '';
+  return requestJSON(`/projects/${projectId}/systems/${systemId}/metastable/recompute${suffix}`, {
+    method: 'POST',
+  });
+}
+
+export function renameMetastableState(projectId, systemId, metastableId, name) {
+  return requestJSON(`/projects/${projectId}/systems/${systemId}/metastable/${encodeURIComponent(metastableId)}`, {
+    method: 'PATCH',
+    body: { name },
+  });
+}
+
+export function metastablePdbUrl(projectId, systemId, metastableId) {
+  return `${API_BASE}/projects/${projectId}/systems/${systemId}/metastable/${encodeURIComponent(
+    metastableId
+  )}/pdb`;
+}

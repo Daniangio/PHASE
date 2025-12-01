@@ -31,6 +31,7 @@ from backend.services.project_store import (
     ProjectMetadata,
     SystemMetadata,
 )
+from backend.services.metastable import recompute_metastable_states
 from backend.services.preprocessing import DescriptorPreprocessor
 from backend.services.descriptors import save_descriptor_npz, load_descriptor_npz
 
@@ -205,6 +206,12 @@ async def _build_state_descriptors(
     _refresh_system_metadata(system_meta)
 
     project_store.save_system(system_meta)
+    # Trigger metastable recomputation (best-effort)
+    try:
+        recompute_metastable_states(system_meta.project_id, system_meta.system_id)
+        system_meta = project_store.get_system(system_meta.project_id, system_meta.system_id)
+    except Exception as exc:
+        print(f"[metastable] Recompute failed: {exc}")
     return system_meta
 
 
@@ -694,6 +701,118 @@ async def delete_state(project_id: str, system_id: str, state_id: str):
     _refresh_system_metadata(system_meta)
     project_store.save_system(system_meta)
     return _serialize_system(system_meta)
+
+
+@api_router.post(
+    "/projects/{project_id}/systems/{system_id}/metastable/recompute",
+    summary="Recompute metastable states across all descriptor-ready trajectories",
+)
+async def recompute_metastable(
+    project_id: str,
+    system_id: str,
+    n_microstates: int = Query(20, ge=2, le=500),
+    k_meta_min: int = Query(1, ge=1, le=10),
+    k_meta_max: int = Query(4, ge=1, le=10),
+    tica_lag_frames: int = Query(5, ge=1),
+    tica_dim: int = Query(5, ge=1),
+    random_state: int = Query(0),
+):
+    try:
+        project_store.get_system(project_id, system_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"System '{system_id}' not found.")
+
+    try:
+        result = await run_in_threadpool(
+            recompute_metastable_states,
+            project_id,
+            system_id,
+            n_microstates=n_microstates,
+            k_meta_min=k_meta_min,
+            k_meta_max=max(k_meta_min, k_meta_max),
+            tica_lag_frames=tica_lag_frames,
+            tica_dim=tica_dim,
+            random_state=random_state,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Metastable recompute failed: {exc}") from exc
+
+    return result
+
+
+@api_router.get(
+    "/projects/{project_id}/systems/{system_id}/metastable",
+    summary="List metastable states for a system",
+)
+async def list_metastable_states(project_id: str, system_id: str):
+    try:
+        system_meta = project_store.get_system(project_id, system_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"System '{system_id}' not found.")
+
+    return {
+        "metastable_states": system_meta.metastable_states or [],
+        "model_dir": system_meta.metastable_model_dir,
+    }
+
+
+@api_router.get(
+    "/projects/{project_id}/systems/{system_id}/metastable/{metastable_id}/pdb",
+    summary="Download representative PDB for a metastable state",
+)
+async def fetch_metastable_pdb(project_id: str, system_id: str, metastable_id: str):
+    try:
+        system_meta = project_store.get_system(project_id, system_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"System '{system_id}' not found.")
+
+    metas = system_meta.metastable_states or []
+    target = next((m for m in metas if m.get("metastable_id") == metastable_id), None)
+    if not target:
+        raise HTTPException(status_code=404, detail=f"Metastable state '{metastable_id}' not found.")
+    pdb_rel = target.get("representative_pdb")
+    if not pdb_rel:
+        raise HTTPException(status_code=404, detail="No representative PDB stored for this metastable state.")
+    pdb_path = project_store.resolve_path(project_id, system_id, pdb_rel)
+    if not pdb_path.exists():
+        raise HTTPException(status_code=404, detail="Representative PDB file is missing on disk.")
+    return FileResponse(pdb_path, filename=pdb_path.name, media_type="chemical/x-pdb")
+
+
+@api_router.patch(
+    "/projects/{project_id}/systems/{system_id}/metastable/{metastable_id}",
+    summary="Rename a metastable state",
+)
+async def rename_metastable_state(
+    project_id: str,
+    system_id: str,
+    metastable_id: str,
+    payload: Dict[str, Any],
+):
+    try:
+        system_meta = project_store.get_system(project_id, system_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"System '{system_id}' not found.")
+
+    new_name = (payload or {}).get("name")
+    if not new_name or not str(new_name).strip():
+        raise HTTPException(status_code=400, detail="Name is required.")
+    new_name = str(new_name).strip()
+
+    updated = False
+    metas = system_meta.metastable_states or []
+    for meta in metas:
+        if meta.get("metastable_id") == metastable_id:
+            meta["name"] = new_name
+            updated = True
+            break
+
+    if not updated:
+        raise HTTPException(status_code=404, detail=f"Metastable state '{metastable_id}' not found.")
+
+    system_meta.metastable_states = metas
+    project_store.save_system(system_meta)
+    return {"metastable_states": metas}
 
 
 # --- Dependencies ---

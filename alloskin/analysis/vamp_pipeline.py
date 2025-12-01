@@ -30,15 +30,21 @@ Dependencies
 """
 
 import argparse
+import pickle
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
 import numpy as np
 import MDAnalysis as mda
 from MDAnalysis.analysis.dihedrals import Ramachandran
 
 import matplotlib.pyplot as plt
 
-from deeptime.decomposition import VAMP
+from deeptime.decomposition import VAMP, TICA
 from deeptime.markov.msm import MaximumLikelihoodMSM
 from sklearn.cluster import KMeans
+from sklearn.metrics import silhouette_score
+from sklearn.preprocessing import StandardScaler
 
 
 # =========================
@@ -133,6 +139,360 @@ def lag_ps_to_frames(desired_lag_ps, frame_dt_ps, n_frames):
 
 
 # =========================
+# Descriptor-based system pipeline helpers
+# =========================
+
+def _load_descriptor_npz(path: Path) -> Dict[str, np.ndarray]:
+    """Load a descriptor NPZ file (residue_key -> array)."""
+    if not path.exists():
+        raise FileNotFoundError(f"Descriptor file not found: {path}")
+    npz = np.load(path, allow_pickle=True)
+    return {k: npz[k] for k in npz.files}
+
+
+def _flatten_feature_dict(features: Dict[str, np.ndarray]) -> Tuple[np.ndarray, List[str]]:
+    """
+    Flatten a residue feature dict into a 2D matrix (frames, dims_total).
+
+    Ensures all residues share the same number of frames.
+    """
+    if not features:
+        raise ValueError("Empty descriptor dictionary.")
+    keys = sorted(features.keys())
+    n_frames = None
+    blocks = []
+    for key in keys:
+        arr = np.asarray(features[key])
+        if arr.ndim == 1:
+            arr = arr[:, None]
+        if n_frames is None:
+            n_frames = arr.shape[0]
+        elif arr.shape[0] != n_frames:
+            raise ValueError(f"Residue {key} has {arr.shape[0]} frames, expected {n_frames}.")
+        blocks.append(arr.reshape(n_frames, -1))
+    X = np.concatenate(blocks, axis=1)
+    return X, keys
+
+
+def _prepare_macro_feature_matrix(
+    trajectories: List[Dict[str, Any]]
+) -> Tuple[np.ndarray, Dict[str, slice], List[str]]:
+    """
+    Concatenate flattened descriptors for all trajectories of a macro-state.
+
+    Returns
+    -------
+    X_all : (sum_frames, d) array
+    frame_slices : dict trajectory_id -> slice in X_all
+    residue_keys : sorted residue keys as encountered
+    """
+    all_blocks = []
+    frame_slices: Dict[str, slice] = {}
+    start = 0
+    residue_keys: Optional[List[str]] = None
+
+    for spec in trajectories:
+        desc_path = Path(spec["descriptor_path"])
+        features = _load_descriptor_npz(desc_path)
+        X, keys = _flatten_feature_dict(features)
+        if residue_keys is None:
+            residue_keys = keys
+        elif residue_keys != keys:
+            raise ValueError(f"Residue keys mismatch for trajectory {spec.get('trajectory_id')}: {keys} vs {residue_keys}")
+        n_frames = X.shape[0]
+        end = start + n_frames
+        frame_slices[spec["trajectory_id"]] = slice(start, end)
+        all_blocks.append(X)
+        start = end
+
+    if residue_keys is None:
+        raise ValueError("No residue keys found while preparing macro features.")
+
+    X_all = np.vstack(all_blocks)
+    return X_all, frame_slices, residue_keys
+
+
+def _choose_k_meta_by_silhouette(centers: np.ndarray, k_min: int = 1, k_max: int = 4, random_state: int = 0) -> Tuple[int, Dict[int, float]]:
+    """
+    Choose metastable cluster count via silhouette on microstate centers.
+
+    Returns best_k and a score map. k=1 is allowed with score 0.0 fallback.
+    """
+    scores: Dict[int, float] = {}
+    best_k = k_min
+    best_score = -np.inf
+
+    max_k_eff = min(k_max, len(centers))
+    for k in range(k_min, max_k_eff + 1):
+        if k == 1:
+            score = 0.0
+            scores[k] = score
+        else:
+            km = KMeans(n_clusters=k, n_init="auto", random_state=random_state)
+            labels = km.fit_predict(centers)
+            if len(np.unique(labels)) < 2:
+                score = -np.inf
+            else:
+                score = silhouette_score(centers, labels)
+            scores[k] = float(score)
+        if scores[k] > best_score:
+            best_score = scores[k]
+            best_k = k
+    return best_k, scores
+
+
+def _split_metastable_labels(
+    macro_labels: np.ndarray,
+    frame_slices: Dict[str, slice]
+) -> Dict[str, np.ndarray]:
+    """Slice a global label array into per-trajectory arrays."""
+    labels_per_traj: Dict[str, np.ndarray] = {}
+    for traj_id, sl in frame_slices.items():
+        labels_per_traj[traj_id] = macro_labels[sl]
+    return labels_per_traj
+
+
+def _write_metastable_labels_sidecar(descriptor_path: Path, labels: np.ndarray) -> Path:
+    """
+    Persist metastable labels next to descriptor NPZ and embed in NPZ.
+
+    Returns path to the saved .npy sidecar.
+    """
+    sidecar = descriptor_path.with_suffix(".meta_labels.npy")
+    np.save(sidecar, labels.astype(np.int32))
+
+    npz = np.load(descriptor_path, allow_pickle=True)
+    data = {k: npz[k] for k in npz.files}
+    data["metastable_labels"] = labels.astype(np.int32)
+    tmp_path = descriptor_path.with_suffix(".tmp.npz")
+    np.savez_compressed(tmp_path, **data)
+    tmp_path.replace(descriptor_path)
+
+    return sidecar
+
+
+def _resolve_global_frame(frame_idx: int, frame_slices: Dict[str, slice]) -> Tuple[str, int]:
+    """Map a global frame index back to (trajectory_id, local_frame_idx)."""
+    for traj_id, sl in frame_slices.items():
+        if sl.start <= frame_idx < sl.stop:
+            return traj_id, frame_idx - sl.start
+    raise ValueError(f"Frame index {frame_idx} not found in any trajectory slice.")
+
+
+def _write_representative_pdb_for_frame(
+    traj_spec: Dict[str, Any],
+    local_frame: int,
+    out_dir: Path,
+    macro_state: str,
+    metastable_idx: int,
+) -> Optional[Path]:
+    """
+    Write a representative PDB snapshot for a single frame of a trajectory.
+    """
+    top = traj_spec.get("topology_path")
+    traj = traj_spec.get("trajectory_path")
+    if not top or not traj:
+        return None
+    top_path = Path(top)
+    traj_path = Path(traj)
+    if not top_path.exists() or not traj_path.exists():
+        return None
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / f"{macro_state}_meta_{metastable_idx}_rep.pdb"
+
+    u = mda.Universe(str(top_path), str(traj_path))
+    u.trajectory[local_frame]
+    with mda.Writer(str(out_path), u.atoms.n_atoms) as W:
+        W.write(u.atoms)
+    return out_path
+
+
+def run_metastable_pipeline_for_macro(
+    macro_state: str,
+    trajectories: List[Dict[str, Any]],
+    *,
+    output_dir: Path,
+    n_microstates: int = 20,
+    k_meta_min: int = 1,
+    k_meta_max: int = 4,
+    tica_lag_frames: int = 5,
+    tica_dim: int = 5,
+    random_state: int = 0,
+) -> Dict[str, Any]:
+    """
+    Run TICA + micro/macro clustering for a set of trajectories of one macro-state.
+
+    Expected trajectory spec keys:
+        - trajectory_id: str
+        - descriptor_path: str or Path (NPZ, residue -> features)
+        - topology_path: optional, to write representative PDBs
+        - trajectory_path: optional, to write representative PDBs
+    """
+    if not trajectories:
+        raise ValueError(f"No trajectories provided for macro state '{macro_state}'.")
+
+    X_all, frame_slices, residue_keys = _prepare_macro_feature_matrix(trajectories)
+
+    # Standardize and TICA
+    scaler = StandardScaler()
+    X_std = scaler.fit_transform(X_all)
+    tica = TICA(lagtime=tica_lag_frames, dim=tica_dim, scaling=None)
+    tica_model = tica.fit(X_std).fetch_model()
+    Y = tica_model.transform(X_std)
+
+    # Microstates
+    if n_microstates > Y.shape[0]:
+        raise ValueError(f"n_microstates={n_microstates} exceeds frame count {Y.shape[0]}.")
+    micro_labels, centers, micro_km = cluster_microstates(
+        Y,
+        n_microstates=n_microstates,
+        random_state=random_state,
+        return_model=True,
+    )
+
+    # Metastable (micro -> meta) using silhouette on microstate centers
+    best_k, silhouette_scores = _choose_k_meta_by_silhouette(
+        centers, k_min=k_meta_min, k_max=k_meta_max, random_state=random_state
+    )
+    meta_km = KMeans(n_clusters=best_k, n_init="auto", random_state=random_state)
+    micro_to_meta = meta_km.fit_predict(centers)
+    meta_labels = micro_to_meta[micro_labels]
+
+    labels_per_traj = _split_metastable_labels(meta_labels, frame_slices)
+
+    # Persist labels into descriptor files + sidecars
+    label_paths: Dict[str, str] = {}
+    for spec in trajectories:
+        traj_id = spec["trajectory_id"]
+        desc_path = Path(spec["descriptor_path"])
+        sidecar = _write_metastable_labels_sidecar(desc_path, labels_per_traj[traj_id])
+        label_paths[traj_id] = str(sidecar)
+
+    # Representative PDBs
+    macro_out_dir = output_dir / macro_state
+    rep_frames = choose_representative_frames(Y, meta_labels)
+    rep_pdbs = {}
+    for meta_idx, global_frame in rep_frames.items():
+        traj_id, local_frame = _resolve_global_frame(global_frame, frame_slices)
+        spec = next(t for t in trajectories if t["trajectory_id"] == traj_id)
+        pdb_path = _write_representative_pdb_for_frame(
+            spec,
+            local_frame=local_frame,
+            out_dir=macro_out_dir,
+            macro_state=macro_state,
+            metastable_idx=meta_idx,
+        )
+        rep_pdbs[meta_idx] = str(pdb_path) if pdb_path else None
+
+    # Persist models for reuse
+    macro_out_dir.mkdir(parents=True, exist_ok=True)
+    tica_path = macro_out_dir / f"{macro_state}_tica.pkl"
+    micro_km_path = macro_out_dir / f"{macro_state}_micro_kmeans.pkl"
+    meta_km_path = macro_out_dir / f"{macro_state}_meta_kmeans.pkl"
+    scaler_path = macro_out_dir / f"{macro_state}_scaler.pkl"
+    for obj, path in [
+        (tica_model, tica_path),
+        (micro_labels, macro_out_dir / f"{macro_state}_micro_labels.npy"),
+        (micro_to_meta, macro_out_dir / f"{macro_state}_micro_to_meta.npy"),
+        (meta_labels, macro_out_dir / f"{macro_state}_meta_labels.npy"),
+    ]:
+        if isinstance(path, Path) and path.suffix == ".npy":
+            np.save(path, obj)
+        else:
+            with open(path, "wb") as fh:
+                pickle.dump(obj, fh)
+    with open(meta_km_path, "wb") as fh:
+        pickle.dump(meta_km, fh)
+    with open(scaler_path, "wb") as fh:
+        pickle.dump(scaler, fh)
+    with open(micro_km_path, "wb") as fh:
+        pickle.dump(micro_km, fh)
+
+    metastable_summary = []
+    for meta_idx in range(best_k):
+        n_frames = int(np.sum(meta_labels == meta_idx))
+        default_name = f"{macro_state} m{meta_idx + 1}"
+        metastable_summary.append(
+            {
+                "metastable_id": f"{macro_state}__m{meta_idx}",
+                "metastable_index": meta_idx,
+                "macro_state": macro_state,
+                "macro_state_id": None,
+                "n_frames": n_frames,
+                "default_name": default_name,
+                "name": default_name,
+                "representative_pdb": rep_pdbs.get(meta_idx),
+            }
+        )
+
+    return {
+        "macro_state": macro_state,
+        "n_metastable_states": best_k,
+        "metastable_states": metastable_summary,
+        "labels_per_trajectory": label_paths,
+        "residue_keys": residue_keys,
+        "silhouette_scores": silhouette_scores,
+        "outputs_dir": str(macro_out_dir),
+    }
+
+
+def run_metastable_pipeline_for_system(
+    trajectory_specs: List[Dict[str, Any]],
+    *,
+    output_dir: Path,
+    n_microstates: int = 20,
+    k_meta_min: int = 1,
+    k_meta_max: int = 4,
+    tica_lag_frames: int = 5,
+    tica_dim: int = 5,
+    random_state: int = 0,
+) -> Dict[str, Any]:
+    """
+    Convenience runner: group trajectories by user macro-state and compute metastable sets.
+
+    trajectory_specs items must contain:
+        - trajectory_id
+        - macro_state (user-assigned state name, e.g., 'Active')
+        - descriptor_path
+        - topology_path (optional, for representative PDBs)
+        - trajectory_path (optional, for representative PDBs)
+    """
+    if not trajectory_specs:
+        raise ValueError("No trajectories provided to metastable pipeline.")
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    by_macro: Dict[str, List[Dict[str, Any]]] = {}
+    for spec in trajectory_specs:
+        macro = spec.get("macro_state") or spec.get("state") or "macro"
+        by_macro.setdefault(macro, []).append(spec)
+
+    results = []
+    for macro_state, specs in by_macro.items():
+        macro_state_id = specs[0].get("macro_state_id") if specs else None
+        res = run_metastable_pipeline_for_macro(
+            macro_state,
+            specs,
+            output_dir=output_dir,
+            n_microstates=n_microstates,
+            k_meta_min=k_meta_min,
+            k_meta_max=k_meta_max,
+            tica_lag_frames=tica_lag_frames,
+            tica_dim=tica_dim,
+            random_state=random_state,
+        )
+        # annotate macro_state_id
+        if macro_state_id:
+            for m in res.get("metastable_states", []):
+                m["macro_state_id"] = macro_state_id
+        results.append(res)
+
+    return {"macro_results": results}
+
+
+# =========================
 # VAMP
 # =========================
 
@@ -160,7 +520,7 @@ def run_vamp(X, lag_frames, dim, scaling="kinetic_map"):
 # MSM + PCCA
 # =========================
 
-def cluster_microstates(Y, n_microstates, random_state=0):
+def cluster_microstates(Y, n_microstates, random_state=0, return_model: bool = False):
     """
     K-means microstate clustering in VAMP space.
 
@@ -176,6 +536,8 @@ def cluster_microstates(Y, n_microstates, random_state=0):
     )
     micro_labels = km.fit_predict(Y)
     centers = km.cluster_centers_
+    if return_model:
+        return micro_labels, centers, km
     return micro_labels, centers
 
 
