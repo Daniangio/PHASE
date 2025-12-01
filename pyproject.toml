@@ -22,7 +22,7 @@ classifiers = [
 dependencies = [
     "numpy",
     "MDAnalysis",
-    "pyemma",
+    "deeptime", # For VAMP analysis
     "pyqubo",
     "dwave-neal",
     "dadapy",

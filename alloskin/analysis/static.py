@@ -1,212 +1,359 @@
+"""Static state sensitivity analysis (Goal 1).
+
+This module implements a *classifier-based* readout of how predictive each
+residue is of the active / inactive state, together with a simple intrinsic
+dimension estimate.
+
+Compared to the previous MI-based implementation, this version:
+
+    * Uses the full multi-dimensional descriptor for each residue
+      (e.g. sin/cos of phi, psi, chi1) rather than averaging 1D MI values.
+    * Reports a normalized state score in [0, 1] based on either
+      cross-validated AUC (default) or, optionally, a cross-entropy based
+      mutual-information surrogate.
+    * Keeps an intrinsic-dimension (ID) estimate per residue using a
+      PCA-variance criterion, which is then used by downstream QUBO code
+      as a secondary filter.
+
+The public entry point is ``StaticStateSensitivity.run((features, labels_Y))``,
+where:
+
+    features : FeatureDict
+        Mapping ``residue_id -> (n_frames, d)`` array.
+    labels_Y : ndarray, shape (n_frames,)
+        Binary labels, 1 = active, 0 = inactive.
+
+The return value is a dict:
+
+    { residue_id: { "id": float,
+                    "state_score": float,
+                    "score_type": "AUC" or "CE",
+                    "auc": float,
+                    "cross_entropy": float } }
+
+This is plug-compatible with the existing runner / QUBO code.
 """
-Goal 1 (Corrected): Intrinsic Dimension + State Sensitivity (MI/JSD/MMD/AUC/KL)
 
-This replaces Information Imbalance, which is mathematically invalid when
-Y is a binary Active/Inactive label.
+from __future__ import annotations
 
-Available state metrics:
-    "mi"   – Mutual Information
-    "jsd"  – Jensen–Shannon Divergence
-    "mmd"  – Maximum Mean Discrepancy (Gaussian kernel)
-    "kl"   – Symmetrized KL Divergence
-    "auc"  – Logistic Regression AUC
-"""
-
-import os
-from alloskin.features.extraction import transform_to_circular
 import numpy as np
-from typing import Tuple, Dict, Any, Callable
-from sklearn.metrics import mutual_info_score, roc_auc_score
-from sklearn.linear_model import LogisticRegression
-from sklearn.model_selection import StratifiedKFold
-from scipy.spatial.distance import jensenshannon
-from scipy.stats import entropy
-from sklearn.neighbors import KernelDensity
+from typing import Dict, Any, Callable
 
-# Limit threading
-os.environ["OMP_NUM_THREADS"] = "1"
-os.environ["MKL_NUM_THREADS"] = "1"
+# Optional: circular transform helper (not strictly needed here, but imported
+# to keep backwards compatibility for users that relied on it externally).
+try:  # pragma: no cover - optional dependency
+    from alloskin.features.extraction import transform_to_circular  # noqa: F401
+except Exception:  # pragma: no cover - defensive
+    transform_to_circular = None  # type: ignore
 
-try:
-    from dadapy.data import Data
-    DADAPY_AVAILABLE = True
-except ImportError:
-    DADAPY_AVAILABLE = False
+from .components import BaseStaticReporter, FeatureDict  # :contentReference[oaicite:2]{index=2}
 
-try:
-    from .components import BaseStaticReporter
-except ImportError:
-    from alloskin.analysis.components import BaseStaticReporter
-
-
-# -------------------------------------------------------------------------
-# --- Helper functions for the different state-sensitivity metrics
-# -------------------------------------------------------------------------
-
-def estimate_jsd(pA, pI, bins=40):
-    """Jensen-Shannon divergence between two multidimensional distributions."""
-    histA, _ = np.histogramdd(pA, bins=bins, density=True)
-    histI, _ = np.histogramdd(pI, bins=bins, density=True)
-    histA += 1e-12
-    histI += 1e-12
-    m = 0.5 * (histA + histI)
-    return 0.5 * entropy(histA, m) + 0.5 * entropy(histI, m)
+# --- Optional heavy dependencies (scikit-learn) ---
+try:  # pragma: no cover - heavy dependency
+    from sklearn.model_selection import StratifiedKFold
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.pipeline import make_pipeline
+    from sklearn.preprocessing import StandardScaler
+    from sklearn.metrics import roc_auc_score, log_loss
+    SKLEARN_AVAILABLE = True
+except Exception:  # pragma: no cover - defensive
+    SKLEARN_AVAILABLE = False
 
 
-def estimate_mmd(pA, pI, sigma=0.5):
-    """Gaussian-kernel MMD estimate."""
-    def kernel(x, y):
-        return np.exp(-np.linalg.norm(x - y) ** 2 / (2 * sigma ** 2))
-    m = len(pA)
-    n = len(pI)
-    xx = np.mean([kernel(pA[i], pA[j]) for i in range(m) for j in range(m)])
-    yy = np.mean([kernel(pI[i], pI[j]) for i in range(n) for j in range(n)])
-    xy = np.mean([kernel(pA[i], pI[j]) for i in range(m) for j in range(n)])
-    return xx + yy - 2 * xy
+def _estimate_intrinsic_dimension_pca(
+    X: np.ndarray,
+    variance_threshold: float = 0.9,
+) -> float:
+    """Estimate intrinsic dimensionality via PCA variance threshold.
 
+    Parameters
+    ----------
+    X
+        Array of shape (n_samples, d).
+    variance_threshold
+        Fraction of total variance to explain (e.g. 0.9). The ID is the
+        smallest number of principal components whose cumulative explained
+        variance exceeds this threshold.
 
-def estimate_symmetric_kl(pA, pI, bandwidth=0.1):
-    """Symmetrized KL divergence via KDE."""
-    kdeA = KernelDensity(bandwidth=bandwidth).fit(pA)
-    kdeI = KernelDensity(bandwidth=bandwidth).fit(pI)
-
-    logA_A = kdeA.score_samples(pA)
-    logI_A = kdeI.score_samples(pA)
-    logA_I = kdeA.score_samples(pI)
-    logI_I = kdeI.score_samples(pI)
-
-    KL_A_I = np.mean(logA_A - logI_A)
-    KL_I_A = np.mean(logI_I - logA_I)
-    return KL_A_I + KL_I_A
-
-
-def estimate_auc(X, Y):
-    """Logistic regression AUC using 5-fold stratified cross-validation."""
-    counts = np.bincount(Y.astype(int))
-    if len(counts) < 2 or np.any(counts < 1):
-        return np.nan
-    n_splits = min(5, counts.min())
-    if n_splits < 2:
-        return np.nan
-
-    skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=0)
-    aucs = []
-    for train, test in skf.split(X, Y):
-        model = LogisticRegression(max_iter=200, solver="lbfgs").fit(X[train], Y[train])
-        preds = model.predict_proba(X[test])[:, 1]
-        aucs.append(roc_auc_score(Y[test], preds))
-    return float(np.mean(aucs))
-
-
-def compute_state_sensitivity(X, Y, method="mi"):
+    Returns
+    -------
+    float
+        Estimated intrinsic dimension in [1, d]. Returns ``np.nan`` if the
+        estimate is numerically unstable (e.g. no variance).
     """
-    Computes a scalar sensitivity of residue coordinates X to binary state Y.
-
-    Inputs:
-        X: (N, F) features of residue over trajectory
-        Y: (N,) binary labels (0/1)
-    """
-
     X = np.asarray(X)
-    Y = np.asarray(Y)
+    if X.ndim != 2:
+        X = X.reshape(X.shape[0], -1)
 
-    # Split into active/inactive
-    XA = X[Y == 1]
-    XI = X[Y == 0]
+    n_samples, d = X.shape
+    if n_samples < 5 or d == 0:
+        return float("nan")
 
-    # Require at least 2 samples per class; smaller slices just return NaN.
-    if XA.shape[0] < 2 or XI.shape[0] < 2:
-        return np.nan
+    # Center the data
+    Xc = X - X.mean(axis=0, keepdims=True)
 
-    method = method.lower()
+    # Robust covariance (fall back to identity on failure)
+    try:
+        cov = np.cov(Xc, rowvar=False)
+    except Exception:
+        return float("nan")
 
-    if method == "mi":
-        # Discretize using quantiles
-        n = X.shape[0]
-        bins = min(100, max(4, int(np.sqrt(n))))
-        X_disc = np.zeros(X.shape[0], dtype=int)
-        for k in range(X.shape[1]):
-            X_disc += np.digitize(X[:, k], np.quantile(X[:, k], np.linspace(0,1,bins))) * (k+1)
-        return mutual_info_score(X_disc, Y)
+    try:
+        # Use symmetric eigensolver
+        evals = np.linalg.eigvalsh(cov)
+    except Exception:
+        return float("nan")
 
-    elif method == "jsd":
-        return estimate_jsd(XA, XI)
+    evals = np.asarray(evals, dtype=float)
+    evals = np.clip(evals, 0.0, None)  # numerical noise
 
-    elif method == "mmd":
-        return estimate_mmd(XA, XI)
+    total = float(evals.sum())
+    if not np.isfinite(total) or total <= 0.0:
+        return float("nan")
 
-    elif method == "kl":
-        return estimate_symmetric_kl(XA, XI)
+    # Sort descending and compute cumulative explained variance
+    evals_sorted = np.sort(evals)[::-1]
+    cumsum = np.cumsum(evals_sorted) / total
 
-    elif method == "auc":
-        return estimate_auc(X, Y)
+    # Index of first component where cumulative variance >= threshold
+    idx = int(np.searchsorted(cumsum, variance_threshold))
+    # Convert 0-based index to 1-based dimension, but never exceed d
+    dim = min(d, max(1, idx + 1))
+    return float(dim)
 
-    else:
-        raise ValueError(f"Unknown state metric: {method}")
-
-
-# -------------------------------------------------------------------------
-# --- Worker: Intrinsic Dimension + State sensitivity
-# -------------------------------------------------------------------------
 
 def _static_worker_state(
-    item: Tuple[str, np.ndarray],
+    item,
+    *,
     labels_Y: np.ndarray,
     n_samples: int,
-    maxk: int,
-    state_metric: str
-) -> Tuple[str, Dict[str, float]]:
+    metric: str = "auc",
+    n_splits: int = 5,
+    random_state: int = 0,
+    id_variance_threshold: float = 0.9,
+) -> tuple[str, Dict[str, Any]]:
+    """Worker that computes ID + state-sensitivity for a single residue.
 
-    res_key, features_3d = item
-    results = {"id": np.nan, "id_error": np.nan, "state_score": np.nan}
+    Parameters
+    ----------
+    item
+        Tuple (residue_key, feature_array) from the FeatureDict.
+    labels_Y
+        Binary labels (1 = active, 0 = inactive), shape (n_samples,).
+    n_samples
+        Number of frames.
+    metric
+        Either "auc" (default) or "ce" (cross-entropy-based MI surrogate).
+    n_splits
+        Maximum number of CV folds for the classifier.
+    random_state
+        RNG seed for StratifiedKFold and the logistic regression.
+    id_variance_threshold
+        Variance threshold used in the PCA-based ID estimator.
 
-    try:
-        X_circ = transform_to_circular(features_3d).reshape(n_samples, -1)
-    except Exception as exc:
-        print(f"  Warning: Failed to prepare circular features for {res_key}: {exc}")
-        return (res_key, results)
+    Returns
+    -------
+    (residue_key, metrics_dict)
+    """
+    res_key, X = item
 
-    try:
-        # 1. Intrinsic Dimension (same as your original implementation)
-        if DADAPY_AVAILABLE:
-            data_obj = Data(coordinates=X_circ, maxk=maxk, n_jobs=1)
-            id_val, id_err, _ = data_obj.compute_id_2NN()
-            results["id"] = id_val
-            results["id_error"] = id_err
-    except Exception as exc:
-        print(f"  Warning: ID computation failed for {res_key}: {exc}")
+    X = np.asarray(X)
+    Y = np.asarray(labels_Y)
 
-    try:
-        # 2. State sensitivity (new, correct)
-        score = compute_state_sensitivity(X_circ, labels_Y, method=state_metric)
-        results["state_score"] = score
-    except Exception as exc:
-        print(f"  Warning: State metric '{state_metric}' failed for {res_key}: {exc}")
-        results["state_score"] = str(exc)
-    return (res_key, results)
+    # Coerce features to 2D: (n_samples, d)
+    if X.ndim == 1:
+        X = X.reshape(-1, 1)
+    elif X.ndim > 2:
+        X = X.reshape(X.shape[0], -1)
 
+    if X.shape[0] != n_samples:
+        raise ValueError(
+            f"Residue {res_key!r}: feature length {X.shape[0]} does not match labels {n_samples}."
+        )
 
-# -------------------------------------------------------------------------
-# --- Main class
-# -------------------------------------------------------------------------
+    # Estimate intrinsic dimension first (independent of classifier)
+    id_est = _estimate_intrinsic_dimension_pca(
+        X,
+        variance_threshold=id_variance_threshold,
+    )
+
+    # If sklearn is not available, we can only return ID.
+    if not SKLEARN_AVAILABLE:  # pragma: no cover - defensive path
+        return str(res_key), {
+            "id": float(id_est),
+            "state_score": float("nan"),
+            "score_type": metric.upper(),
+            "auc": float("nan"),
+            "cross_entropy": float("nan"),
+        }
+
+    # Guard: must have at least 2 samples per class.
+    XA = X[Y == 1]
+    XI = X[Y == 0]
+    if XA.shape[0] < 2 or XI.shape[0] < 2:
+        return str(res_key), {
+            "id": float(id_est),
+            "state_score": float("nan"),
+            "score_type": metric.upper(),
+            "auc": float("nan"),
+            "cross_entropy": float("nan"),
+        }
+
+    # ------------------------------------------------------------------
+    # Cross-validated logistic classifier
+    # ------------------------------------------------------------------
+    # Determine effective number of folds based on smallest class.
+    class_counts = np.bincount(Y.astype(int), minlength=2)
+    min_class = int(class_counts.min())
+    if min_class < 2:
+        # Practically impossible after the above check, but be safe.
+        return str(res_key), {
+            "id": float(id_est),
+            "state_score": float("nan"),
+            "score_type": metric.upper(),
+            "auc": float("nan"),
+            "cross_entropy": float("nan"),
+        }
+
+    eff_splits = max(2, min(n_splits, min_class))
+
+    cv = StratifiedKFold(
+        n_splits=eff_splits,
+        shuffle=True,
+        random_state=random_state,
+    )
+
+    aucs = []
+    losses = []
+
+    # Logistic regression inside a standardization pipeline.
+    clf = make_pipeline(
+        StandardScaler(),
+        LogisticRegression(
+            penalty="l2",
+            C=1.0,
+            solver="lbfgs",
+            max_iter=1000,
+        ),
+    )
+
+    for train_idx, test_idx in cv.split(X, Y):
+        X_train, X_test = X[train_idx], X[test_idx]
+        y_train, y_test = Y[train_idx], Y[test_idx]
+
+        # In rare folds, one class may disappear. Skip those folds.
+        if np.unique(y_train).size < 2:
+            continue
+
+        clf.fit(X_train, y_train)
+        # Probability of the active state
+        proba = clf.predict_proba(X_test)[:, 1]
+
+        try:
+            auc_val = roc_auc_score(y_test, proba)
+        except ValueError:
+            # If only one class in y_test, AUC is undefined; skip this fold.
+            continue
+
+        try:
+            loss_val = log_loss(y_test, proba, labels=[0, 1])
+        except ValueError:
+            # log_loss can occasionally fail for degenerate cases; skip.
+            continue
+
+        if np.isfinite(auc_val):
+            aucs.append(float(auc_val))
+        if np.isfinite(loss_val):
+            losses.append(float(loss_val))
+
+    if not aucs:
+        # No valid folds; return ID only.
+        return str(res_key), {
+            "id": float(id_est),
+            "state_score": float("nan"),
+            "score_type": metric.upper(),
+            "auc": float("nan"),
+            "cross_entropy": float("nan"),
+        }
+
+    auc_mean = float(np.mean(aucs))
+    ce_mean = float(np.mean(losses)) if losses else float("nan")
+
+    # ------------------------------------------------------------------
+    # Normalized state score
+    # ------------------------------------------------------------------
+    metric = metric.lower()
+    score_type = "AUC" if metric == "auc" else "CE"
+
+    if metric == "ce" and np.isfinite(ce_mean):
+        # Cross-entropy → normalized information gain in [0, 1].
+        # Baseline loss is the entropy H(Y) of the label distribution.
+        p_active = float(Y.mean())
+        eps = 1e-7
+        p_active = min(max(p_active, eps), 1.0 - eps)
+        baseline_ce = -(
+            p_active * np.log(p_active) + (1.0 - p_active) * np.log(1.0 - p_active)
+        )
+
+        if baseline_ce > 0.0:
+            info_gain = max(0.0, baseline_ce - ce_mean)
+            state_score = min(1.0, info_gain / baseline_ce)
+            raw_score = info_gain
+        else:
+            state_score = 0.0
+            raw_score = 0.0
+    else:
+        # Default: AUC-based score, normalized to [0, 1]:
+        #     AUC = 0.5 → 0 (random)
+        #     AUC = 1.0 → 1 (perfect)
+        auc_clipped = min(max(auc_mean, 0.0), 1.0)
+        state_score = max(0.0, min(1.0, 2.0 * (auc_clipped - 0.5)))
+        raw_score = auc_mean
+
+    metrics = {
+        "id": float(id_est),
+        "state_score": float(state_score),
+        "score_raw": float(raw_score),
+        "score_type": score_type,
+        "auc": float(auc_mean),
+        "cross_entropy": float(ce_mean),
+    }
+    return str(res_key), metrics
+
 
 class StaticStateSensitivity(BaseStaticReporter):
-    """
-    Goal 1 corrected:
-        - Intrinsic Dimension (Dadapy)
-        - State Sensitivity (MI/JSD/MMD/KL/AUC)
-    
-        Mutual Information (MI)
-        Jensen–Shannon Divergence (JSD)
-        KL Divergence (symmetrized)
-        Maximum Mean Discrepancy (MMD)
-        Logistic Classifier AUC
+    """Goal 1: Intrinsic Dimension + State Sensitivity (classifier-based).
+
+    This component replaces the earlier MI-based static analysis. It computes,
+    for each residue, a pair of metrics:
+
+        * ``id``          – intrinsic dimension via PCA variance threshold.
+        * ``state_score`` – normalized classifier-based state sensitivity.
+
+    The state score is, by default, based on cross-validated logistic-regression
+    AUC; users can optionally choose a cross-entropy-based score by passing
+    ``state_metric="ce"`` in the parameter dictionary.
+
+    The returned dict is directly consumed by the QUBO module
+    :class:`QUBOMaxCoverage` as documented in the QUBO implementation. :contentReference[oaicite:3]{index=3}
     """
 
     def _get_worker_function(self) -> Callable:
         return _static_worker_state
 
     def _prepare_worker_params(self, n_samples: int, **kwargs) -> Dict[str, Any]:
-        maxk = kwargs.get("maxk", min(100, n_samples - 1))
-        state_metric = kwargs.get("state_metric", "mi") # "mi" "jsd", "mmd", "kl", "auc"
-        return dict(maxk=maxk, state_metric=state_metric)
+        # State metric: "auc" (default) or "ce".
+        state_metric = str(kwargs.get("state_metric", "auc")).lower()
+        if state_metric not in {"auc", "ce"}:
+            state_metric = "auc"
+
+        n_splits = int(kwargs.get("cv_splits", 5))
+        random_state = int(kwargs.get("random_state", 0))
+        id_var_thr = float(kwargs.get("id_variance_threshold", 0.9))
+
+        return dict(
+            metric=state_metric,
+            n_splits=n_splits,
+            random_state=random_state,
+            id_variance_threshold=id_var_thr,
+        )

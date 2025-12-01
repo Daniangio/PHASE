@@ -4,8 +4,8 @@
 numpy
 biopython
 MDAnalysis
-pyemma # TICA analysis
 scikit-learn
+deeptime # For VAMP analysis
 pyqubo
 dwave-neal
 dadapy

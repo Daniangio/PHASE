@@ -1,17 +1,11 @@
 import { useState } from 'react';
 import ErrorMessage from '../common/ErrorMessage';
 
-const metrics = [
-  { value: 'auc', label: 'Logistic AUC' },
-  { value: 'mi', label: 'Mutual Information' },
-  { value: 'jsd', label: 'Jensen-Shannon' },
-  { value: 'mmd', label: 'Maximum Mean Discrepancy' },
-  { value: 'kl', label: 'Symmetrized KL' },
-];
-
 export default function StaticAnalysisForm({ onSubmit }) {
   const [stateMetric, setStateMetric] = useState('auc');
-  const [maxk, setMaxk] = useState('');
+  const [cvSplits, setCvSplits] = useState('');
+  const [randomState, setRandomState] = useState('');
+  const [idVarianceThreshold, setIdVarianceThreshold] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState(null);
 
@@ -21,9 +15,9 @@ export default function StaticAnalysisForm({ onSubmit }) {
     setError(null);
     try {
       const payload = { state_metric: stateMetric };
-      if (maxk !== '') {
-        payload.maxk = Number(maxk);
-      }
+      if (cvSplits !== '') payload.cv_splits = Number(cvSplits);
+      if (randomState !== '') payload.random_state = Number(randomState);
+      if (idVarianceThreshold !== '') payload.id_variance_threshold = Number(idVarianceThreshold);
       await onSubmit(payload);
     } catch (err) {
       setError(err.message);
@@ -42,24 +36,51 @@ export default function StaticAnalysisForm({ onSubmit }) {
             onChange={(e) => setStateMetric(e.target.value)}
             className="w-full bg-gray-900 border border-gray-700 rounded-md px-3 py-2 text-white focus:ring-cyan-500"
           >
-            {metrics.map((metric) => (
-              <option key={metric.value} value={metric.value}>
-                {metric.label}
-              </option>
-            ))}
+            <option value="auc">AUC (logistic, default)</option>
+            <option value="ce">Cross-entropy (information gain)</option>
           </select>
+          <p className="text-xs text-gray-500 mt-1">
+            Matches backend static analysis options: AUC or cross-entropy surrogate.
+          </p>
         </div>
         <div>
-          <label className="block text-sm text-gray-300 mb-1">Max k (intrinsic dimension)</label>
+          <label className="block text-sm text-gray-300 mb-1">CV folds</label>
           <input
             type="number"
             min={2}
-            placeholder="Auto"
-            value={maxk}
-            onChange={(e) => setMaxk(e.target.value)}
+            placeholder="Default: 5"
+            value={cvSplits}
+            onChange={(e) => setCvSplits(e.target.value)}
             className="w-full bg-gray-900 border border-gray-700 rounded-md px-3 py-2 text-white focus:ring-cyan-500"
           />
-          <p className="text-xs text-gray-500 mt-1">Optional. Leave blank to auto-tune to sample size.</p>
+          <p className="text-xs text-gray-500 mt-1">Optional. Effective folds are capped by class counts.</p>
+        </div>
+        <div>
+          <label className="block text-sm text-gray-300 mb-1">Random state</label>
+          <input
+            type="number"
+            placeholder="Default: 0"
+            value={randomState}
+            onChange={(e) => setRandomState(e.target.value)}
+            className="w-full bg-gray-900 border border-gray-700 rounded-md px-3 py-2 text-white focus:ring-cyan-500"
+          />
+          <p className="text-xs text-gray-500 mt-1">Optional. Seeds fold splits and classifier.</p>
+        </div>
+        <div>
+          <label className="block text-sm text-gray-300 mb-1">ID variance threshold</label>
+          <input
+            type="number"
+            step="0.01"
+            min={0.1}
+            max={0.999}
+            placeholder="Default: 0.90"
+            value={idVarianceThreshold}
+            onChange={(e) => setIdVarianceThreshold(e.target.value)}
+            className="w-full bg-gray-900 border border-gray-700 rounded-md px-3 py-2 text-white focus:ring-cyan-500"
+          />
+          <p className="text-xs text-gray-500 mt-1">
+            Fraction of variance to keep for intrinsic-dimension estimate (0-1).
+          </p>
         </div>
       </div>
       <ErrorMessage message={error} />
