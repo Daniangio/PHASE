@@ -23,6 +23,54 @@ def _slug(value: str) -> str:
     return re.sub(r"[^a-zA-Z0-9]+", "_", value).strip("_") or "metastable"
 
 
+def _kmeans_sweep(
+    samples: np.ndarray, max_k: int, random_state: int
+) -> Tuple[np.ndarray, int, float]:
+    """Run KMeans sweep to find best K by silhouette score."""
+    n_samples = samples.shape[0]
+    if n_samples == 0:
+        return np.array([], dtype=np.int32), 0, 0.0
+    
+    # If we only have 1 point or max_k=1, we can't do silhouette
+    upper_k = max(1, min(int(max_k), n_samples))
+    
+    if upper_k == 1:
+        return np.zeros(n_samples, dtype=np.int32), 1, 0.0
+
+    best_k = 1
+    best_score = -np.inf
+
+    for k in range(1, upper_k + 1):
+        if k == 1:
+            score = 0.0  # fallback
+        else:
+            km = KMeans(n_clusters=k, n_init="auto", random_state=random_state)
+            labels = km.fit_predict(samples)
+            n_labels = len(np.unique(labels))
+            # silhouette_score requires 2 <= n_labels <= n_samples - 1
+            if n_labels < 2 or n_labels >= n_samples:
+                score = -np.inf
+            else:
+                try:
+                    score = silhouette_score(samples, labels)
+                except ValueError:
+                    # Handle tiny sample sets where sklearn refuses to score
+                    score = -np.inf
+        
+        # Prefer higher K slightly if scores are very close? No, stick to raw score.
+        if score > best_score:
+            best_score = score
+            best_k = k
+
+    if best_k == 1:
+        final_labels = np.zeros(samples.shape[0], dtype=np.int32)
+    else:
+        km = KMeans(n_clusters=best_k, n_init="auto", random_state=random_state)
+        final_labels = km.fit_predict(samples).astype(np.int32)
+
+    return final_labels, best_k, best_score
+
+
 def _cluster_residue_samples(
     samples: np.ndarray,
     max_k: int,
@@ -34,7 +82,7 @@ def _cluster_residue_samples(
     hierarchical_n_clusters: Optional[int] = None,
     hierarchical_linkage: str = "ward",
     tomato_k: int = 15,
-    tomato_tau: float = 0.5,
+    tomato_tau: float | str = "auto",
 ) -> Tuple[np.ndarray, int, Dict[str, Any]]:
     """Cluster angles with periodic distance. Returns labels, cluster count, diagnostics."""
     if samples.size == 0:
@@ -53,33 +101,12 @@ def _cluster_residue_samples(
     algo = (algorithm or "tomato").lower()
     diagnostics: Dict[str, Any] = {}
 
+    # --- Standard KMeans ---
     if algo == "kmeans":
-        upper_k = max(1, min(int(max_k), emb.shape[0]))
-        best_k = 1
-        best_score = -np.inf
+        labels, k, _ = _kmeans_sweep(emb, max_k, random_state)
+        return labels, k, diagnostics
 
-        for k in range(1, upper_k + 1):
-            if k == 1:
-                score = 0.0
-            else:
-                km = KMeans(n_clusters=k, n_init="auto", random_state=random_state)
-                labels = km.fit_predict(emb)
-                if len(np.unique(labels)) < 2:
-                    score = -np.inf
-                else:
-                    score = silhouette_score(emb, labels)
-            if score > best_score:
-                best_score = score
-                best_k = k
-
-        if best_k == 1:
-            final_labels = np.zeros(emb.shape[0], dtype=np.int32)
-        else:
-            km = KMeans(n_clusters=best_k, n_init="auto", random_state=random_state)
-            final_labels = km.fit_predict(emb).astype(np.int32)
-
-        return final_labels, int(best_k), diagnostics
-
+    # --- Hierarchical ---
     if algo == "hierarchical":
         n_clusters = hierarchical_n_clusters or max_k
         n_clusters = max(1, min(int(n_clusters), emb.shape[0]))
@@ -91,11 +118,11 @@ def _cluster_residue_samples(
         k = len(np.unique(labels))
         return labels, int(k), diagnostics
 
+    # --- Density Peaks ---
     if algo == "density_peaks":
         n = emb.shape[0]
         if n == 1:
             return np.zeros(1, dtype=np.int32), 1, diagnostics
-        # Pairwise distances
         diff = emb[:, None, :] - emb[None, :, :]
         dist = np.linalg.norm(diff, axis=2)
         mask = ~np.isclose(dist, 0.0)
@@ -127,38 +154,46 @@ def _cluster_residue_samples(
             if labels[idx] >= 0:
                 continue
             parent = nearest_higher[idx]
-            labels[idx] = labels[parent] if parent >= 0 else 0
+            # Assign -1 if no parent
+            labels[idx] = labels[parent] if parent >= 0 else -1
         diagnostics["density_peaks_centers"] = centers.tolist()
-        return labels, int(len(centers)), diagnostics
+        
+        # Post-processing will handle -1s
+        final_labels = labels
+        k_final = len(centers)
 
-        if algo == "tomato":
-            n = emb.shape[0]
-            if n == 1:
-                return np.zeros(1, dtype=np.int32), 1, diagnostics
-            k_nn = max(1, min(int(tomato_k if tomato_k is not None else max_k), n - 1))
+    # --- ToMATo ---
+    elif algo == "tomato":
+        n = emb.shape[0]
+        if n == 1:
+            return np.zeros(1, dtype=np.int32), 1, diagnostics
+        
+        t_k_val = tomato_k if tomato_k is not None else 15
+        k_nn = max(1, min(int(t_k_val), n - 1))
+        
         tree = KDTree(emb)
         dists, idxs = tree.query(emb, k=k_nn + 1)
-        # remove self
-        knn_dists = dists[:, 1:]
         knn_idxs = idxs[:, 1:]
-        d_k = knn_dists[:, -1] + 1e-8
-        dim = emb.shape[1]
-        rho = 1.0 / (d_k ** max(dim, 1))
-        # mode seeking parents
+        d_k = dists[:, -1] + 1e-8
+        
+        # --- FIXED DENSITY ESTIMATOR ---
+        # Old (Unstable): rho = 1.0 / (d_k ** max(dim, 1))
+        # New (Stable): Log-density. 
+        # Since d_k is small for dense regions, -log(d_k) is large positive.
+        # This prevents "super peaks" from dominating the persistence diagram.
+        rho = -np.log(d_k)
+        
         local_max = np.zeros(n, dtype=bool)
-        parent = np.full(n, -1, dtype=int)
         for i in range(n):
             neigh = knn_idxs[i]
-            best_j = -1
             best_rho = rho[i]
+            is_max = True
             for j in neigh:
                 if rho[j] > best_rho:
-                    best_rho = rho[j]
-                    best_j = j
-            if best_j == -1:
-                local_max[i] = True
-            else:
-                parent[i] = best_j
+                    is_max = False
+                    break
+            local_max[i] = is_max
+
         order = sorted(range(n), key=lambda idx: (-rho[idx], idx))
         uf_parent = np.arange(n, dtype=int)
         root_density = rho.copy()
@@ -176,117 +211,214 @@ def _cluster_residue_samples(
             ra, rb = find(a), find(b)
             if ra == rb:
                 return ra
-            # keep the one with higher peak density
             if root_density[ra] >= root_density[rb]:
                 uf_parent[rb] = ra
                 return ra
             uf_parent[ra] = rb
             return rb
+        
+        auto_tau = isinstance(tomato_tau, str) and tomato_tau.lower() == "auto"
+        
+        # Compute tau from gaps in persistence values if user requested "auto".
+        def _auto_tau_from_persistence(values: List[float], fallback: float = 0.5) -> float:
+            finite_vals = [float(v) for v in values if np.isfinite(v)]
+            if not finite_vals:
+                return fallback
+            vals = sorted(finite_vals, reverse=True)
+            if len(vals) == 1:
+                # Use half of the observed barrier to keep threshold in-range
+                return max(fallback, vals[0] * 0.5)
+            best_gap = -np.inf
+            best_idx = 0
+            # Look for the largest gap to separate "real" peaks from "noise"
+            for i in range(len(vals) - 1):
+                high, low = vals[i], vals[i + 1]
+                gap = high - low
+                if gap > best_gap:
+                    best_gap = gap
+                    best_idx = i
+            high, low = vals[best_idx], vals[best_idx + 1]
+            return low + (high - low) * 0.5
 
-        tau = float(tomato_tau if tomato_tau is not None else 0.5)
-        diagnostics["tau"] = tau
-        diagnostics["k_neighbors"] = k_nn
+        tau = 0.5 if auto_tau else float(tomato_tau if tomato_tau is not None else 0.5)
+        diagnostics["tau_mode"] = "auto" if auto_tau else "manual"
 
+        # --- ToMATo Loop ---
+        pending_transitions: List[Dict[str, Any]] = []
         for idx in order:
             if local_max[idx]:
                 processed[idx] = True
                 continue
+            
             processed[idx] = True
             neigh = [j for j in knn_idxs[idx] if processed[j] and rho[j] > rho[idx]]
+            
             if not neigh:
+                # Disconnected point. We explicitly leave it as self-parent.
                 continue
+
             roots = []
+            seen_roots = set()
             for j in neigh:
                 rj = find(j)
-                if rj not in roots:
+                if rj not in seen_roots:
+                    seen_roots.add(rj)
                     roots.append(rj)
+            
             if len(roots) == 1:
                 union(idx, roots[0])
                 continue
 
-            # Multiple roots -> saddle
             roots_sorted = sorted(roots, key=lambda r: (-root_density[r], r))
             r_max = roots_sorted[0]
+            
             for r_other in roots_sorted[1:]:
                 persistence = float(root_density[r_other] - rho[idx])
-                events.append(
-                    {
-                        "peak_density": float(root_density[r_other]),
-                        "persistence": persistence,
-                        "saddle_density": float(rho[idx]),
-                    }
-                )
-                if persistence < tau:
-                    union(r_other, r_max)
+                event = {
+                    "peak_density": float(root_density[r_other]),
+                    "persistence": persistence,
+                    "saddle_density": float(rho[idx]),
+                }
+                events.append(event)
+                transition_record = {
+                    "root_a": int(r_max),
+                    "root_b": int(r_other),
+                    "saddle_index": int(idx),
+                    "persistence": persistence,
+                }
+                if auto_tau:
+                    pending_transitions.append(transition_record)
                 else:
-                    transitions.append(
-                        {
-                            "root_a": int(r_max),
-                            "root_b": int(r_other),
-                            "saddle_index": int(idx),
-                            "saddle_density": float(rho[idx]),
-                            "persistence": persistence,
-                        }
-                    )
+                    if persistence < tau:
+                        union(r_other, r_max)
+                    else:
+                        transitions.append(transition_record)
             union(idx, r_max)
 
-        # flatten labels
-        root_map: Dict[int, int] = {}
-        labels = np.full(n, -1, dtype=np.int32)
-        next_id = 0
-        for i in range(n):
-            r = find(i)
-            if r not in root_map:
-                root_map[r] = next_id
-                next_id += 1
-            labels[i] = root_map[r]
+        # Resolve tau automatically from persistence gaps, then apply merges.
+        if auto_tau:
+            persistence_values = [float(ev.get("persistence", 0.0)) for ev in events]
+            # Since density is now log-scale, the fallback must be sensible for log-space
+            # 0.1 in log space corresponds to exp(0.1) ~ 1.1x density ratio.
+            tau = _auto_tau_from_persistence(persistence_values, fallback=0.1)
+            diagnostics["tau"] = tau
+            diagnostics["tau_candidates"] = persistence_values
+            for tr in pending_transitions:
+                ra, rb = find(tr["root_a"]), find(tr["root_b"])
+                if ra == rb:
+                    continue
+                if tr["persistence"] < tau:
+                    union(ra, rb)
+                else:
+                    transitions.append(tr)
+        else:
+            diagnostics["tau"] = tau
 
-        diagnostics["persistence_events"] = events
-        diagnostics["transitions"] = transitions
-        diagnostics["peak_densities"] = [float(root_density[r]) for r in root_map.keys()]
-        if next_id > max_k or next_id > t_k_max:
-            # Build candidate merges using lowest persistence barrier first
+        # --- 1. Persistence-based merging (Water-filling) to respect max_k ---
+        t_k_max = max_clusters_per_residue if max_k is None else max_k
+        active_roots = {find(i) for i in range(n)}
+        
+        if len(active_roots) > t_k_max:
             merge_candidates: Dict[Tuple[int, int], float] = {}
             for tr in transitions:
                 ra = find(tr["root_a"])
                 rb = find(tr["root_b"])
-                if ra == rb:
-                    continue
+                if ra == rb: continue
                 key = tuple(sorted((ra, rb)))
                 pers = float(tr.get("persistence", 0.0))
                 if key not in merge_candidates or pers < merge_candidates[key]:
                     merge_candidates[key] = pers
+            
             forced_merges: List[Dict[str, Any]] = []
             for (ra, rb), pers in sorted(merge_candidates.items(), key=lambda kv: kv[1]):
-                if len({find(i) for i in range(n)}) <= min(max_k, t_k_max):
-                    break
-                union(ra, rb)
-                forced_merges.append({"roots": (int(ra), int(rb)), "persistence": pers})
-            # Re-label after forced merges
-            root_map = {}
-            labels = np.full(n, -1, dtype=np.int32)
-            next_id = 0
-            for i in range(n):
-                r = find(i)
+                root_a, root_b = find(ra), find(rb)
+                if root_a == root_b: continue
+                active_roots = {find(i) for i in range(n)}
+                if len(active_roots) <= t_k_max: break
+                union(root_a, root_b)
+                forced_merges.append({"roots": (int(root_a), int(root_b)), "persistence": pers})
+            diagnostics["forced_merges"] = forced_merges
+
+        # --- Final Label Assignment ---
+        root_map: Dict[int, int] = {}
+        labels = np.full(n, -1, dtype=np.int32)
+        next_id = 0
+        
+        # Pre-pass: Identify population of roots
+        root_counts: Dict[int, int] = {}
+        for i in range(n):
+            r = find(i)
+            root_counts[r] = root_counts.get(r, 0) + 1
+            
+        for i in range(n):
+            r = find(i)
+            # If strictly disconnected (size 1), mark as -1 so KMeans can handle it
+            if root_counts[r] == 1:
+                labels[i] = -1
+            else:
                 if r not in root_map:
                     root_map[r] = next_id
                     next_id += 1
                 labels[i] = root_map[r]
-            diagnostics["forced_merges"] = forced_merges
-            diagnostics["peak_densities"] = [float(root_density[r]) for r in root_map.keys()]
-        return labels, int(next_id), diagnostics
 
-    # Default: DBSCAN
-    eps = float(dbscan_eps) if dbscan_eps is not None else 0.5
-    min_s = int(dbscan_min_samples) if dbscan_min_samples is not None else 5
-    min_s = max(1, min_s)
-    db = DBSCAN(eps=eps, min_samples=min_s, metric="euclidean")
-    labels = db.fit_predict(emb).astype(np.int32)
-    unique_clusters = sorted([int(v) for v in np.unique(labels) if v != -1])
-    mapping = {old: idx for idx, old in enumerate(unique_clusters)}
-    remapped = np.array([mapping.get(int(v), -1) for v in labels], dtype=np.int32)
-    diagnostics["dbscan_unique"] = unique_clusters
-    return remapped, int(len(unique_clusters)), diagnostics
+        diagnostics["persistence_events"] = events
+        diagnostics["transitions"] = transitions
+        
+        final_labels = labels
+        k_final = next_id
+
+    # --- DBSCAN ---
+    else:
+        eps = float(dbscan_eps) if dbscan_eps is not None else 0.5
+        min_s = int(dbscan_min_samples) if dbscan_min_samples is not None else 5
+        min_s = max(1, min_s)
+        db = DBSCAN(eps=eps, min_samples=min_s, metric="euclidean")
+        labels = db.fit_predict(emb).astype(np.int32)
+        
+        # Remap standard DBSCAN labels (-1 is noise)
+        unique_clusters = sorted([int(v) for v in np.unique(labels) if v != -1])
+        mapping = {old: idx for idx, old in enumerate(unique_clusters)}
+        remapped = np.array([mapping.get(int(v), -1) for v in labels], dtype=np.int32)
+        diagnostics["dbscan_unique"] = unique_clusters
+        
+        final_labels = remapped
+        k_final = len(unique_clusters)
+
+    # =========================================================
+    # COMMON POST-PROCESSING: CLUSTER UNASSIGNED (-1) VIA KMEANS
+    # =========================================================
+    
+    noise_mask = final_labels == -1
+    n_noise = np.sum(noise_mask)
+    
+    if n_noise > 0:
+        # Determine how many slots we have left
+        available_slots = max(1, max_k - k_final)
+        
+        # Extract noise samples
+        noise_samples = emb[noise_mask]
+        
+        # Run KMeans sweep on noise
+        # Note: best_k_noise is 1-based count
+        noise_labels, best_k_noise, score = _kmeans_sweep(
+            noise_samples, 
+            max_k=available_slots, 
+            random_state=random_state
+        )
+        
+        # If noise_labels returns empty (shouldn't happen given check), skip
+        if noise_labels.size > 0:
+            # Shift noise labels to start after existing clusters
+            shifted_labels = noise_labels + k_final
+            final_labels[noise_mask] = shifted_labels
+            
+            # Update total K
+            k_final += best_k_noise
+            
+            diagnostics["noise_kmeans_k"] = int(best_k_noise)
+            diagnostics["noise_kmeans_score"] = float(score)
+
+    return final_labels, int(k_final), diagnostics
 
 
 def _resolve_states_for_meta(meta: Dict[str, Any], system: SystemMetadata) -> List[DescriptorState]:
@@ -411,7 +543,7 @@ def generate_metastable_cluster_npz(
     hierarchical_n_clusters: Optional[int] = None,
     hierarchical_linkage: str = "ward",
     tomato_k: int = 15,
-    tomato_tau: float = 0.5,
+    tomato_tau: float | str = "auto",
     tomato_k_max: Optional[int] = None,
 ) -> Tuple[Path, Dict[str, Any]]:
     """
@@ -451,10 +583,13 @@ def generate_metastable_cluster_npz(
     )
     t_k = max(1, int(tomato_k))
     t_k_max = max_clusters_per_residue if tomato_k_max is None else max(1, int(tomato_k_max))
-    try:
-        t_tau = float(tomato_tau)
-    except Exception as exc:
-        raise ValueError("tomato_tau must be a number.") from exc
+    if tomato_tau is None or (isinstance(tomato_tau, str) and tomato_tau.lower() == "auto"):
+        t_tau = "auto"
+    else:
+        try:
+            t_tau = float(tomato_tau)
+        except Exception as exc:
+            raise ValueError("tomato_tau must be a number or 'auto'.") from exc
 
     unique_meta_ids = list(dict.fromkeys([str(mid) for mid in metastable_ids]))
 
@@ -572,9 +707,9 @@ def generate_metastable_cluster_npz(
                 labels_matrix[:, col] = -1
                 cluster_counts[col] = 0
             else:
-                if np.any(labels_arr < 0):
-                    labels_arr = np.where(labels_arr < 0, 0, labels_arr)
+                if np.any(labels_arr >= 0):
                     k = max(k, int(labels_arr.max()) + 1)
+                
                 labels_matrix[:, col] = labels_arr
                 cluster_counts[col] = k
             if algo == "tomato" and col == 0 and diag and tomato_diag_meta is None:
@@ -635,8 +770,7 @@ def generate_metastable_cluster_npz(
             merged_labels[:, col] = -1
             merged_counts[col] = 0
         else:
-            if np.any(labels_arr < 0):
-                labels_arr = np.where(labels_arr < 0, 0, labels_arr)
+            if np.any(labels_arr >= 0):
                 k = max(k, int(labels_arr.max()) + 1)
             merged_labels[:, col] = labels_arr
             merged_counts[col] = k

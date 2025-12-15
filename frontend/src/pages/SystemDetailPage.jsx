@@ -66,7 +66,8 @@ export default function SystemDetailPage() {
   const [hierClusters, setHierClusters] = useState(4);
   const [hierLinkage, setHierLinkage] = useState('ward');
   const [tomatoK, setTomatoK] = useState(15);
-  const [tomatoTau, setTomatoTau] = useState(0.5);
+  const [tomatoTauMode, setTomatoTauMode] = useState('auto');
+  const [tomatoTauValue, setTomatoTauValue] = useState(0.5);
   const [tomatoKMax, setTomatoKMax] = useState(6);
   const navigate = useNavigate();
 
@@ -419,7 +420,7 @@ export default function SystemDetailPage() {
         algorithmParams.min_samples = dbscanMinSamples;
       } else if (algo === 'tomato') {
         algorithmParams.k_neighbors = tomatoK;
-        algorithmParams.tau = tomatoTau;
+        algorithmParams.tau = tomatoTauMode === 'auto' ? 'auto' : tomatoTauValue;
         algorithmParams.k_max = tomatoKMax;
       } else if (algo === 'hierarchical') {
         algorithmParams.n_clusters = hierClusters;
@@ -729,14 +730,30 @@ export default function SystemDetailPage() {
                 </label>
                 <label className="space-y-1">
                   <span className="block text-gray-400">Tau (persistence)</span>
-                  <input
-                    type="number"
-                    min={0}
-                    step="0.1"
-                    value={tomatoTau}
-                    onChange={(e) => setTomatoTau(Number(e.target.value) || 0)}
-                    className="w-full bg-gray-800 border border-gray-700 rounded-md px-2 py-1 text-white"
-                  />
+                  <div className="space-y-2">
+                    <select
+                      value={tomatoTauMode}
+                      onChange={(e) => setTomatoTauMode(e.target.value)}
+                      className="w-full bg-gray-800 border border-gray-700 rounded-md px-2 py-1 text-white"
+                    >
+                      <option value="auto">Auto (gap heuristic)</option>
+                      <option value="manual">Manual</option>
+                    </select>
+                    {tomatoTauMode === 'manual' ? (
+                      <input
+                        type="number"
+                        min={0}
+                        step="0.1"
+                        value={tomatoTauValue}
+                        onChange={(e) => setTomatoTauValue(Number(e.target.value) || 0)}
+                        className="w-full bg-gray-800 border border-gray-700 rounded-md px-2 py-1 text-white"
+                      />
+                    ) : (
+                      <p className="text-[11px] text-gray-400 leading-snug">
+                        Automatically picks τ from the largest persistence gap in the residue trajectory.
+                      </p>
+                    )}
+                  </div>
                 </label>
                 <label className="space-y-1">
                   <span className="block text-gray-400">Max clusters / residue</span>

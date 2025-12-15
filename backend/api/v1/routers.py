@@ -1132,10 +1132,16 @@ async def build_metastable_cluster_vectors(
         tomato_k = int(algo_params.get("k_neighbors", (payload or {}).get("tomato_k", 15)))
     except (TypeError, ValueError):
         raise HTTPException(status_code=400, detail="tomato k_neighbors must be an integer.")
-    try:
-        tomato_tau = float(algo_params.get("tau", (payload or {}).get("tomato_tau", 0.5)))
-    except (TypeError, ValueError):
-        raise HTTPException(status_code=400, detail="tomato tau must be a number.")
+    tomato_tau_raw = algo_params.get("tau", (payload or {}).get("tomato_tau", "auto"))
+    if tomato_tau_raw is None:
+        tomato_tau = "auto"
+    elif isinstance(tomato_tau_raw, str) and tomato_tau_raw.lower() == "auto":
+        tomato_tau = "auto"
+    else:
+        try:
+            tomato_tau = float(tomato_tau_raw)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="tomato tau must be a number or 'auto'.")
     try:
         tomato_k_max = int(algo_params.get("k_max", (payload or {}).get("tomato_k_max", max_clusters)))
     except (TypeError, ValueError):
