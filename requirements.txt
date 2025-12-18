@@ -9,7 +9,6 @@ deeptime # For VAMP analysis
 pyqubo
 dwave-neal
 dadapy
-# idtxl Must install from source
 pyyaml
 redis
 rq

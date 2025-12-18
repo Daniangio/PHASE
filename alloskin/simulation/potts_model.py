@@ -121,7 +121,7 @@ def fit_potts_pseudolikelihood_torch(
     edges: Sequence[Tuple[int, int]],
     *,
     l2: float = 1e-3,
-    lr: float = 1e-2,
+    lr: float = 1e-3,
     epochs: int = 200,
     batch_size: int = 512,
     seed: int = 0,
@@ -164,14 +164,14 @@ def fit_potts_pseudolikelihood_torch(
     torch.manual_seed(seed)
     h_params = torch.nn.ParameterList([
         torch.nn.Parameter(torch.tensor(
-            pmi_model.h[r] if pmi_model is not None else np.zeros(K[r]),
+            -pmi_model.h[r] if pmi_model is not None else np.zeros(K[r]),
             dtype=torch.float32
         )) for r in range(N)
     ])
     J_params = torch.nn.ParameterDict()
     for r, s in edges:
         key = f"{r}_{s}"
-        init_val = np.zeros((K[r], K[s])) if pmi_model is None else pmi_model.coupling(r, s)
+        init_val = np.zeros((K[r], K[s])) if pmi_model is None else -pmi_model.coupling(r, s)
         J_params[key] = torch.nn.Parameter(torch.tensor(init_val, dtype=torch.float32))
 
     X = torch.tensor(labels, dtype=torch.long)  # (T,N)
@@ -228,10 +228,10 @@ def fit_potts_pseudolikelihood_torch(
             print(f"[plm] epoch {ep:4d}/{epochs}  avg_loss={total / max(1,nobs):.6f}")
 
     # Export to numpy PottsModel (store couplings consistently as (r<s))
-    h = [hp.detach().cpu().numpy().astype(float) for hp in h_params]
+    h = [-hp.detach().cpu().numpy().astype(float) for hp in h_params]
     J = {}
     for r, s in edges:
         key = f"{r}_{s}"
-        J[(r, s)] = J_params[key].detach().cpu().numpy().astype(float)
+        J[(r, s)] = -J_params[key].detach().cpu().numpy().astype(float)
 
     return PottsModel(h=h, J=J, edges=list(edges))

@@ -15,7 +15,7 @@ def main():
     ap.add_argument("--npz", required=True)
     ap.add_argument("--unassigned-policy", default="drop_frames", choices=["drop_frames", "treat_as_state", "error"])
 
-    ap.add_argument("--fit", default="pmi", choices=["pmi", "plm"])
+    ap.add_argument("--fit", default="pmi", choices=["pmi", "plm", "pmi+plm"])
     ap.add_argument("--beta", type=float, default=1.0)
 
     ap.add_argument("--gibbs-samples", type=int, default=500)
@@ -50,8 +50,10 @@ def main():
     else:
         model = fit_potts_pseudolikelihood_torch(
             labels, K, edges,
-            l2=1e-3, lr=1e-2, epochs=200,
-            batch_size=512, seed=args.seed, verbose=True
+            l2=1e-3, lr=1e-3, epochs=100,
+            batch_size=512, seed=args.seed,
+            init_from_pmi=args.fit == "pmi+plm",
+            verbose=True
         )
 
     # Baseline: Gibbs on Potts
