@@ -26,6 +26,8 @@ services:
       # This is required for create-react-app
       # to detect file changes inside Docker
       - CHOKIDAR_USEPOLLING=true
+      - HOST=0.0.0.0
+      - DANGEROUSLY_DISABLE_HOST_CHECK=true
   
   # Add an override for the 'worker' service for live-reloading
   worker:
