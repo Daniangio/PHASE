@@ -11,26 +11,43 @@ from alloskin.simulation.qubo import QUBO
 def _progress_iterator(total: int, desc: str, enabled: bool) -> Iterable[int]:
     """
     Wrap range with a tqdm-style progress bar when available.
-    Falls back to coarse percentage logging to avoid extra dependencies.
+    Falls back to a plain range if tqdm is unavailable.
     """
     if not enabled:
         return range(total)
-
     try:
-        from tqdm import trange
-
-        return trange(total, desc=desc)
+        from tqdm import tqdm  # type: ignore
+        return tqdm(range(total), total=total, desc=desc)
     except Exception:
-        def generator():
-            last_pct = -1
-            for i in range(total):
-                pct = int((i + 1) * 100 / max(1, total))
-                if pct % 10 == 0 and pct != last_pct:
-                    print(f"[{desc}] {pct}% ({i + 1}/{total})")
-                    last_pct = pct
-                yield i
-            print(f"[{desc}] done")
-        return generator()
+        # No tqdm; just return a normal iterator.
+        return range(total)
+
+
+def _gibbs_one_sweep(
+    model: PottsModel,
+    x: np.ndarray,
+    *,
+    beta: float,
+    rng: np.random.Generator,
+) -> None:
+    """
+    In-place one full Gibbs sweep over all residues (single-site updates).
+    """
+    N = len(model.h)
+    neigh = model.neighbors()
+
+    for r in range(N):
+        # logits for states of residue r
+        logits = -beta * model.h[r].copy()
+        for s in neigh[r]:
+            Jrs = model.coupling(r, s)  # (K_r, K_s)
+            logits += -beta * Jrs[:, x[s]]
+
+        # stabilize and sample
+        m = logits.max()
+        p = np.exp(logits - m)
+        p = p / p.sum()
+        x[r] = int(rng.choice(len(p), p=p))
 
 
 def gibbs_sample_potts(
@@ -47,29 +64,15 @@ def gibbs_sample_potts(
     """
     Single-site Gibbs sampler for Potts model.
     Returns samples shape (n_samples, N).
-    If progress is True, shows a tqdm bar (or coarse % logs if tqdm is unavailable).
     """
     rng = np.random.default_rng(seed)
     N = len(model.h)
     K_list = model.K_list()
-    neigh = model.neighbors()
 
     if x0 is None:
         x = np.array([rng.integers(0, K_list[r]) for r in range(N)], dtype=int)
     else:
         x = np.array(x0, dtype=int).copy()
-
-    def conditional_probs(r: int) -> np.ndarray:
-        # logits for states of residue r
-        logits = -beta * model.h[r].copy()
-        for s in neigh[r]:
-            Jrs = model.coupling(r, s)  # (K_r, K_s)
-            logits += -beta * Jrs[:, x[s]]
-        # stabilize
-        m = logits.max()
-        p = np.exp(logits - m)
-        p = p / p.sum()
-        return p
 
     total_steps = burn_in + n_samples * thinning
     out = np.zeros((n_samples, N), dtype=int)
@@ -77,115 +80,174 @@ def gibbs_sample_potts(
 
     step_iter = _progress_iterator(total_steps, "Gibbs sweeps", progress)
     for step in step_iter:
-        # sweep
-        for r in range(N):
-            p = conditional_probs(r)
-            x[r] = int(rng.choice(len(p), p=p))
+        _gibbs_one_sweep(model, x, beta=beta, rng=rng)
+
         if step >= burn_in and ((step - burn_in) % thinning == 0) and oi < n_samples:
             out[oi] = x
             oi += 1
-    if hasattr(step_iter, "close") and callable(step_iter.close):
-        step_iter.close()
+
+        if oi >= n_samples:
+            break
+
     return out
 
 
-def _qubo_adjacency(Q: Dict[Tuple[int, int], float], M: int) -> List[List[Tuple[int, float]]]:
-    adj: List[List[Tuple[int, float]]] = [[] for _ in range(M)]
-    for (i, j), w in Q.items():
-        adj[i].append((j, w))
-        adj[j].append((i, w))
-    return adj
-
-
-def sa_sample_qubo_numpy(
-    qubo: QUBO,
+def make_beta_ladder(
     *,
-    n_reads: int = 200,
-    sweeps: int = 2000,
-    t_start: float = 10.0,
-    t_end: float = 0.1,
+    beta_min: float,
+    beta_max: float,
+    n_replicas: int,
+    spacing: str = "geom",
+) -> List[float]:
+    """
+    Construct a monotone beta ladder for replica exchange.
+    spacing:
+      - "geom": geometric spacing (good default)
+      - "lin": linear spacing
+    """
+    if n_replicas < 2:
+        raise ValueError("n_replicas must be >= 2")
+    if beta_min <= 0 or beta_max <= 0 or beta_min >= beta_max:
+        raise ValueError("Require 0 < beta_min < beta_max")
+
+    if spacing == "geom":
+        betas = np.geomspace(beta_min, beta_max, n_replicas)
+    elif spacing == "lin":
+        betas = np.linspace(beta_min, beta_max, n_replicas)
+    else:
+        raise ValueError(f"Unknown spacing={spacing!r}")
+
+    return [float(b) for b in betas]
+
+
+def replica_exchange_gibbs_potts(
+    model: PottsModel,
+    *,
+    betas: Sequence[float],
+    sweeps_per_round: int = 2,
+    n_rounds: int = 2000,
+    burn_in_rounds: int = 500,
+    thinning_rounds: int = 1,
     seed: int = 0,
+    x0: Optional[np.ndarray] = None,
     progress: bool = False,
-) -> np.ndarray:
+) -> Dict[str, object]:
     """
-    Simple simulated annealing on binary QUBO.
-    Returns bitstrings shape (n_reads, M).
+    Parallel tempering (replica exchange) for the Potts model.
 
-    This is a QA-proxy sampler, not guaranteed Boltzmann sampling.
-    If progress is True, shows a tqdm bar over reads and (for small n_reads) sweeps.
+    We run replicas at different inverse temperatures (betas).
+    Each round:
+      1) do 'sweeps_per_round' Gibbs sweeps in each replica at its own beta,
+      2) attempt swaps between adjacent betas.
+
+    Returns a dict:
+      - "betas": list[float]
+      - "samples_by_beta": dict[float -> np.ndarray shape (S,N)]
+      - "swap_accept_rate": np.ndarray shape (n_replicas-1,)
+      - "energy_traces": dict[float -> np.ndarray shape (n_saved,)]  (energies at save times)
     """
+    betas = [float(b) for b in betas]
+    if sorted(betas) != list(betas):
+        raise ValueError("betas must be sorted ascending.")
+    if len(betas) < 2:
+        raise ValueError("Need at least 2 betas for replica exchange.")
+    if any(b <= 0 for b in betas):
+        raise ValueError("All betas must be > 0")
+
     rng = np.random.default_rng(seed)
-    M = qubo.num_vars()
-    adj = _qubo_adjacency(qubo.Q, M)
-    a = qubo.a
+    N = len(model.h)
+    K_list = model.K_list()
 
-    def delta_flip(z: np.ndarray, i: int) -> float:
-        # E = const + sum a_i z_i + sum_{i<j} Q_ij z_i z_j
-        # flip z_i -> 1 - z_i
-        zi = z[i]
-        s = a[i]
-        for j, w in adj[i]:
-            s += w * z[j]
-        # new-old multiplier
-        return (1 - 2 * zi) * s
+    # Initialize replicas (states)
+    replicas: List[np.ndarray] = []
+    if x0 is None:
+        for _ in betas:
+            replicas.append(np.array([rng.integers(0, K_list[r]) for r in range(N)], dtype=int))
+    else:
+        x0 = np.array(x0, dtype=int).copy()
+        for _ in betas:
+            replicas.append(x0.copy())
 
-    out = np.zeros((n_reads, M), dtype=int)
+    # Current energies (raw, unscaled by beta)
+    energies = np.array([model.energy(x) for x in replicas], dtype=float)
 
-    read_iter = _progress_iterator(n_reads, "SA-QUBO reads", progress)
-    for r in read_iter:
-        z = rng.integers(0, 2, size=M, dtype=int)
+    # Storage
+    samples_by_beta: Dict[float, List[np.ndarray]] = {b: [] for b in betas}
+    energy_traces: Dict[float, List[float]] = {b: [] for b in betas}
+    accept = np.zeros(len(betas) - 1, dtype=int)
+    trials = np.zeros(len(betas) - 1, dtype=int)
 
-        sweep_iter = _progress_iterator(sweeps, f"SA sweeps (read {r+1}/{n_reads})", progress and n_reads <= 3)
-        for sweep in sweep_iter:
-            # exponential temperature schedule
-            frac = sweep / max(1, sweeps - 1)
-            T = t_start * (t_end / t_start) ** frac
+    round_iter = _progress_iterator(n_rounds, "Replica-exchange rounds", progress)
+    for rnd in round_iter:
+        # 1) local updates
+        for i, b in enumerate(betas):
+            for _ in range(sweeps_per_round):
+                _gibbs_one_sweep(model, replicas[i], beta=b, rng=rng)
+            energies[i] = model.energy(replicas[i])
 
-            # random order
-            for i in rng.permutation(M):
-                dE = delta_flip(z, i)
-                if dE <= 0:
-                    z[i] = 1 - z[i]
-                else:
-                    if rng.random() < np.exp(-dE / max(1e-12, T)):
-                        z[i] = 1 - z[i]
+        # 2) swap attempts (adjacent)
+        # We attempt swaps in alternating pattern to reduce bias:
+        # even pairs on even rounds, odd pairs on odd rounds.
+        start = 0 if (rnd % 2 == 0) else 1
+        for i in range(start, len(betas) - 1, 2):
+            b_i, b_j = betas[i], betas[i + 1]
+            e_i, e_j = energies[i], energies[i + 1]
 
-        out[r] = z
-        if hasattr(sweep_iter, "close") and callable(sweep_iter.close):
-            sweep_iter.close()
-    if hasattr(read_iter, "close") and callable(read_iter.close):
-        read_iter.close()
-    return out
+            # acceptance prob for swapping configurations between betas
+            # alpha = min(1, exp((beta_i - beta_j) * (E(x_i) - E(x_j))))
+            d = (b_i - b_j) * (e_i - e_j)
+            trials[i] += 1
+            if d >= 0 or rng.random() < np.exp(d):
+                # swap states and energies
+                replicas[i], replicas[i + 1] = replicas[i + 1], replicas[i]
+                energies[i], energies[i + 1] = energies[i + 1], energies[i]
+                accept[i] += 1
 
+        # Save after burn-in, with thinning
+        if rnd >= burn_in_rounds and ((rnd - burn_in_rounds) % thinning_rounds == 0):
+            for i, b in enumerate(betas):
+                samples_by_beta[b].append(replicas[i].copy())
+                energy_traces[b].append(float(energies[i]))
+
+    # Convert lists to arrays
+    samples_by_beta_arr: Dict[float, np.ndarray] = {}
+    energy_traces_arr: Dict[float, np.ndarray] = {}
+    for b in betas:
+        samples_by_beta_arr[b] = np.stack(samples_by_beta[b], axis=0) if len(samples_by_beta[b]) else np.zeros((0, N), dtype=int)
+        energy_traces_arr[b] = np.array(energy_traces[b], dtype=float)
+
+    swap_accept_rate = np.divide(accept, np.maximum(1, trials)).astype(float)
+
+    return {
+        "betas": betas,
+        "samples_by_beta": samples_by_beta_arr,
+        "swap_accept_rate": swap_accept_rate,
+        "energy_traces": energy_traces_arr,
+    }
 
 def sa_sample_qubo_neal(
     qubo: QUBO,
     *,
     n_reads: int = 200,
     sweeps: int = 2000,
-    t_start: float | None = None,
-    t_end: float | None = None,
     seed: int = 0,
     progress: bool = False,
 ) -> np.ndarray:
     """
-    Optional: use 'neal' if installed. Returns (n_reads, M) bitstrings.
+    Use neal (if installed) to sample a QUBO/BQM.
 
-    Notes:
-      - neal internally chooses a schedule; t_start/t_end are accepted for API
-        compatibility but not used.
-      - Set progress=True to emit a short status message; neal itself does not
-        stream progress per read.
+    NOTE: neal's SA schedule differs from our numpy implementation; do not interpret
+    its sweeps/temperature as directly comparable to a physical beta.
     """
     try:
-        import neal
-        import dimod
+        import dimod  # type: ignore
+        import neal  # type: ignore
     except Exception as e:
-        raise RuntimeError("neal is not installed. pip install neal  or use sa_sample_qubo_numpy.") from e
+        raise RuntimeError("neal/dimod are not installed.") from e
 
-    # Build a dimod BinaryQuadraticModel from our QUBO representation.
+    # Convert our QUBO to a dimod BinaryQuadraticModel
     linear = {i: float(qubo.a[i]) for i in range(qubo.num_vars())}
-    quadratic = {(i, j): float(v) for (i, j), v in qubo.Q.items()}
+    quadratic = {k: float(v) for k, v in qubo.Q.items()}
     bqm = dimod.BinaryQuadraticModel(linear, quadratic, float(qubo.const), dimod.BINARY)
 
     if progress:
@@ -198,7 +260,7 @@ def sa_sample_qubo_neal(
         num_sweeps=sweeps,
         seed=seed,
     )
-    # decode samples
+
     arr = np.zeros((n_reads, qubo.num_vars()), dtype=int)
     for idx, sample in enumerate(ss.samples()):
         for i in range(qubo.num_vars()):

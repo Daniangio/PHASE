@@ -255,3 +255,77 @@ def plot_marginal_summary(
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(html, encoding="utf-8")
     return out_path
+
+
+
+def plot_beta_scan_curve(
+    *,
+    betas: Sequence[float],
+    distances: Sequence[float],
+    out_path: str | Path,
+    title: str = "Effective temperature calibration: distance vs beta",
+) -> Path:
+    """
+    Save a small interactive HTML plot of D(beta), used to pick beta_eff.
+
+    This keeps dependencies minimal by reusing the same Plotly-in-HTML pattern
+    used by plot_marginal_summary.
+    """
+    betas = [float(b) for b in betas]
+    distances = [float(d) for d in distances]
+    payload = {
+        "betas": betas,
+        "distances": distances,
+        "title": title,
+    }
+
+    # Tiny HTML template (standalone). Uses Plotly CDN like the marginal dashboard.
+    html = f"""
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>{title}</title>
+  <script src="https://cdn.plot.ly/plotly-2.30.0.min.js"></script>
+  <style>
+    body {{ font-family: sans-serif; margin: 0; padding: 0; }}
+    .wrap {{ padding: 12px; }}
+    #plot {{ width: 100%; height: 520px; }}
+    .note {{ color: #444; font-size: 13px; }}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h2>{title}</h2>
+    <div class="note">We pick \\(\\beta_\\mathrm{{eff}}\\) as the minimizer of the distance curve.</div>
+    <div id="plot"></div>
+  </div>
+
+  <script>
+    const payload = {json.dumps(payload)};
+    const x = payload.betas;
+    const y = payload.distances;
+
+    const trace = {{
+      x: x,
+      y: y,
+      mode: "lines+markers",
+      name: "D(beta)"
+    }};
+
+    const layout = {{
+      xaxis: {{ title: "beta", type: "linear" }},
+      yaxis: {{ title: "distance", type: "linear" }},
+      margin: {{ l: 60, r: 20, t: 30, b: 50 }},
+    }};
+
+    Plotly.newPlot("plot", [trace], layout, {{responsive: true}});
+  </script>
+</body>
+</html>
+"""
+
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(html, encoding="utf-8")
+    return out_path
