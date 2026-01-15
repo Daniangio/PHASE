@@ -20,8 +20,8 @@ services:
       dockerfile: Dockerfile.dev
     volumes:
       # Mount the source code
-      - ./frontend/src:/app/src
-      - ./frontend/public:/app/public
+      - ./frontend:/app           # Sync everything
+      - /app/node_modules         # Anonymous volume: Keep container's node_modules
     environment:
       # This is required for create-react-app
       # to detect file changes inside Docker
