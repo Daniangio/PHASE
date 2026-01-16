@@ -47,6 +47,8 @@ export default function ResultDetailPage() {
       (result.analysis_type === 'qubo' &&
         (result.results?.qubo_active?.solutions?.length > 0 ||
           result.results?.qubo_inactive?.solutions?.length > 0)));
+  const canVisualizeSimulation =
+    result.analysis_type === 'simulation' && Boolean(result.results?.marginals_plot);
 
   return (
     <div className="space-y-6">
@@ -108,6 +110,14 @@ export default function ResultDetailPage() {
               className="px-3 py-1 bg-cyan-600 rounded-md text-white text-sm"
             >
               Visualize
+            </button>
+          )}
+          {canVisualizeSimulation && (
+            <button
+              onClick={() => navigate(`/simulation/${result.job_id}`)}
+              className="px-3 py-1 bg-cyan-600 rounded-md text-white text-sm"
+            >
+              Simulation View
             </button>
           )}
         </div>

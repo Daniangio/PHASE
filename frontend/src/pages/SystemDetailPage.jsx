@@ -18,10 +18,9 @@ import {
   downloadSavedCluster,
   deleteSavedCluster,
 } from '../api/projects';
-import { submitStaticJob, submitDynamicJob, submitQuboJob, fetchResults, fetchResult } from '../api/jobs';
+import { submitStaticJob, submitSimulationJob } from '../api/jobs';
 import StaticAnalysisForm from '../components/analysis/StaticAnalysisForm';
-import DynamicAnalysisForm from '../components/analysis/DynamicAnalysisForm';
-import QuboAnalysisForm from '../components/analysis/QuboAnalysisForm';
+import SimulationAnalysisForm from '../components/analysis/SimulationAnalysisForm';
 import { Download } from 'lucide-react';
 
 export default function SystemDetailPage() {
@@ -32,9 +31,6 @@ export default function SystemDetailPage() {
   const [actionError, setActionError] = useState(null);
   const [analysisError, setAnalysisError] = useState(null);
   const [downloadError, setDownloadError] = useState(null);
-  const [staticResults, setStaticResults] = useState([]);
-  const [quboCachePaths, setQuboCachePaths] = useState({ active: [], inactive: [] });
-  const [staticError, setStaticError] = useState(null);
   const [uploadingState, setUploadingState] = useState(null);
   const [addingState, setAddingState] = useState(false);
   const [actionMessage, setActionMessage] = useState(null);
@@ -100,22 +96,6 @@ export default function SystemDetailPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectId, systemId]);
 
-  useEffect(() => {
-    const loadStatics = async () => {
-      if (!projectId || !systemId) return;
-      try {
-        const allResults = await fetchResults();
-        const matching = allResults.filter(
-          (res) => res.analysis_type === 'static' && res.system_id === systemId && res.status === 'finished'
-        );
-        setStaticResults(matching);
-        setStaticError(null);
-      } catch (err) {
-        setStaticError(err.message);
-      }
-    };
-    loadStatics();
-  }, [projectId, systemId]);
 
   const states = useMemo(() => Object.values(system?.states || {}), [system]);
   const descriptorStates = useMemo(() => states.filter((s) => s.descriptor_file), [states]);
@@ -165,48 +145,6 @@ export default function SystemDetailPage() {
     setStatePair({ a, b });
   }, [analysisStateOptions, statePair.a, statePair.b]);
 
-  useEffect(() => {
-    const loadQuboCaches = async () => {
-      if (!projectId || !systemId || !statePair.a || !statePair.b) {
-        setQuboCachePaths({ active: [], inactive: [] });
-        return;
-      }
-      try {
-        const allResults = await fetchResults();
-        const matching = allResults.filter(
-          (res) =>
-            res.analysis_type === 'qubo' &&
-            res.system_id === systemId &&
-            res.state_a_id === statePair.a &&
-            res.state_b_id === statePair.b &&
-            res.status === 'finished'
-        );
-        if (!matching.length) {
-          setQuboCachePaths({ active: [], inactive: [] });
-          return;
-        }
-        const details = await Promise.all(
-          matching.map((res) => fetchResult(res.job_id).catch(() => null))
-        );
-        const active = new Set();
-        const inactive = new Set();
-        details.forEach((detail) => {
-          const paths = detail?.results?.imbalance_cache_paths;
-          if (paths?.active) {
-            paths.active.forEach((p) => active.add(p));
-          }
-          if (paths?.inactive) {
-            paths.inactive.forEach((p) => inactive.add(p));
-          }
-        });
-        setQuboCachePaths({ active: Array.from(active), inactive: Array.from(inactive) });
-      } catch (err) {
-        console.warn('Failed to load QUBO cache paths', err);
-        setQuboCachePaths({ active: [], inactive: [] });
-      }
-    };
-    loadQuboCaches();
-  }, [projectId, systemId, statePair.a, statePair.b]);
 
   const refreshSystem = async () => {
     try {
@@ -234,7 +172,7 @@ export default function SystemDetailPage() {
     }
   };
 
-  const enqueueJob = async (runner, params) => {
+  const enqueueStaticJob = async (runner, params) => {
     const stateAId = statePair.a?.macroId;
     const stateBId = statePair.b?.macroId;
     const stateA = descriptorStates.find((s) => s.state_id === stateAId);
@@ -253,6 +191,16 @@ export default function SystemDetailPage() {
       state_a_id: stateA.state_id,
       state_b_id: stateB.state_id,
       ...extraParams,
+    });
+    navigate(`/jobs/${response.job_id}`, { state: { analysis_uuid: response.analysis_uuid } });
+  };
+
+  const enqueueSimulationJob = async (params) => {
+    setAnalysisError(null);
+    const response = await submitSimulationJob({
+      project_id: projectId,
+      system_id: systemId,
+      ...params,
     });
     navigate(`/jobs/${response.job_id}`, { state: { analysis_uuid: response.analysis_uuid } });
   };
@@ -999,40 +947,46 @@ export default function SystemDetailPage() {
         </section>
       )}
 
+      {!metastableLocked && (
+        <section className="bg-gray-800 border border-gray-700 rounded-lg p-4">
+          <h2 className="text-lg font-semibold text-white">Run Analysis</h2>
+          <p className="text-sm text-gray-400 mt-2">
+            Lock metastable states and build cluster NPZ files to unlock static and Potts analyses.
+          </p>
+        </section>
+      )}
+
       {metastableLocked && (
         <section className="bg-gray-800 border border-gray-700 rounded-lg p-4 space-y-4">
           <div className="flex items-center justify-between">
             <h2 className="text-lg font-semibold text-white">Run Analysis</h2>
             <p className="text-xs text-gray-400">
-              Choose two descriptor-ready states (found {descriptorStates.length}).
+              Static needs two descriptor-ready states; Potts uses saved cluster NPZ files.
             </p>
           </div>
-          {staticError && <ErrorMessage message={`Failed to load static jobs: ${staticError}`} />}
           {analysisError && <ErrorMessage message={analysisError} />}
-          <StatePairSelector
-            options={analysisStateOptions}
-            value={statePair}
-            onChange={(updater) => {
-              setAnalysisError(null);
-              setStatePair(updater);
-            }}
-          />
-          <div className="grid md:grid-cols-3 gap-6">
-            <div className="bg-gray-900 border border-gray-700 rounded-lg p-4">
-              <h3 className="text-md font-semibold text-white mb-2">Static Reporters</h3>
-              <StaticAnalysisForm onSubmit={(params) => enqueueJob(submitStaticJob, params)} />
-            </div>
-            <div className="bg-gray-900 border border-gray-700 rounded-lg p-4">
-              <h3 className="text-md font-semibold text-white mb-2">QUBO</h3>
-              <QuboAnalysisForm
-                staticOptions={staticResults}
-                cachePaths={quboCachePaths}
-                onSubmit={(params) => enqueueJob(submitQuboJob, params)}
+          <div className="grid lg:grid-cols-2 gap-6">
+            <div className="bg-gray-900 border border-gray-700 rounded-lg p-4 space-y-4">
+              <div>
+                <h3 className="text-md font-semibold text-white">Static Reporters</h3>
+                <p className="text-xs text-gray-500 mt-1">Select two descriptor-ready states to compare.</p>
+              </div>
+              <StatePairSelector
+                options={analysisStateOptions}
+                value={statePair}
+                onChange={(updater) => {
+                  setAnalysisError(null);
+                  setStatePair(updater);
+                }}
               />
+              <StaticAnalysisForm onSubmit={(params) => enqueueStaticJob(submitStaticJob, params)} />
             </div>
             <div className="bg-gray-900 border border-gray-700 rounded-lg p-4">
-              <h3 className="text-md font-semibold text-white mb-2">Dynamic TE</h3>
-              <DynamicAnalysisForm onSubmit={(params) => enqueueJob(submitDynamicJob, params)} />
+              <h3 className="text-md font-semibold text-white mb-2">Potts Sampling</h3>
+              <SimulationAnalysisForm
+                clusterRuns={clusterRuns}
+                onSubmit={enqueueSimulationJob}
+              />
             </div>
           </div>
         </section>

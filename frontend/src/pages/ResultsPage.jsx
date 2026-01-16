@@ -41,7 +41,7 @@ export default function ResultsPage() {
     return (
       <EmptyState
         title="No analysis results yet"
-        description="Queue a static, dynamic, or QUBO job from the system page to see results here."
+        description="Queue a static or Potts simulation job from the system page to see results here."
         action={
           <button
             onClick={() => navigate('/projects')}
@@ -94,6 +94,14 @@ export default function ResultsPage() {
             >
               Details
             </button>
+            {result.analysis_type === 'simulation' && result.status === 'finished' && (
+              <button
+                onClick={() => navigate(`/simulation/${result.job_id}`)}
+                className="text-sm text-cyan-400 hover:text-cyan-300"
+              >
+                Simulation
+              </button>
+            )}
             <a
               href={`/api/v1/results/${result.job_id}`}
               download={`${result.job_id}.json`}

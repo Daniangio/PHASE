@@ -5,6 +5,8 @@ import SystemDetailPage from './pages/SystemDetailPage';
 import ResultsPage from './pages/ResultsPage';
 import ResultDetailPage from './pages/ResultDetailPage';
 import VisualizePage from './pages/VisualizePage';
+import SimulationResultPage from './pages/SimulationResultPage';
+import SimulationComparePage from './pages/SimulationComparePage';
 import DescriptorVizPage from './pages/DescriptorVizPage';
 import MetastableVizPage from './pages/MetastableVizPage';
 import MolstarDebugPage from './pages/MolstarDebugPage';
@@ -30,6 +32,8 @@ export default function App() {
           <Route path="/results" element={<ResultsPage />} />
           <Route path="/results/:jobId" element={<ResultDetailPage />} />
           <Route path="/visualize/:jobId" element={<VisualizePage />} />
+          <Route path="/simulation/compare" element={<SimulationComparePage />} />
+          <Route path="/simulation/:jobId" element={<SimulationResultPage />} />
           <Route path="/health" element={<HealthPage />} />
           <Route path="/jobs/:jobId" element={<JobStatusPage />} />
           <Route path="/debug/molstar" element={<MolstarDebugPage />} />

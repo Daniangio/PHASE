@@ -1701,6 +1701,69 @@ async def get_result_detail(job_uuid: str):
             raise e
         raise HTTPException(status_code=500, detail=f"Failed to read result: {e}")
 
+
+def _resolve_result_artifact_path(path_value: str) -> Path:
+    candidate = Path(path_value)
+    if not candidate.is_absolute():
+        candidate = DATA_ROOT / candidate
+    candidate = candidate.resolve()
+    try:
+        candidate.relative_to(DATA_ROOT)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Artifact path escapes data root.") from exc
+    if not candidate.exists() or not candidate.is_file():
+        raise HTTPException(status_code=404, detail="Artifact file not found.")
+    return candidate
+
+
+def _artifact_media_type(path: Path) -> str:
+    suffix = path.suffix.lower()
+    if suffix == ".json":
+        return "application/json"
+    if suffix == ".html":
+        return "text/html"
+    return "application/octet-stream"
+
+
+@api_router.get("/results/{job_uuid}/artifacts/{artifact}", summary="Download a result artifact")
+async def download_result_artifact(job_uuid: str, artifact: str, download: bool = Query(False)):
+    """
+    Download stored analysis artifacts by name (summary_npz, metadata_json, marginals_plot, beta_scan_plot).
+    """
+    result_file = RESULTS_DIR / f"{job_uuid}.json"
+    if not result_file.exists() or not result_file.is_file():
+        raise HTTPException(status_code=404, detail=f"Result file for job '{job_uuid}' not found.")
+
+    try:
+        payload = json.loads(result_file.read_text())
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Failed to read result payload.") from exc
+
+    results = payload.get("results") or {}
+    allowed = {
+        "summary_npz": "summary_npz",
+        "metadata_json": "metadata_json",
+        "marginals_plot": "marginals_plot",
+        "beta_scan_plot": "beta_scan_plot",
+        "cluster_npz": "cluster_npz",
+    }
+    key = allowed.get(artifact)
+    if not key:
+        raise HTTPException(status_code=404, detail="Unknown artifact.")
+    path_value = results.get(key)
+    if not isinstance(path_value, str) or not path_value:
+        raise HTTPException(status_code=404, detail="Artifact not available for this job.")
+
+    artifact_path = _resolve_result_artifact_path(path_value)
+    media_type = _artifact_media_type(artifact_path)
+    headers = {}
+    if media_type == "text/html" and not download:
+        headers["Content-Disposition"] = f"inline; filename={artifact_path.name}"
+        filename = None
+    else:
+        filename = artifact_path.name
+    return FileResponse(artifact_path, filename=filename, media_type=media_type, headers=headers)
+
 @api_router.delete("/results/{job_uuid}", summary="Delete a job and its associated data")
 async def delete_result(job_uuid: str):
     """

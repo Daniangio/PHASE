@@ -218,22 +218,32 @@ def run_pipeline(
 
     # Fit model(s)
     model = None
+    model_pmi = None
     if args.fit in ("pmi", "pmi+plm"):
         model_pmi = fit_potts_pmi(labels, K, edges)
         model = model_pmi
     if args.fit in ("plm", "pmi+plm"):
-        model_plm = fit_potts_pseudolikelihood_torch(
-            labels,
-            K,
-            edges,
-            l2=1e-3,
-            lr=1e-2,
-            epochs=200,
-            batch_size=512,
-            seed=args.seed,
-            verbose=True,
-        )
-        model = model_plm
+        try:
+            model_plm = fit_potts_pseudolikelihood_torch(
+                labels,
+                K,
+                edges,
+                l2=1e-3,
+                lr=1e-2,
+                epochs=200,
+                batch_size=512,
+                seed=args.seed,
+                verbose=True,
+            )
+            model = model_plm
+        except RuntimeError as exc:
+            if "PyTorch is required" not in str(exc):
+                raise
+            if model_pmi is None:
+                model_pmi = fit_potts_pmi(labels, K, edges)
+            model = model_pmi
+            args.fit = "pmi"
+            print("[fit] warning: PyTorch missing; falling back to PMI fit.")
 
     assert model is not None
 

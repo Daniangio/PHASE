@@ -1,4 +1,4 @@
-import { requestJSON } from './client';
+import { API_BASE, requestBlob, requestJSON } from './client';
 
 export function submitStaticJob(payload) {
   return requestJSON('/submit/static', {
@@ -16,6 +16,13 @@ export function submitDynamicJob(payload) {
 
 export function submitQuboJob(payload) {
   return requestJSON('/submit/qubo', {
+    method: 'POST',
+    body: payload,
+  });
+}
+
+export function submitSimulationJob(payload) {
+  return requestJSON('/submit/simulation', {
     method: 'POST',
     body: payload,
   });
@@ -41,4 +48,12 @@ export function fetchJobStatus(jobId) {
 
 export function healthCheck() {
   return requestJSON('/health/check');
+}
+
+export function downloadResultArtifact(jobId, artifact) {
+  return requestBlob(`/results/${jobId}/artifacts/${artifact}`);
+}
+
+export function resultArtifactUrl(jobId, artifact) {
+  return `${API_BASE}/results/${jobId}/artifacts/${artifact}`;
 }

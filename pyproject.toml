@@ -23,6 +23,7 @@ dependencies = [
     "numpy",
     "MDAnalysis",
     "deeptime", # For VAMP analysis
+    "torch",
     "pyqubo",
     "dwave-neal",
     "dadapy",

@@ -6,6 +6,7 @@ biopython
 MDAnalysis
 scikit-learn
 deeptime # For VAMP analysis
+torch
 pyqubo
 dwave-neal
 dadapy
