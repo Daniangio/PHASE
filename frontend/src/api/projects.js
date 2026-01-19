@@ -249,6 +249,12 @@ export function recomputeMetastableStates(projectId, systemId, params = {}) {
   });
 }
 
+export function clearMetastableStates(projectId, systemId) {
+  return requestJSON(`/projects/${projectId}/systems/${systemId}/metastable/clear`, {
+    method: 'POST',
+  });
+}
+
 export function renameMetastableState(projectId, systemId, metastableId, name) {
   return requestJSON(`/projects/${projectId}/systems/${systemId}/metastable/${encodeURIComponent(metastableId)}`, {
     method: 'PATCH',

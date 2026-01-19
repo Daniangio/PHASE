@@ -165,14 +165,6 @@ def run_analysis_job(
             },
         }
 
-        # --- NEW: Handle pre-computed static analysis for QUBO ---
-        if analysis_type == 'qubo' and params.get('static_job_uuid'):
-            static_uuid = params['static_job_uuid']
-            static_results_path = RESULTS_DIR / f"{static_uuid}.json"
-            if not static_results_path.exists():
-                raise FileNotFoundError(f"Could not find specified static result file for job UUID: {static_uuid}")
-            params['static_results_path'] = str(static_results_path)
-
         # Step 2: Delegate to the core runner
         job_results, mapping = run_analysis(
             analysis_type=analysis_type,

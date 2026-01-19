@@ -6,7 +6,7 @@ from alloskin.pipeline.runner import run_analysis
 
 def main():
     parser = argparse.ArgumentParser(description="AllosKin: Hierarchical Information Atlas (local debug CLI)")
-    parser.add_argument("analysis", choices=["static", "qubo", "dynamic"])
+    parser.add_argument("analysis", choices=["static"])
 
     # Descriptor inputs (preferred for current pipeline)
     parser.add_argument("--active_descriptors", help="Path to active descriptors NPZ")
@@ -31,22 +31,10 @@ def main():
     # Goal 1 Params
     parser.add_argument("--maxk", type=int, default=100)
 
-    # Goal 2 Params (Hierarchical QUBO)
-    parser.add_argument("--static_results_path", help="Path to a JSON from a previous static analysis to use as input for QUBO")
-    parser.add_argument("--alpha_size", type=float, default=1.0, help="Cost of adding a residue")
-    parser.add_argument("--beta_hub", type=float, default=2.0, help="Reward per covered downstream residue")
-    parser.add_argument("--beta_switch", type=float, default=5.0, help="Reward for predicting global state")
-    parser.add_argument("--gamma_redundancy", type=float, default=2.0, help="Penalty for overlapping coverage")
-    parser.add_argument("--ii_threshold", type=float, default=0.9, help="Threshold for 'Prediction' (Delta < T)")
-    parser.add_argument("--filter_top_n", type=int, default=80)
     
     args = parser.parse_args()
 
     params = vars(args)
-    # Normalize param naming to backend expectations
-    if params.get("filter_top_n") is not None:
-        params["filter_top_total"] = params.pop("filter_top_n")
-
     # Build file_paths
     file_paths = {}
     if args.active_descriptors and args.inactive_descriptors:

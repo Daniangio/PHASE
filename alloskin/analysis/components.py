@@ -8,15 +8,7 @@ import os
 import concurrent.futures
 import functools
 from abc import ABC, abstractmethod
-from typing import Dict, Tuple, Any, Callable, List, Union
-
-# --- Optional Imports ---
-try:
-    import MDAnalysis as mda
-    import pyqubo
-    import neal
-except ImportError:
-    pass
+from typing import Dict, Tuple, Any, Callable
 
 FeatureDict = Dict[str, np.ndarray]
 
@@ -91,21 +83,3 @@ class BaseStaticReporter(AnalysisComponent):
 
         print(f"{method_name} complete.")
         return results
-
-
-# --- GOAL 2: Maximum Coverage QUBO ---
-
-class BaseQUBO(AnalysisComponent):
-    """
-    Base class for QUBO Analysis (Goal 2).
-    Refactored for the 'Maximum Coverage' All-vs-All formulation.
-    """
-    
-    @abstractmethod
-    def _compute_interaction_matrix(self, features: FeatureDict, **kwargs) -> Tuple[List[str], np.ndarray]:
-        """
-        Must return:
-        1. List of keys (residue names) corresponding to matrix indices.
-        2. The NxN matrix where M[i,j] = Delta(i -> j).
-        """
-        pass

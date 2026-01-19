@@ -120,7 +120,7 @@ def fit_potts_pseudolikelihood_torch(
     K: Sequence[int],
     edges: Sequence[Tuple[int, int]],
     *,
-    l2: float = 1e-3,
+    l2: float = 1e-5,
     lr: float = 1e-3,
     lr_min: float = 1e-3,
     lr_schedule: str = "cosine",

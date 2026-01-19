@@ -12,8 +12,7 @@ Compared to the previous MI-based implementation, this version:
       cross-validated AUC (default) or, optionally, a cross-entropy based
       mutual-information surrogate.
     * Keeps an intrinsic-dimension (ID) estimate per residue using a
-      PCA-variance criterion, which is then used by downstream QUBO code
-      as a secondary filter.
+      PCA-variance criterion, which can be used as a downstream filter.
 
 The public entry point is ``StaticStateSensitivity.run((features, labels_Y))``,
 where:
@@ -31,7 +30,7 @@ The return value is a dict:
                     "auc": float,
                     "cross_entropy": float } }
 
-This is plug-compatible with the existing runner / QUBO code.
+This is plug-compatible with the existing runner.
 """
 
 from __future__ import annotations
@@ -334,8 +333,7 @@ class StaticStateSensitivity(BaseStaticReporter):
     AUC; users can optionally choose a cross-entropy-based score by passing
     ``state_metric="ce"`` in the parameter dictionary.
 
-    The returned dict is directly consumed by the QUBO module
-    :class:`QUBOMaxCoverage` as documented in the QUBO implementation. :contentReference[oaicite:3]{index=3}
+    The returned dict is consumed by downstream analysis and visualization layers.
     """
 
     def _get_worker_function(self) -> Callable:

@@ -9,7 +9,6 @@ services:
       # Mount code for live-reload during development
       - ./alloskin:/app/alloskin
       - ./backend:/app/backend
-      - ./config:/app/config
       # Persist application data (projects, trajectories, descriptors) on /scratch
       - /scratch/docker/alloskin-data:/data/alloskin
     environment:
@@ -40,7 +39,6 @@ services:
       # The worker needs the exact same volumes as the backend
       - ./alloskin:/app/alloskin
       - ./backend:/app/backend
-      - ./config:/app/config
       - /scratch/docker/alloskin-data:/data/alloskin
     environment:
       - PYTHONUNBUFFERED=1

@@ -7,20 +7,6 @@ export function submitStaticJob(payload) {
   });
 }
 
-export function submitDynamicJob(payload) {
-  return requestJSON('/submit/dynamic', {
-    method: 'POST',
-    body: payload,
-  });
-}
-
-export function submitQuboJob(payload) {
-  return requestJSON('/submit/qubo', {
-    method: 'POST',
-    body: payload,
-  });
-}
-
 export function submitSimulationJob(payload) {
   return requestJSON('/submit/simulation', {
     method: 'POST',

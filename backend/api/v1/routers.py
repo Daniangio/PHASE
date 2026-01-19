@@ -24,8 +24,6 @@ from backend.tasks import run_analysis_job, run_simulation_job
 from backend.api.v1.schemas import (
     ProjectCreateRequest,
     StaticJobRequest,
-    DynamicJobRequest,
-    QUBOJobRequest,
     SimulationJobRequest,
 )
 from backend.services.project_store import (
@@ -220,12 +218,6 @@ async def _build_state_descriptors(
     _refresh_system_metadata(system_meta)
 
     project_store.save_system(system_meta)
-    # Trigger metastable recomputation (best-effort)
-    try:
-        recompute_metastable_states(system_meta.project_id, system_meta.system_id)
-        system_meta = project_store.get_system(system_meta.project_id, system_meta.system_id)
-    except Exception as exc:
-        print(f"[metastable] Recompute failed: {exc}")
     return system_meta
 
 
@@ -426,8 +418,11 @@ async def get_state_descriptors(
         metastable_filter_ids = [mid.strip() for mid in metastable_ids.split(",") if mid.strip()]
     meta_id_to_index = {}
     index_to_meta_id = {}
-    if system.metastable_states:
-        for m in system.metastable_states:
+    state_metastables = [
+        m for m in (system.metastable_states or []) if m.get("macro_state_id") == state_id
+    ]
+    if state_metastables:
+        for m in state_metastables:
             mid = m.get("metastable_id")
             if mid is None:
                 continue
@@ -567,13 +562,14 @@ async def get_state_descriptors(
 
     # Shared frame selection (metastable filter + sampling) computed once
     labels_meta = None
-    if metastable_filter_ids or cluster_mode_final == "per_meta":
+    needs_meta_labels = bool(metastable_filter_ids) or cluster_mode_final == "per_meta" or bool(state_metastables)
+    if needs_meta_labels:
         labels_meta = feature_dict.get("metastable_labels")
         if labels_meta is None and state_meta.metastable_labels_file:
             label_path = project_store.resolve_path(project_id, system_id, state_meta.metastable_labels_file)
             if label_path.exists():
                 labels_meta = np.load(label_path)
-        if labels_meta is None:
+        if labels_meta is None and (metastable_filter_ids or cluster_mode_final == "per_meta"):
             raise HTTPException(status_code=400, detail="Metastable labels missing for this state.")
 
     first_arr = feature_dict[keys_to_use[0]]
@@ -676,6 +672,16 @@ async def get_state_descriptors(
         "angles": angles_payload,
         "cluster_mode": cluster_mode_final,
         "cluster_legend": cluster_legend,
+        "metastable_labels": labels_meta[sample_indices].astype(int).tolist() if labels_meta is not None else [],
+        "metastable_legend": [
+            {
+                "id": m.get("metastable_id"),
+                "index": m.get("metastable_index"),
+                "label": m.get("name") or m.get("default_name") or m.get("metastable_id"),
+            }
+            for m in state_metastables
+            if m.get("metastable_index") is not None
+        ],
         "metastable_filter_applied": bool(metastable_filter_ids),
     }
 
@@ -987,6 +993,8 @@ async def recompute_metastable(
 
     if not getattr(system_meta, "macro_locked", False):
         raise HTTPException(status_code=400, detail="Lock macro-states before running metastable analysis.")
+    if getattr(system_meta, "analysis_mode", None) == "macro":
+        raise HTTPException(status_code=400, detail="System is locked to macro-only analysis.")
     _ensure_not_metastable_locked(system_meta)
 
     try:
@@ -1021,6 +1029,70 @@ async def list_metastable_states(project_id: str, system_id: str):
         "metastable_states": system_meta.metastable_states or [],
         "model_dir": system_meta.metastable_model_dir,
     }
+
+
+@api_router.post(
+    "/projects/{project_id}/systems/{system_id}/metastable/clear",
+    summary="Clear metastable states, labels, and clusters",
+)
+async def clear_metastable_states(project_id: str, system_id: str):
+    try:
+        system_meta = project_store.get_system(project_id, system_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"System '{system_id}' not found.")
+
+    if getattr(system_meta, "metastable_locked", False):
+        raise HTTPException(status_code=400, detail="Unlock metastable states before clearing.")
+
+    dirs = project_store.ensure_directories(project_id, system_id)
+    system_dir = dirs["system_dir"]
+
+    for cluster in system_meta.metastable_clusters or []:
+        rel_path = cluster.get("path")
+        if not rel_path:
+            continue
+        abs_path = project_store.resolve_path(project_id, system_id, rel_path)
+        try:
+            abs_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    if system_meta.metastable_model_dir:
+        model_dir = project_store.resolve_path(project_id, system_id, system_meta.metastable_model_dir)
+        try:
+            shutil.rmtree(model_dir, ignore_errors=True)
+        except Exception:
+            pass
+
+    for state in system_meta.states.values():
+        if state.metastable_labels_file:
+            label_path = project_store.resolve_path(project_id, system_id, state.metastable_labels_file)
+            try:
+                label_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+            state.metastable_labels_file = None
+
+        if state.descriptor_file:
+            descriptor_path = project_store.resolve_path(project_id, system_id, state.descriptor_file)
+            if descriptor_path.exists():
+                try:
+                    npz = np.load(descriptor_path, allow_pickle=True)
+                    if "metastable_labels" in npz.files:
+                        data = {k: npz[k] for k in npz.files if k != "metastable_labels"}
+                        tmp_path = descriptor_path.with_suffix(".tmp.npz")
+                        np.savez_compressed(tmp_path, **data)
+                        tmp_path.replace(descriptor_path)
+                except Exception:
+                    pass
+
+    system_meta.metastable_states = []
+    system_meta.metastable_clusters = []
+    system_meta.metastable_model_dir = None
+    system_meta.metastable_locked = False
+    system_meta.analysis_mode = "macro"
+    project_store.save_system(system_meta)
+    return _serialize_system(system_meta)
 
 
 @api_router.post(
@@ -1064,6 +1136,7 @@ async def confirm_metastable_states(project_id: str, system_id: str):
         raise HTTPException(status_code=400, detail="Run metastable recompute before locking.")
 
     system_meta.metastable_locked = True
+    system_meta.analysis_mode = "metastable"
     project_store.save_system(system_meta)
     return _serialize_system(system_meta)
 
@@ -1508,46 +1581,6 @@ async def submit_static_job(
     params = payload.dict(exclude_none=True, exclude={"project_id", "system_id", "state_a_id", "state_b_id"})
     return submit_job(
         "static",
-        payload.project_id,
-        payload.system_id,
-        payload.state_a_id,
-        payload.state_b_id,
-        params,
-        task_queue,
-    )
-
-
-@api_router.post("/submit/dynamic", summary="Submit a Dynamic (Transfer Entropy) analysis")
-async def submit_dynamic_job(
-    payload: DynamicJobRequest,
-    task_queue: get_queue = Depends(),
-):
-    params = {"te_lag": payload.te_lag}
-    return submit_job(
-        "dynamic",
-        payload.project_id,
-        payload.system_id,
-        payload.state_a_id,
-        payload.state_b_id,
-        params,
-        task_queue,
-    )
-
-
-@api_router.post("/submit/qubo", summary="Submit a QUBO analysis")
-async def submit_qubo_job(
-    payload: QUBOJobRequest,
-    task_queue: get_queue = Depends(),
-):
-    params = payload.dict(exclude_none=True, exclude={"project_id", "system_id", "state_a_id", "state_b_id"})
-    # Clean up optional static reference to avoid passing empty strings
-    static_uuid = params.get("static_job_uuid")
-    if not static_uuid:
-        params.pop("static_job_uuid", None)
-    else:
-        params["static_job_uuid"] = static_uuid
-    return submit_job(
-        "qubo",
         payload.project_id,
         payload.system_id,
         payload.state_a_id,

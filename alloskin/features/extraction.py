@@ -203,7 +203,7 @@ class FeatureExtractor:
         """
         Extracts features for all defined residues on a given slice.
 
-        **MODIFIED**: This method now acts as a filter. It expects to be called
+        This method acts as a filter. It expects to be called
         AFTER the expensive `extract_features_for_residues` has been run. It
         selects the pre-computed features based on `self.residue_selections`.
 
@@ -220,8 +220,7 @@ class FeatureExtractor:
             print("  Warning: FeatureExtractor has no residue selections. Returning empty results.")
             return {}, 0
 
-        # --- This is the new, efficient "bulk" calculation ---
-        # OPTIMIZATION: Instead of selecting the whole protein, we build a
+        # Instead of selecting the whole protein, we build a
         # single selection string for only the residues we need.
         combined_selection_string = "protein and (" + " or ".join(f"({sel})" for sel in self.residue_selections.values()) + ")"
         

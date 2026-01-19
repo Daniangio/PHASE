@@ -1,8 +1,6 @@
 #
 # Dockerfile for the AllosKin Backend Service
-#
 # This uses a multi-stage build for efficiency.
-#
 # Build context: Root of the AllosKin directory
 #
 
@@ -55,10 +53,6 @@ COPY --from=builder /usr/local/bin/ /usr/local/bin/
 # Copy the backend app code
 COPY backend/ backend/
 
-# Copy configuration
-COPY config/ config/
-
-# *** FIX: Set WORKDIR to /app so 'backend.main' is importable ***
 # When WORKDIR is /app, the 'backend' folder is correctly seen as the 'backend' module.
 WORKDIR /app
 

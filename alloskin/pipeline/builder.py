@@ -300,12 +300,12 @@ class DatasetBuilder:
         inactive_slice: Optional[str] = None
     ) -> Tuple[FeatureDict, FeatureDict, Dict[str, str]]: # <-- MODIFIED
         """
-        Prepares data for Dynamic Analysis.
-        
+        Prepares per-state datasets from trajectories.
+
         --- MODIFIED ---
         Returns the selection mapping as the 3rd tuple item.
         """
-        print("\n--- Preparing DYNAMIC Analysis Dataset ---")
+        print("\n--- Preparing statewise analysis dataset ---")
 
         features_active, n_frames_active, \
         features_inactive, n_frames_inactive, \
@@ -321,7 +321,10 @@ class DatasetBuilder:
         final_features_active = {k: features_active[k] for k in common_keys}
         final_features_inactive = {k: features_inactive[k] for k in common_keys}
 
-        print(f"Dynamic datasets prepared. Active frames: {n_frames_active}, Inactive frames: {n_frames_inactive}. Common residues: {len(common_keys)}")
+        print(
+            f"Statewise datasets prepared. Active frames: {n_frames_active}, "
+            f"Inactive frames: {n_frames_inactive}. Common residues: {len(common_keys)}"
+        )
         
         # --- MODIFIED RETURN ---
         return final_features_active, final_features_inactive, mapping

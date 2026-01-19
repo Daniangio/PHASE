@@ -10,7 +10,6 @@ services:
       # but we re-state them here for clarity.
       - ./alloskin:/app/alloskin
       - ./backend:/app/backend
-      - ./config:/app/config
       - /scratch/docker/alloskin-data:/data/alloskin
 
   frontend:

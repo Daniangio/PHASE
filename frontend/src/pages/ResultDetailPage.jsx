@@ -42,11 +42,7 @@ export default function ResultDetailPage() {
   const systemRef = result.system_reference || {};
 
   const canVisualize =
-    result.residue_selections_mapping &&
-    ((result.analysis_type === 'static' && typeof result.results === 'object') ||
-      (result.analysis_type === 'qubo' &&
-        (result.results?.qubo_active?.solutions?.length > 0 ||
-          result.results?.qubo_inactive?.solutions?.length > 0)));
+    result.residue_selections_mapping && result.analysis_type === 'static' && typeof result.results === 'object';
   const canVisualizeSimulation =
     result.analysis_type === 'simulation' && Boolean(result.results?.marginals_plot);
 

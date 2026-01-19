@@ -173,7 +173,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--plm-lr", type=float, default=1e-2)
     ap.add_argument("--plm-lr-min", type=float, default=1e-3)
     ap.add_argument("--plm-lr-schedule", type=str, default="cosine", choices=["cosine", "none"])
-    ap.add_argument("--plm-l2", type=float, default=1e-3)
+    ap.add_argument("--plm-l2", type=float, default=1e-5)
     ap.add_argument("--plm-batch-size", type=int, default=512)
     ap.add_argument("--plm-progress-every", type=int, default=10)
 

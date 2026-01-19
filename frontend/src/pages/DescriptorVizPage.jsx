@@ -45,7 +45,7 @@ export default function DescriptorVizPage() {
     });
   }, []);
   const [maxPoints, setMaxPoints] = useState(2000);
-  const [selectedMetastables, setSelectedMetastables] = useState([]);
+  const [appliedStateQuery, setAppliedStateQuery] = useState('');
   const [selectedClusterId, setSelectedClusterId] = useState('');
   const [clusterMode, setClusterMode] = useState('merged');
   const [clusterLegend, setClusterLegend] = useState([]);
@@ -95,16 +95,40 @@ export default function DescriptorVizPage() {
     }
   }, [location.search]);
 
-  // Default-select metastable states for initially selected macros (if user hasn't chosen yet)
+  // Hydrate initial macro-state selection from query params.
   useEffect(() => {
-    if (!selectedStates.length || selectedMetastables.length || !metastableStates.length) return;
-    const metas = metastableStates
-      .filter((m) => selectedStates.includes(m.macro_state_id))
-      .map((m) => m.metastable_id);
-    if (metas.length) {
-      setSelectedMetastables(Array.from(new Set(metas)));
+    if (!system) return;
+    const params = new URLSearchParams(location.search || '');
+    const stateParam = params.getAll('state_id').filter(Boolean);
+    const stateIdsParam = params.get('state_ids');
+    const queryKey = [stateIdsParam || '', ...stateParam].join('|');
+    if (!stateParam.length && !stateIdsParam) return;
+    if (queryKey === appliedStateQuery) return;
+
+    const collected = [...stateParam];
+    if (stateIdsParam) {
+      if (stateIdsParam.trim().toLowerCase() === 'all') {
+        setSelectedStates(descriptorStates.map((s) => s.state_id));
+        setAppliedStateQuery(queryKey);
+        return;
+      }
+      stateIdsParam
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean)
+        .forEach((id) => collected.push(id));
     }
-  }, [metastableStates, selectedMetastables.length, selectedStates]);
+    if (collected.length) {
+      const valid = descriptorStates
+        .filter((s) => collected.includes(s.state_id))
+        .map((s) => s.state_id);
+      if (valid.length) {
+        setSelectedStates(valid);
+      }
+    }
+    setAppliedStateQuery(queryKey);
+  }, [appliedStateQuery, descriptorStates, location.search, system]);
+
 
   const residueKeys = useMemo(() => sortResidues(residueOptions), [residueOptions, sortResidues]);
 
@@ -146,6 +170,28 @@ export default function DescriptorVizPage() {
     (stateId) => descriptorStates.find((s) => s.state_id === stateId)?.name || stateId,
     [descriptorStates]
   );
+
+  const metastableLookupByState = useMemo(() => {
+    const mapping = {};
+    selectedStates.forEach((stateId) => {
+      const legend = (metaByState[stateId]?.metastable_legend || []).length
+        ? metaByState[stateId]?.metastable_legend || []
+        : metastableStates
+            .filter((m) => m.macro_state_id === stateId)
+            .map((m) => ({
+              id: m.metastable_id,
+              index: m.metastable_index,
+              label: m.name || m.default_name || m.metastable_id,
+            }));
+      const perState = {};
+      legend.forEach((entry) => {
+        if (entry.index === null || entry.index === undefined) return;
+        perState[entry.index] = entry.label || entry.id || `Metastable ${entry.index + 1}`;
+      });
+      mapping[stateId] = perState;
+    });
+    return mapping;
+  }, [metaByState, metastableStates, selectedStates]);
 
   const stateColors = useMemo(() => {
     const mapping = {};
@@ -192,34 +238,102 @@ export default function DescriptorVizPage() {
     return mapping;
   }, [residueKeys]);
 
-  const toggleState = (stateId) => {
-    const isSelected = selectedStates.includes(stateId);
-    const nextStates = isSelected
-      ? selectedStates.filter((id) => id !== stateId)
-      : [...selectedStates, stateId];
-    setSelectedStates(nextStates);
+  const buildGroupedTraces = useCallback(
+    (stateId, residueKey, data, axes) => {
+      if (!data) return [];
+      const xVals = data[axes.xKey] || [];
+      const yVals = data[axes.yKey] || [];
+      const zVals = axes.zKey ? data[axes.zKey] || [] : [];
+      if (!xVals.length || !yVals.length || (axes.zKey && !zVals.length)) return [];
 
-    // Macro-level metastable toggle: select/deselect all metastables belonging to this macro
-    const metasInMacro = metastableStates
-      .filter((m) => m.macro_state_id === stateId)
-      .map((m) => m.metastable_id);
-    if (metasInMacro.length) {
-      setSelectedMetastables((prev) => {
-        if (isSelected) {
-          // deselecting macro: drop its metastables
-          return prev.filter((id) => !metasInMacro.includes(id));
-        }
-        const merged = new Set([...prev, ...metasInMacro]);
-        return Array.from(merged);
+      const macroLabel = stateName(stateId);
+      const metaLabels = metaByState[stateId]?.metastable_labels || [];
+      const metaLookup = metastableLookupByState[stateId] || {};
+      const useMeta =
+        Array.isArray(metaLabels) &&
+        metaLabels.length === xVals.length &&
+        metaLabels.some((v) => Number.isFinite(v) && v >= 0);
+
+      const clusterLabels = data.cluster_labels;
+      const clusterColors =
+        clusterLabels && clusterLegend.length
+          ? clusterLabels.map((c) => clusterColorMap[c] || '#9ca3af')
+          : null;
+      const clusterHover =
+        clusterLabels && clusterLegend.length
+          ? clusterLabels.map((c) => (c >= 0 ? clusterLabelLookup[c] || `Cluster ${c}` : 'No cluster'))
+          : null;
+
+      const pick = (arr, indices) => indices.map((idx) => arr[idx]);
+      const groups = {};
+      if (useMeta) {
+        metaLabels.forEach((label, idx) => {
+          const key = Number.isFinite(label) ? label : -1;
+          if (!groups[key]) groups[key] = [];
+          groups[key].push(idx);
+        });
+      } else {
+        groups[macroLabel] = Array.from({ length: xVals.length }, (_, i) => i);
+      }
+
+      const groupKeys = useMeta
+        ? Object.keys(groups)
+            .map((k) => Number(k))
+            .sort((a, b) => (a === -1 ? 1 : b === -1 ? -1 : a - b))
+        : Object.keys(groups);
+
+      return groupKeys.map((groupKey, idx) => {
+        const indices = groups[groupKey];
+        const metaLabel =
+          useMeta && groupKey !== -1
+            ? metaLookup[groupKey] || `Metastable ${Number(groupKey) + 1}`
+            : useMeta
+            ? 'Outliers'
+            : macroLabel;
+        const traceName = useMeta ? metaLabel : macroLabel;
+        const legendgrouptitle = idx === 0 ? { text: macroLabel } : undefined;
+        const metaHover = useMeta ? `<br>Metastable: ${metaLabel}` : '';
+
+        return {
+          type: axes.zKey ? 'scatter3d' : 'scattergl',
+          mode: 'markers',
+          x: pick(xVals, indices),
+          y: pick(yVals, indices),
+          ...(axes.zKey ? { z: pick(zVals, indices) } : {}),
+          name: traceName,
+          legendgroup: macroLabel,
+          legendgrouptitle,
+          marker: {
+            size: axes.zKey ? 3 : 4,
+            opacity: axes.zKey ? 0.75 : 0.7,
+            color: clusterColors ? pick(clusterColors, indices) : stateColors[stateId],
+            symbol: residueSymbols[residueKey] || 'circle',
+          },
+          customdata: clusterHover ? pick(clusterHover, indices) : null,
+          hovertemplate:
+            `Residue: ${residueLabel(residueKey)}<br>State: ${macroLabel}` +
+            metaHover +
+            (axes.zKey
+              ? '<br>Phi: %{x:.2f}°<br>Psi: %{y:.2f}°<br>Chi1: %{z:.2f}°'
+              : `<br>${axes.xKey.toUpperCase()}: %{x:.2f}°<br>${axes.yKey.toUpperCase()}: %{y:.2f}°`) +
+            (clusterHover ? '<br>Cluster: %{customdata}' : '') +
+            '<extra></extra>',
+        };
       });
-    }
-  };
+    },
+    [
+      clusterColorMap,
+      clusterLabelLookup,
+      clusterLegend,
+      metaByState,
+      metastableLookupByState,
+      residueLabel,
+      residueSymbols,
+      stateColors,
+      stateName,
+    ]
+  );
 
-  const toggleMetastable = (metaId) => {
-    setSelectedMetastables((prev) =>
-      prev.includes(metaId) ? prev.filter((id) => id !== metaId) : [...prev, metaId]
-    );
-  };
 
   const selectResidue = (key) => {
     setSelectedResidue(key);
@@ -274,9 +388,6 @@ export default function DescriptorVizPage() {
     try {
       const bootstrapOnly = !selectedResidue;
       const qs = { max_points: bootstrapOnly ? Math.min(maxPoints, 500) : maxPoints };
-      if (selectedMetastables.length) {
-        qs.metastable_ids = selectedMetastables;
-      }
       if (selectedClusterId) {
         qs.cluster_id = selectedClusterId;
         qs.cluster_mode = clusterMode;
@@ -306,6 +417,8 @@ export default function DescriptorVizPage() {
           sample_stride: data.sample_stride,
           cluster_legend: data.cluster_legend || [],
           cluster_mode: data.cluster_mode,
+          metastable_labels: data.metastable_labels || [],
+          metastable_legend: data.metastable_legend || [],
         };
         (data.residue_keys || []).forEach((key) => unionResidues.add(key));
         // Cache labels from this response to keep names informative in the list
@@ -360,7 +473,6 @@ export default function DescriptorVizPage() {
     maxPoints,
     projectId,
     selectedClusterId,
-    selectedMetastables,
     selectedResidue,
     selectedStates,
     systemId,
@@ -375,7 +487,7 @@ export default function DescriptorVizPage() {
       setSelectedResidue('');
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedStates, selectedMetastables, selectedClusterId, clusterMode, selectedResidue]);
+  }, [selectedStates, selectedClusterId, clusterMode, selectedResidue]);
 
   const traces3d = useMemo(() => {
     const traces = [];
@@ -385,38 +497,9 @@ export default function DescriptorVizPage() {
       residuesToPlot.forEach((key) => {
         const data = perState[key];
         if (!data) return;
-        const clusterLabels = data.cluster_labels;
-        const clusterColors =
-          clusterLabels && clusterLegend.length
-            ? clusterLabels.map((c) => clusterColorMap[c] || '#9ca3af')
-            : null;
-        const clusterHover =
-          clusterLabels && clusterLabels.length
-            ? clusterLabels.map((c) =>
-                c >= 0 ? clusterLabelLookup[c] || `Cluster ${c}` : 'No cluster'
-              )
-            : null;
-        traces.push({
-          type: 'scatter3d',
-          mode: 'markers',
-          x: data.phi,
-          y: data.psi,
-          z: data.chi1,
-          name: `${residueLabel(key)} — ${stateName(stateId)}`,
-          legendgroup: residueLabel(key),
-          marker: {
-            size: 3,
-            opacity: 0.75,
-            color: clusterColors || stateColors[stateId],
-            symbol: residueSymbols[key] || 'circle',
-          },
-          customdata: clusterHover,
-          hovertemplate:
-            `Residue: ${residueLabel(key)}<br>State: ${stateName(stateId)}` +
-            '<br>Phi: %{x:.2f}°<br>Psi: %{y:.2f}°<br>Chi1: %{z:.2f}°' +
-            (clusterHover ? '<br>Cluster: %{customdata}' : '') +
-            '<extra></extra>',
-        });
+        traces.push(
+          ...buildGroupedTraces(stateId, key, data, { xKey: 'phi', yKey: 'psi', zKey: 'chi1' })
+        );
       });
     });
     // Add legend for clusters if present
@@ -436,18 +519,7 @@ export default function DescriptorVizPage() {
       });
     }
     return traces;
-  }, [
-    anglesByState,
-    clusterColorMap,
-    clusterLabelLookup,
-    clusterLegend,
-    residueLabel,
-    residueSymbols,
-    selectedResidue,
-    selectedStates,
-    stateColors,
-    stateName,
-  ]);
+  }, [anglesByState, buildGroupedTraces, clusterColorMap, clusterLegend, selectedResidue, selectedStates]);
 
   const make2DTraces = useCallback(
     (axisX, axisY) =>
@@ -458,53 +530,12 @@ export default function DescriptorVizPage() {
           return residuesToPlot.map((key) => {
             const data = perState[key];
             if (!data) return null;
-            const clusterLabels = data.cluster_labels;
-            const clusterColors =
-              clusterLabels && clusterLegend.length
-                ? clusterLabels.map((c) => clusterColorMap[c] || '#9ca3af')
-                : null;
-            const clusterHover =
-              clusterLabels && clusterLabels.length
-                ? clusterLabels.map((c) =>
-                    c >= 0 ? clusterLabelLookup[c] || `Cluster ${c}` : 'No cluster'
-                  )
-                : null;
-            return {
-              type: 'scattergl',
-              mode: 'markers',
-              x: data[axisX],
-              y: data[axisY],
-              name: `${residueLabel(key)} — ${stateName(stateId)}`,
-              legendgroup: residueLabel(key),
-              marker: {
-                size: 4,
-                opacity: 0.7,
-                color: clusterColors || stateColors[stateId],
-                symbol: residueSymbols[key] || 'circle',
-              },
-              customdata: clusterHover,
-              hovertemplate:
-                `Residue: ${residueLabel(key)}<br>State: ${stateName(stateId)}` +
-                `<br>${axisX.toUpperCase()}: %{x:.2f}°<br>${axisY.toUpperCase()}: %{y:.2f}°` +
-                (clusterHover ? '<br>Cluster: %{customdata}' : '') +
-                '<extra></extra>',
-            };
+            return buildGroupedTraces(stateId, key, data, { xKey: axisX, yKey: axisY });
           });
         })
-        .flat()
+        .flat(2)
         .filter(Boolean),
-    [
-      anglesByState,
-      residueLabel,
-      residueSymbols,
-      selectedResidue,
-      selectedStates,
-      stateColors,
-      stateName,
-      clusterLegend,
-      clusterColorMap,
-      clusterLabelLookup,
-    ]
+    [anglesByState, buildGroupedTraces, selectedResidue, selectedStates]
   );
 
   const hasAngles = useMemo(
@@ -566,27 +597,8 @@ export default function DescriptorVizPage() {
       {descriptorStates.length === 0 ? (
         <ErrorMessage message="No descriptor-ready states. Upload trajectories and build descriptors first." />
       ) : (
-        <div className="bg-gray-800 border border-gray-700 rounded-lg p-4 space-y-3">
-          <div className="grid md:grid-cols-4 gap-3">
-            <div className="md:col-span-2">
-              <label className="block text-xs text-gray-400 mb-1">States</label>
-              <div className="grid sm:grid-cols-2 gap-2 max-h-28 overflow-y-auto border border-gray-700 rounded-md p-2 bg-gray-900">
-                {descriptorStates.map((state) => (
-                  <label key={state.state_id} className="flex items-center space-x-2 text-sm text-gray-200">
-                    <input
-                      type="checkbox"
-                      checked={selectedStates.includes(state.state_id)}
-                      onChange={() => toggleState(state.state_id)}
-                      className="accent-cyan-500"
-                    />
-                    <span>{state.name}</span>
-                  </label>
-                ))}
-              </div>
-              <p className="text-[11px] text-gray-500 mt-1">
-                Select one or more states to compare residue distributions.
-              </p>
-            </div>
+        <div className="lg:grid lg:grid-cols-[minmax(220px,20%)_1fr] gap-4">
+          <aside className="bg-gray-800 border border-gray-700 rounded-lg p-4 space-y-4">
             <div>
               <label className="block text-xs text-gray-400 mb-1">Max points per residue</label>
               <input
@@ -598,42 +610,14 @@ export default function DescriptorVizPage() {
                 className="w-full bg-gray-900 border border-gray-700 rounded-md px-3 py-2 text-white"
               />
             </div>
-            <div className="flex items-end">
-              <button
-                onClick={loadAngles}
-                disabled={loadingAngles || !selectedStates.length}
-                className="w-full bg-cyan-600 hover:bg-cyan-500 text-white font-semibold py-2 rounded-md disabled:opacity-50"
-              >
-                {loadingAngles ? 'Loading…' : selectedStates.length ? 'Refresh data' : 'Select states'}
-              </button>
-            </div>
-          </div>
-
-          <div className="grid md:grid-cols-3 gap-3">
-            <div className="md:col-span-2 space-y-2">
-              <label className="block text-xs text-gray-400 mb-1">Metastable states (filter)</label>
-              {metastableStates.length === 0 ? (
-                <p className="text-[11px] text-gray-500">No metastable states stored.</p>
-              ) : (
-                <div className="grid sm:grid-cols-2 gap-2 max-h-24 overflow-y-auto border border-gray-700 rounded-md p-2 bg-gray-900">
-                  {metastableStates.map((m) => (
-                    <label key={m.metastable_id} className="flex items-center space-x-2 text-sm text-gray-200">
-                      <input
-                        type="checkbox"
-                        checked={selectedMetastables.includes(m.metastable_id)}
-                        onChange={() => toggleMetastable(m.metastable_id)}
-                        className="accent-emerald-400"
-                      />
-                      <span>{m.name || m.default_name || m.metastable_id}</span>
-                    </label>
-                  ))}
-                </div>
-              )}
-              <p className="text-[11px] text-gray-500 mt-1">
-                Filters are applied only on metastable states. Toggle states above to include their metastables, or pick individual ones here.
-              </p>
-            </div>
-            <div className="space-y-2">
+            <button
+              onClick={loadAngles}
+              disabled={loadingAngles || !selectedStates.length}
+              className="w-full bg-cyan-600 hover:bg-cyan-500 text-white font-semibold py-2 rounded-md disabled:opacity-50"
+            >
+              {loadingAngles ? 'Loading…' : 'Refresh data'}
+            </button>
+            <div>
               <label className="block text-xs text-gray-400 mb-1">Cluster NPZ (optional coloring)</label>
               <select
                 value={selectedClusterId}
@@ -648,7 +632,7 @@ export default function DescriptorVizPage() {
                 ))}
               </select>
               {selectedClusterId && (
-                <div className="flex items-center space-x-3 text-xs text-gray-300">
+                <div className="mt-2 flex items-center space-x-3 text-xs text-gray-300">
                   <label className="flex items-center space-x-1">
                     <input
                       type="radio"
@@ -674,106 +658,118 @@ export default function DescriptorVizPage() {
                 </div>
               )}
               {clusterLegend.length > 0 && (
-                <p className="text-[11px] text-gray-500">
+                <p className="text-[11px] text-gray-500 mt-2">
                   Clusters loaded: {clusterLegend.map((c) => c.label).join(' • ')}
                 </p>
               )}
             </div>
-          </div>
-
-          <div className="mt-2">
-            <label className="block text-xs text-gray-400 mb-1">Choose residue (single selection)</label>
-            <input
-              type="text"
-              value={residueFilter}
-              onChange={(e) => setResidueFilter(e.target.value)}
-              className="w-full bg-gray-900 border border-gray-700 rounded-md px-3 py-2 text-white"
-              placeholder="Search residue keys"
-            />
-          </div>
-
-          <div className="grid sm:grid-cols-2 md:grid-cols-10 gap-2 max-h-48 overflow-y-auto border border-gray-700 rounded-md p-2 bg-gray-900">
-            {filteredResidues.length === 0 && (
-              <p className="text-sm text-gray-500 col-span-full">No residues match this filter.</p>
-            )}
-            {filteredResidues.map((key) => (
-              <label key={key} className="flex items-center space-x-2 text-sm text-gray-200">
-                <input
-                  type="radio"
-                  name="residue-select"
-                  checked={selectedResidue === key}
-                  onChange={() => selectResidue(key)}
-                  className="accent-cyan-500"
-                />
-                <span>{residueLabel(key)}</span>
-              </label>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {anglesError && <ErrorMessage message={anglesError} />}
-      {loadingAngles && <Loader message="Loading angles..." />}
-
-      {!loadingAngles && !hasAngles && (
-        <p className="text-sm text-gray-400">
-          {selectedStates.length
-            ? 'Pick a residue to load and color its angles.'
-            : 'Select at least one state to load descriptor data.'}
-        </p>
-      )}
-
-      {hasAngles && (
-        <div className="space-y-4">
-          <div className="bg-gray-800 border border-gray-700 rounded-lg p-3">
-            <Plot
-              data={traces3d}
-              layout={{
-                height: 500,
-                paper_bgcolor: '#111827',
-                plot_bgcolor: '#111827',
-                font: { color: '#e5e7eb' },
-                scene: {
-                  xaxis: { title: 'Phi (°)', range: [-180, 180] },
-                  yaxis: { title: 'Psi (°)', range: [-180, 180] },
-                  zaxis: { title: 'Chi1 (°)', range: [-180, 180] },
-                  aspectmode: 'cube',
-                },
-                margin: { l: 0, r: 0, t: 10, b: 0 },
-                legend: { bgcolor: 'rgba(0,0,0,0)' },
-              }}
-              useResizeHandler
-              style={{ width: '100%', height: '100%' }}
-              config={{ displaylogo: false, responsive: true }}
-            />
-          </div>
-
-          <div className="grid md:grid-cols-3 gap-3">
-            {[
-              { x: 'phi', y: 'psi', title: 'Phi vs Psi' },
-              { x: 'phi', y: 'chi1', title: 'Phi vs Chi1' },
-              { x: 'psi', y: 'chi1', title: 'Psi vs Chi1' },
-            ].map((axes) => (
-              <div key={axes.title} className="bg-gray-800 border border-gray-700 rounded-lg p-3">
-                <Plot
-                  data={make2DTraces(axes.x, axes.y)}
-                  layout={{
-                    height: 350,
-                    paper_bgcolor: '#111827',
-                    plot_bgcolor: '#111827',
-                    font: { color: '#e5e7eb' },
-                    margin: { l: 40, r: 10, t: 30, b: 40 },
-                  xaxis: { title: `${axes.x.toUpperCase()} (°)`, range: [-180, 180] },
-                  yaxis: { title: `${axes.y.toUpperCase()} (°)`, range: [-180, 180] },
-                    legend: { bgcolor: 'rgba(0,0,0,0)' },
-                  }}
-                  useResizeHandler
-                  style={{ width: '100%', height: '100%' }}
-                  config={{ displaylogo: false, responsive: true }}
-                />
+            <div>
+              <label className="block text-xs text-gray-400 mb-1">Filter residues</label>
+              <input
+                type="text"
+                value={residueFilter}
+                onChange={(e) => setResidueFilter(e.target.value)}
+                className="w-full bg-gray-900 border border-gray-700 rounded-md px-3 py-2 text-white"
+                placeholder="Search residue keys"
+              />
+            </div>
+            <div>
+              <p className="text-xs text-gray-400 mb-2">Residues</p>
+              <div className="space-y-2 max-h-80 overflow-y-auto border border-gray-700 rounded-md p-2 bg-gray-900">
+                {filteredResidues.length === 0 && (
+                  <p className="text-sm text-gray-500">No residues match this filter.</p>
+                )}
+                {filteredResidues.map((key) => (
+                  <label key={key} className="flex items-center space-x-2 text-sm text-gray-200">
+                    <input
+                      type="radio"
+                      name="residue-select"
+                      checked={selectedResidue === key}
+                      onChange={() => selectResidue(key)}
+                      className="accent-cyan-500"
+                    />
+                    <span>{residueLabel(key)}</span>
+                  </label>
+                ))}
               </div>
-            ))}
-          </div>
+            </div>
+          </aside>
+
+          <section className="space-y-4">
+            <div className="bg-gray-800 border border-gray-700 rounded-lg p-3 flex flex-wrap items-center justify-between gap-4">
+              <div>
+                <p className="text-xs uppercase tracking-[0.2em] text-gray-500">Legend</p>
+                <p className="text-[11px] text-gray-400 mt-1">
+                  Click legend items to show/hide individual metastables; macro-states are grouped in the legend.
+                </p>
+              </div>
+            </div>
+
+            {anglesError && <ErrorMessage message={anglesError} />}
+            {loadingAngles && <Loader message="Loading angles..." />}
+
+            {!loadingAngles && !hasAngles && (
+              <p className="text-sm text-gray-400">
+                {selectedStates.length
+                  ? 'Pick a residue to load and color its angles.'
+                  : 'Select at least one state to load descriptor data.'}
+              </p>
+            )}
+
+            {hasAngles && (
+              <div className="space-y-4">
+                <div className="bg-gray-800 border border-gray-700 rounded-lg p-3">
+                  <Plot
+                    data={traces3d}
+                    layout={{
+                      height: 500,
+                      paper_bgcolor: '#111827',
+                      plot_bgcolor: '#111827',
+                      font: { color: '#e5e7eb' },
+                      scene: {
+                        xaxis: { title: 'Phi (°)', range: [-180, 180] },
+                        yaxis: { title: 'Psi (°)', range: [-180, 180] },
+                        zaxis: { title: 'Chi1 (°)', range: [-180, 180] },
+                        aspectmode: 'cube',
+                      },
+                      margin: { l: 0, r: 0, t: 10, b: 0 },
+                      legend: { bgcolor: 'rgba(0,0,0,0)', groupclick: 'toggleitem', itemdoubleclick: 'toggleothers' },
+                    }}
+                    useResizeHandler
+                    style={{ width: '100%', height: '100%' }}
+                    config={{ displaylogo: false, responsive: true }}
+                  />
+                </div>
+
+                <div className="grid md:grid-cols-3 gap-3">
+                  {[
+                    { x: 'phi', y: 'psi', title: 'Phi vs Psi' },
+                    { x: 'phi', y: 'chi1', title: 'Phi vs Chi1' },
+                    { x: 'psi', y: 'chi1', title: 'Psi vs Chi1' },
+                  ].map((axes) => (
+                    <div key={axes.title} className="bg-gray-800 border border-gray-700 rounded-lg p-3">
+                      <Plot
+                        data={make2DTraces(axes.x, axes.y)}
+                        layout={{
+                          height: 350,
+                          paper_bgcolor: '#111827',
+                          plot_bgcolor: '#111827',
+                          font: { color: '#e5e7eb' },
+                          margin: { l: 40, r: 10, t: 30, b: 40 },
+                          xaxis: { title: `${axes.x.toUpperCase()} (°)`, range: [-180, 180] },
+                          yaxis: { title: `${axes.y.toUpperCase()} (°)`, range: [-180, 180] },
+                          legend: { bgcolor: 'rgba(0,0,0,0)', groupclick: 'toggleitem', itemdoubleclick: 'toggleothers' },
+                        }}
+                        useResizeHandler
+                        style={{ width: '100%', height: '100%' }}
+                        config={{ displaylogo: false, responsive: true }}
+                      />
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </section>
         </div>
       )}
     </div>

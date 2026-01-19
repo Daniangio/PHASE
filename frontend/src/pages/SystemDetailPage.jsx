@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import Loader from '../components/common/Loader';
 import ErrorMessage from '../components/common/ErrorMessage';
@@ -15,13 +15,14 @@ import {
   downloadMetastableClusters,
   confirmMacroStates,
   confirmMetastableStates,
+  clearMetastableStates,
   downloadSavedCluster,
   deleteSavedCluster,
 } from '../api/projects';
 import { submitStaticJob, submitSimulationJob } from '../api/jobs';
 import StaticAnalysisForm from '../components/analysis/StaticAnalysisForm';
 import SimulationAnalysisForm from '../components/analysis/SimulationAnalysisForm';
-import { Download } from 'lucide-react';
+import { Download, Eye, Info, X } from 'lucide-react';
 
 export default function SystemDetailPage() {
   const { projectId, systemId } = useParams();
@@ -68,6 +69,10 @@ export default function SystemDetailPage() {
   const [densityZMode, setDensityZMode] = useState('auto');
   const [densityZValue, setDensityZValue] = useState(1.65);
   const [densityMaxk, setDensityMaxk] = useState(100);
+  const [metaChoice, setMetaChoice] = useState(null);
+  const [showMetastableInfo, setShowMetastableInfo] = useState(false);
+  const [docId, setDocId] = useState('metastable_states');
+  const [macroChoiceLoading, setMacroChoiceLoading] = useState(false);
   const navigate = useNavigate();
 
   useEffect(() => {
@@ -102,7 +107,23 @@ export default function SystemDetailPage() {
   const metastableStates = useMemo(() => metastable.states || [], [metastable.states]);
   const macroLocked = system?.macro_locked;
   const metastableLocked = system?.metastable_locked;
+  const analysisMode = system?.analysis_mode || null;
   const clusterRuns = useMemo(() => system?.metastable_clusters || [], [system]);
+  const descriptorsReady = useMemo(
+    () => states.length > 0 && states.every((state) => state.descriptor_file),
+    [states]
+  );
+  const macroReady = Boolean(macroLocked && descriptorsReady);
+  const showSidebar = macroReady;
+  const effectiveChoice = analysisMode || metaChoice;
+  const analysisUnlocked = macroReady && (metastableLocked || effectiveChoice === 'macro');
+  const showPottsPanel = metastableLocked;
+  const analysisNote = metastableLocked
+    ? 'Static needs two descriptor-ready states; Potts uses saved cluster NPZ files.'
+    : 'Static needs two descriptor-ready states. Potts requires metastable discovery and saved cluster NPZ files.';
+  const showMacroChoicePanel =
+    macroReady && !metastableLocked && effectiveChoice !== 'macro' && analysisMode !== 'metastable';
+  const showMetastablePanel = macroReady && effectiveChoice !== 'macro';
 
   useEffect(() => {
     setSelectedMetastableIds((prev) =>
@@ -115,6 +136,25 @@ export default function SystemDetailPage() {
     );
   }, [metastableStates]);
 
+  useEffect(() => {
+    if (!macroReady) {
+      setMetaChoice(null);
+      return;
+    }
+    if (analysisMode) {
+      setMetaChoice(analysisMode);
+      return;
+    }
+    if (!metaChoice && metastableStates.length > 0) {
+      setMetaChoice('metastable');
+    }
+  }, [analysisMode, macroReady, metaChoice, metastableStates.length]);
+
+  const openDoc = (nextDocId = 'metastable_states') => {
+    setDocId(nextDocId);
+    setShowMetastableInfo(true);
+  };
+
   const analysisStateOptions = useMemo(() => {
     const macroOpts = descriptorStates.map((s) => ({
       kind: 'macro',
@@ -122,6 +162,9 @@ export default function SystemDetailPage() {
       macroId: s.state_id,
       label: s.name,
     }));
+    if (!metastableLocked) {
+      return macroOpts;
+    }
     const metaOpts = metastableStates
       .filter((m) => m.macro_state_id)
       .map((m) => ({
@@ -131,7 +174,7 @@ export default function SystemDetailPage() {
         label: `[Meta] ${m.name || m.default_name || m.metastable_id} (${m.macro_state})`,
       }));
     return [...macroOpts, ...metaOpts];
-  }, [descriptorStates, metastableStates]);
+  }, [descriptorStates, metastableStates, metastableLocked]);
 
   useEffect(() => {
     const macroOpts = analysisStateOptions.filter((o) => o.kind === 'macro');
@@ -349,6 +392,21 @@ export default function SystemDetailPage() {
     }
   };
 
+  const handleConfirmMacroOnly = async () => {
+    setMetaActionError(null);
+    setMacroChoiceLoading(true);
+    try {
+      await clearMetastableStates(projectId, systemId);
+      setMetaChoice('macro');
+      await refreshSystem();
+      await loadMetastable();
+    } catch (err) {
+      setMetaActionError(err.message);
+    } finally {
+      setMacroChoiceLoading(false);
+    }
+  };
+
   const toggleMetastableSelection = (metastableId) => {
     setClusterError(null);
     setSelectedMetastableIds((prev) =>
@@ -439,7 +497,98 @@ export default function SystemDetailPage() {
         <p className="text-gray-400 text-sm">{system.description || 'No description provided.'}</p>
       </div>
 
-      {macroLocked && (
+      <div className={showSidebar ? 'lg:grid lg:grid-cols-[260px_1fr] gap-6' : ''}>
+        {showSidebar && (
+          <aside className="bg-gray-800 border border-gray-700 rounded-lg p-4 space-y-4 lg:sticky lg:top-6 h-fit">
+            <div>
+              <p className="text-xs uppercase tracking-[0.2em] text-gray-500">System state</p>
+              <h2 className="text-base font-semibold text-white mt-2">Macro-states</h2>
+              <p className="text-xs text-gray-400">
+                {metastableLocked ? 'Metastable locked' : 'Metastable pending'}
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => navigate(`/projects/${projectId}/systems/${systemId}/descriptors/visualize`)}
+              className="w-full text-xs px-3 py-2 rounded-md border border-cyan-500 text-cyan-300 hover:bg-cyan-500/10 inline-flex items-center justify-center gap-2"
+            >
+              <Eye className="h-4 w-4" />
+              Visualize descriptors
+            </button>
+            <div className="space-y-2">
+              {states.map((state) => {
+                const metaForState = metastableStates.filter((m) => m.macro_state_id === state.state_id);
+                return (
+                  <div key={state.state_id} className="rounded-md border border-gray-700 bg-gray-900/60 px-3 py-2">
+                    {metastableLocked && metaForState.length > 0 ? (
+                      <details className="group">
+                        <summary className="flex items-center justify-between cursor-pointer text-sm text-gray-200">
+                          <span className="flex items-center gap-2">
+                            {state.name}
+                            <button
+                              type="button"
+                              onClick={(event) => {
+                                event.preventDefault();
+                                event.stopPropagation();
+                                navigate(
+                                  `/projects/${projectId}/systems/${systemId}/descriptors/visualize?state_id=${encodeURIComponent(
+                                    state.state_id
+                                  )}`
+                                );
+                              }}
+                              className="text-gray-400 hover:text-cyan-300"
+                              aria-label={`Visualize ${state.name}`}
+                            >
+                              <Eye className="h-4 w-4" />
+                            </button>
+                          </span>
+                          <span className="text-xs text-gray-400">{metaForState.length} meta</span>
+                        </summary>
+                        <div className="mt-2 space-y-1 text-xs text-gray-300">
+                          {metaForState.map((m) => (
+                            <div key={m.metastable_id} className="flex justify-between">
+                              <span>{m.name || m.default_name || m.metastable_id}</span>
+                              <span className="text-gray-500">#{m.metastable_index}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </details>
+                    ) : (
+                      <div className="flex items-center justify-between text-sm text-gray-200">
+                        <span className="flex items-center gap-2">
+                          {state.name}
+                          <button
+                            type="button"
+                            onClick={() =>
+                              navigate(
+                                `/projects/${projectId}/systems/${systemId}/descriptors/visualize?state_id=${encodeURIComponent(
+                                  state.state_id
+                                )}`
+                              )
+                            }
+                            className="text-gray-400 hover:text-cyan-300"
+                            aria-label={`Visualize ${state.name}`}
+                          >
+                            <Eye className="h-4 w-4" />
+                          </button>
+                        </span>
+                        <span className="text-xs text-gray-500">
+                          {state.descriptor_file ? 'Descriptors ready' : 'Descriptors missing'}
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+              {!metastableLocked && (
+                <p className="text-xs text-gray-500">Confirm how to proceed to unlock clustering and analysis.</p>
+              )}
+            </div>
+          </aside>
+        )}
+
+        <div className="space-y-8">
+      {macroLocked && !showSidebar && (
         <section className="bg-gray-800 border border-gray-700 rounded-lg p-4 space-y-3">
           <div className="flex items-center justify-between">
             <h2 className="text-lg font-semibold text-white">System Snapshot</h2>
@@ -501,7 +650,7 @@ export default function SystemDetailPage() {
               <p className="text-xs text-gray-400">Status: {system.status}</p>
               <button
                 onClick={handleConfirmMacro}
-                disabled={states.length === 0}
+                disabled={states.length === 0 || !descriptorsReady}
                 className="text-xs px-3 py-1 rounded-md border border-emerald-500 text-emerald-300 hover:bg-emerald-500/10 disabled:opacity-50"
               >
                 Confirm states
@@ -511,6 +660,11 @@ export default function SystemDetailPage() {
           {downloadError && <ErrorMessage message={downloadError} />}
           {actionError && <ErrorMessage message={actionError} />}
           {actionMessage && <p className="text-sm text-emerald-400">{actionMessage}</p>}
+          {!descriptorsReady && states.length > 0 && (
+            <p className="text-xs text-amber-300">
+              Upload trajectories and build descriptors for every state before confirming.
+            </p>
+          )}
           <div className="grid md:grid-cols-3 gap-4">
             <div className="md:col-span-2 grid sm:grid-cols-2 gap-3">
               {states.length === 0 && <p className="text-sm text-gray-400">No states yet.</p>}
@@ -533,10 +687,55 @@ export default function SystemDetailPage() {
         </section>
       )}
 
-      {macroLocked && (
+      {showMacroChoicePanel && (
+        <section className="bg-gray-800 border border-gray-700 rounded-lg p-4 space-y-4">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <h2 className="text-lg font-semibold text-white">Use macro-states only (optional)</h2>
+              <p className="text-sm text-gray-400 mt-1">
+                Your macro-states are confirmed. You can proceed with static analysis using only macro-states, or run
+                the metastable algorithm manually below.
+              </p>
+            </div>
+            <InfoTooltip
+              ariaLabel="Metastable algorithm info"
+              text="Metastable discovery uses per-residue dihedral descriptors, TICA projection, and k-means clustering."
+              onClick={() => openDoc('metastable_states')}
+            />
+          </div>
+          <div className="rounded-lg border border-gray-700 bg-gray-900/60 p-4 space-y-3">
+            <p className="text-xs text-gray-400">
+              If you prefer to skip metastable discovery, confirm macro-only. Any existing metastable results will be
+              discarded.
+            </p>
+            <button
+              type="button"
+              onClick={handleConfirmMacroOnly}
+              disabled={macroChoiceLoading || metaChoice === 'macro'}
+              className="text-xs px-3 py-2 rounded-md border border-emerald-500 text-emerald-300 hover:bg-emerald-500/10 disabled:opacity-60"
+            >
+              {macroChoiceLoading
+                ? 'Confirming…'
+                : metaChoice === 'macro'
+                ? 'Macro-only selected'
+                : 'Use macro-states only'}
+            </button>
+            {metaActionError && <ErrorMessage message={metaActionError} />}
+          </div>
+        </section>
+      )}
+
+      {showMetastablePanel && (
         <section className="bg-gray-800 border border-gray-700 rounded-lg p-4 space-y-4">
           <div className="flex items-center justify-between">
-            <h2 className="text-lg font-semibold text-white">Metastable States (VAMP/TICA)</h2>
+            <div className="flex items-center gap-2">
+              <h2 className="text-lg font-semibold text-white">Metastable States (TICA)</h2>
+              <InfoTooltip
+                ariaLabel="Metastable states info"
+                text="Open detailed documentation for the metastable pipeline and related methods."
+                onClick={() => openDoc('metastable_states')}
+              />
+            </div>
             <div className="flex items-center space-x-2">
               {!metastableLocked && (
                 <button
@@ -574,15 +773,48 @@ export default function SystemDetailPage() {
             <div className="bg-gray-900 border border-gray-700 rounded-md p-3 space-y-3 text-sm">
               <div className="grid md:grid-cols-3 gap-3">
                 {[
-                  { key: 'n_microstates', label: 'Microstates (k-means)', min: 2 },
-                  { key: 'k_meta_min', label: 'Metastable min k', min: 1 },
-                  { key: 'k_meta_max', label: 'Metastable max k', min: 1 },
-                  { key: 'tica_lag_frames', label: 'TICA lag (frames)', min: 1 },
-                  { key: 'tica_dim', label: 'TICA dims', min: 1 },
-                  { key: 'random_state', label: 'Random seed', min: 0 },
+                  {
+                    key: 'n_microstates',
+                    label: 'Microstates (k-means)',
+                    min: 2,
+                    info: 'Number of k-means clusters in TICA space before coarse-graining.',
+                  },
+                  {
+                    key: 'k_meta_min',
+                    label: 'Metastable min k',
+                    min: 1,
+                    info: 'Minimum metastable state count to test via spectral gap.',
+                  },
+                  {
+                    key: 'k_meta_max',
+                    label: 'Metastable max k',
+                    min: 1,
+                    info: 'Maximum metastable state count to test via spectral gap.',
+                  },
+                  {
+                    key: 'tica_lag_frames',
+                    label: 'TICA lag (frames)',
+                    min: 1,
+                    info: 'Lag time in frames for TICA projection.',
+                  },
+                  {
+                    key: 'tica_dim',
+                    label: 'TICA dims',
+                    min: 1,
+                    info: 'Number of TICA components retained for clustering.',
+                  },
+                  {
+                    key: 'random_state',
+                    label: 'Random seed',
+                    min: 0,
+                    info: 'Seed for k-means and MSM initialization.',
+                  },
                 ].map((field) => (
                   <label key={field.key} className="space-y-1">
-                    <span className="block text-xs text-gray-400">{field.label}</span>
+                    <span className="flex items-center gap-2 text-xs text-gray-400">
+                      {field.label}
+                      <InfoTooltip ariaLabel={`${field.label} info`} text={field.info} />
+                    </span>
                     <input
                       type="number"
                       min={field.min}
@@ -605,7 +837,7 @@ export default function SystemDetailPage() {
           {metaLoading && <Loader message="Computing metastable states..." />}
           {!metaLoading && metastable.states.length === 0 && (
             <p className="text-sm text-gray-400">
-              Run metastable analysis after uploading trajectories and building descriptors.
+              Metastable analysis is manual. Click Recompute after uploading trajectories and building descriptors.
             </p>
           )}
           {!metaLoading && metastableStates.length > 0 && (
@@ -947,25 +1179,14 @@ export default function SystemDetailPage() {
         </section>
       )}
 
-      {!metastableLocked && (
-        <section className="bg-gray-800 border border-gray-700 rounded-lg p-4">
-          <h2 className="text-lg font-semibold text-white">Run Analysis</h2>
-          <p className="text-sm text-gray-400 mt-2">
-            Lock metastable states and build cluster NPZ files to unlock static and Potts analyses.
-          </p>
-        </section>
-      )}
-
-      {metastableLocked && (
+      {analysisUnlocked && (
         <section className="bg-gray-800 border border-gray-700 rounded-lg p-4 space-y-4">
           <div className="flex items-center justify-between">
             <h2 className="text-lg font-semibold text-white">Run Analysis</h2>
-            <p className="text-xs text-gray-400">
-              Static needs two descriptor-ready states; Potts uses saved cluster NPZ files.
-            </p>
+            <p className="text-xs text-gray-400">{analysisNote}</p>
           </div>
           {analysisError && <ErrorMessage message={analysisError} />}
-          <div className="grid lg:grid-cols-2 gap-6">
+          <div className={showPottsPanel ? 'grid lg:grid-cols-2 gap-6' : ''}>
             <div className="bg-gray-900 border border-gray-700 rounded-lg p-4 space-y-4">
               <div>
                 <h3 className="text-md font-semibold text-white">Static Reporters</h3>
@@ -981,17 +1202,40 @@ export default function SystemDetailPage() {
               />
               <StaticAnalysisForm onSubmit={(params) => enqueueStaticJob(submitStaticJob, params)} />
             </div>
-            <div className="bg-gray-900 border border-gray-700 rounded-lg p-4">
-              <h3 className="text-md font-semibold text-white mb-2">Potts Sampling</h3>
-              <SimulationAnalysisForm
-                clusterRuns={clusterRuns}
-                onSubmit={enqueueSimulationJob}
-              />
-            </div>
+            {showPottsPanel && (
+              <div className="bg-gray-900 border border-gray-700 rounded-lg p-4">
+                <h3 className="text-md font-semibold text-white mb-2">Potts Sampling</h3>
+                <SimulationAnalysisForm clusterRuns={clusterRuns} onSubmit={enqueueSimulationJob} />
+              </div>
+            )}
           </div>
         </section>
       )}
+      {showMetastableInfo && (
+        <DocOverlay docId={docId} onClose={() => setShowMetastableInfo(false)} onNavigate={setDocId} />
+      )}
+        </div>
+      </div>
     </div>
+  );
+}
+
+function InfoTooltip({ text, ariaLabel, onClick }) {
+  return (
+    <span className="relative inline-flex group">
+      <button
+        type="button"
+        className="inline-flex items-center justify-center text-gray-500 hover:text-gray-300 focus:outline-none"
+        aria-label={ariaLabel}
+        aria-haspopup={onClick ? 'dialog' : undefined}
+        onClick={onClick}
+      >
+        <Info className="h-4 w-4" />
+      </button>
+      <span className="pointer-events-none absolute left-1/2 top-full z-20 mt-2 w-72 -translate-x-1/2 rounded-md border border-gray-700 bg-gray-900 px-3 py-2 text-xs text-gray-200 opacity-0 shadow-lg transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
+        {text}
+      </span>
+    </span>
   );
 }
 
@@ -1142,6 +1386,240 @@ function MetastableCard({ meta, onRename }) {
       )}
     </div>
   );
+}
+
+const DOC_FILES = {
+  metastable_states: '/docs/metastable_states.md',
+  vamp_tica: '/docs/vamp_tica.md',
+  msm: '/docs/msm.md',
+  pcca: '/docs/pcca.md',
+};
+
+function DocOverlay({ docId, onClose, onNavigate }) {
+  const cacheRef = useRef({});
+  const [docState, setDocState] = useState({
+    title: 'Documentation',
+    blocks: [],
+    loading: true,
+    error: null,
+  });
+
+  useEffect(() => {
+    let isMounted = true;
+    const targetId = DOC_FILES[docId] ? docId : 'metastable_states';
+    const cached = cacheRef.current[targetId];
+    if (cached) {
+      setDocState({ ...cached, loading: false, error: null });
+      return () => {};
+    }
+    setDocState((prev) => ({ ...prev, loading: true, error: null }));
+    fetch(DOC_FILES[targetId])
+      .then((res) => {
+        if (!res.ok) throw new Error(`Failed to load ${targetId} documentation.`);
+        return res.text();
+      })
+      .then((text) => {
+        const parsed = parseMarkdown(text);
+        if (!isMounted) return;
+        cacheRef.current[targetId] = parsed;
+        setDocState({ ...parsed, loading: false, error: null });
+      })
+      .catch((err) => {
+        if (!isMounted) return;
+        setDocState((prev) => ({
+          ...prev,
+          loading: false,
+          error: err.message || 'Failed to load documentation.',
+        }));
+      });
+    return () => {
+      isMounted = false;
+    };
+  }, [docId]);
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4 py-8">
+      <div className="w-full max-w-3xl bg-gray-900 border border-gray-700 rounded-lg shadow-xl">
+        <div className="flex items-center justify-between border-b border-gray-800 px-4 py-3">
+          <h3 className="text-lg font-semibold text-white">{docState.title}</h3>
+          <button
+            type="button"
+            onClick={onClose}
+            className="text-gray-400 hover:text-gray-200"
+            aria-label="Close"
+          >
+            <X className="h-5 w-5" />
+          </button>
+        </div>
+        <div className="p-5 max-h-[75vh] overflow-y-auto space-y-4 text-sm text-gray-200">
+          {docState.loading && <p className="text-gray-400">Loading documentation...</p>}
+          {docState.error && <ErrorMessage message={docState.error} />}
+          {!docState.loading &&
+            !docState.error &&
+            docState.blocks.map((block, idx) => renderDocBlock(block, idx, onNavigate))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function parseMarkdown(markdown) {
+  const lines = markdown.replace(/\r\n/g, '\n').split('\n');
+  const blocks = [];
+  let title = 'Documentation';
+  let paragraph = [];
+  let list = null;
+  let listType = null;
+
+  const flushParagraph = () => {
+    if (paragraph.length) {
+      blocks.push({ type: 'p', text: paragraph.join(' ') });
+      paragraph = [];
+    }
+  };
+
+  const flushList = () => {
+    if (list && list.length) {
+      blocks.push({ type: listType, items: list });
+    }
+    list = null;
+    listType = null;
+  };
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      flushParagraph();
+      flushList();
+      continue;
+    }
+
+    const headingMatch = trimmed.match(/^(#{1,3})\s+(.*)$/);
+    if (headingMatch) {
+      flushParagraph();
+      flushList();
+      const level = headingMatch[1].length;
+      const text = headingMatch[2].trim();
+      if (level === 1 && title === 'Documentation') {
+        title = text;
+      } else {
+        blocks.push({ type: `h${level}`, text });
+      }
+      continue;
+    }
+
+    const ulMatch = trimmed.match(/^[-*]\s+(.*)$/);
+    const olMatch = trimmed.match(/^\d+[.)]\s+(.*)$/);
+    if (ulMatch || olMatch) {
+      flushParagraph();
+      const nextType = olMatch ? 'ol' : 'ul';
+      if (listType && listType !== nextType) {
+        flushList();
+      }
+      listType = nextType;
+      if (!list) list = [];
+      list.push((ulMatch ? ulMatch[1] : olMatch[1]).trim());
+      continue;
+    }
+
+    if (listType) {
+      flushList();
+    }
+    paragraph.push(trimmed);
+  }
+
+  flushParagraph();
+  flushList();
+
+  return { title, blocks };
+}
+
+function renderDocBlock(block, idx, onNavigate) {
+  if (block.type === 'p') {
+    return (
+      <p key={`p-${idx}`} className="text-gray-300 leading-relaxed">
+        {renderInline(block.text, onNavigate)}
+      </p>
+    );
+  }
+  if (block.type === 'ul' || block.type === 'ol') {
+    const Tag = block.type === 'ol' ? 'ol' : 'ul';
+    return (
+      <Tag key={`${block.type}-${idx}`} className={`pl-5 space-y-1 text-gray-300 ${block.type === 'ol' ? 'list-decimal' : 'list-disc'}`}>
+        {block.items.map((item, itemIdx) => (
+          <li key={`${block.type}-${idx}-${itemIdx}`}>{renderInline(item, onNavigate)}</li>
+        ))}
+      </Tag>
+    );
+  }
+  if (block.type === 'h2' || block.type === 'h3') {
+    return (
+      <h4 key={`${block.type}-${idx}`} className="text-base font-semibold text-white">
+        {block.text}
+      </h4>
+    );
+  }
+  return null;
+}
+
+function renderInline(text, onNavigate) {
+  const parts = [];
+  const regex = /\[([^\]]+)\]\(([^)]+)\)/g;
+  let lastIndex = 0;
+  let match;
+  while ((match = regex.exec(text)) !== null) {
+    if (match.index > lastIndex) {
+      parts.push({ type: 'text', value: text.slice(lastIndex, match.index) });
+    }
+    parts.push({ type: 'link', label: match[1], href: match[2] });
+    lastIndex = regex.lastIndex;
+  }
+  if (lastIndex < text.length) {
+    parts.push({ type: 'text', value: text.slice(lastIndex) });
+  }
+
+  return parts.map((part, index) => {
+    if (part.type === 'text') {
+      const segments = part.value.split('`');
+      return (
+        <span key={`text-${index}`}>
+          {segments.map((segment, segIdx) =>
+            segIdx % 2 === 1 ? (
+              <code key={`code-${index}-${segIdx}`} className="rounded bg-gray-800 px-1 text-xs text-gray-100">
+                {segment}
+              </code>
+            ) : (
+              <span key={`seg-${index}-${segIdx}`}>{segment}</span>
+            )
+          )}
+        </span>
+      );
+    }
+    if (part.href.startsWith('doc:')) {
+      const target = part.href.replace('doc:', '').trim();
+      return (
+        <button
+          key={`doc-${index}`}
+          type="button"
+          onClick={() => onNavigate(target)}
+          className="text-cyan-300 hover:text-cyan-200 underline underline-offset-2"
+        >
+          {part.label}
+        </button>
+      );
+    }
+    return (
+      <a
+        key={`link-${index}`}
+        href={part.href}
+        target="_blank"
+        rel="noreferrer"
+        className="text-cyan-300 hover:text-cyan-200 underline underline-offset-2"
+      >
+        {part.label}
+      </a>
+    );
+  });
 }
 
 function StatePairSelector({ options, value, onChange }) {

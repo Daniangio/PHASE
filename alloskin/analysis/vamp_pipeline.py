@@ -772,7 +772,7 @@ def plot_msm_timescales(msm, frame_dt_ps, out_prefix):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="VAMP-2 + MSM + PCCA+ metastable analysis on phi/psi sin-cos features."
+        description="VAMP-2 + MSM + PCCA + metastable analysis on phi/psi sin-cos features."
     )
     parser.add_argument("topology", help="Topology file (PDB/PSF/GRO/etc.)")
     parser.add_argument("trajectory", help="Trajectory file (DCD/XTC/TRR/etc.)")

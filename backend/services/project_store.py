@@ -74,6 +74,7 @@ class SystemMetadata:
     status: str = "processing"
     macro_locked: bool = False
     metastable_locked: bool = False
+    analysis_mode: Optional[str] = None
     residue_selections: Optional[SelectionInput] = None
     residue_selections_mapping: Dict[str, str] = field(default_factory=dict)
     descriptor_keys: List[str] = field(default_factory=list)
