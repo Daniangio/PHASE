@@ -1,50 +1,102 @@
 # AllosKin
-AllosKin (Allostery + Kinetics) is a research project and Python pipeline for analyzing G-Protein Coupled Receptor (GPCR) activation dynamics. It moves beyond static correlation to map the causal information flow and allosteric signal networks that define functional states.
 
-This project is based on a 3-goal experimental plan.
+AllosKin (Allostery + Kinetics) is a research framework for analyzing conformational dynamics and allosteric signaling in proteins. It combines descriptor extraction, metastable state discovery, residue clustering, and Potts-based sampling to compare ensembles and quantify state-specific signatures.
 
-# Project Goals
-Goal 1: Identify Static Reporters: Find individual residues ("switches") whose conformational distributions are most predictive of the global functional state (Active vs. Inactive) using Information Imbalance.
+This repository is a monorepo with:
 
-# Repository Structure
-This repository is a monorepo containing the core scientific library, a web API, and a web frontend.
-/alloskin/: The core Python library. Contains trajectory I/O, feature extraction, static analysis, and the Potts sampling pipeline.
-/backend/: A FastAPI web server that provides an HTTP API to the alloskin library.
-/frontend/: A React-based web application for visualizing the results (e.g., interactive network graphs).
-/docs/: Project documentation and the original research plan./tests/: Unit and integration tests for the alloskin library.
+- `alloskin/`: core Python library (feature extraction, metastable analysis, clustering, Potts sampling).
+- `backend/`: FastAPI server + RQ workers for background jobs.
+- `frontend/`: React UI for project and results management.
+- `docs/`: method notes and architecture documents.
 
-# Quick Start
-1. InstallationClone the repository and install the core library in editable mode.git clone [https://github.com/your-username/AllosKin.git](https://github.com/your-username/AllosKin.git)
-cd AllosKin
+## Core Concepts
 
-# Install core library dependencies
+- **Project**: top-level workspace that groups multiple systems.
+- **System**: a set of macro-states (PDB + trajectory per state) with stored descriptors.
+- **Descriptors**: per-residue dihedral features saved as NPZ for reuse.
+- **Metastable states**: optional TICA/MSM-based refinement of macro-states.
+- **Cluster NPZ**: per-residue clustering results used by Potts sampling.
+- **Analyses**:
+  - Static reporters (information imbalance, per-residue signals).
+  - Potts sampling + replica exchange / SA-QUBO.
+
+## Typical Workflow (Web Server)
+
+1. **Create a project**
+   - `POST /api/v1/projects` with `{ "name": "My Project" }`.
+2. **Create a system**
+   - Upload PDBs for the macro-states (multipart form).
+3. **Upload trajectories + build descriptors**
+   - Upload trajectories per state; descriptors are built and stored on disk.
+4. **(Optional) Run metastable discovery**
+   - Run TICA/MSM to compute metastable states.
+5. **Run residue clustering**
+   - Generates a Cluster NPZ for Potts sampling.
+6. **Run analysis**
+   - Static reporters or Potts sampling jobs from the UI.
+7. **Visualize results**
+   - Use the frontend to explore plots and download artifacts.
+
+Background jobs (metastable discovery, clustering, Potts sampling) are executed by RQ workers. See `docs/clustering_architecture.md` for the clustering fan-out flow.
+
+## Running with Docker (Recommended)
+
+Requirements: Docker + Docker Compose.
+
+```bash
+# Build and start all services
+docker compose up --build
+```
+
+Services:
+- Backend API: `http://localhost:8000` (OpenAPI docs at `/docs`)
+- Frontend: `http://localhost:3000`
+
+Data is stored under the Docker volume mapped to `ALLOSKIN_DATA_ROOT` (default in compose: `/data/alloskin`).
+
+### Multiple Workers
+
+To enable parallel background jobs (including fan-out clustering), scale the worker service:
+
+```bash
+# Example: 4 worker processes
+docker compose up --build --scale worker=4
+```
+
+Note: more workers increases CPU and memory usage. If you only run one worker, the clustering job will fall back to a single-process path.
+
+## Running Locally (Without Docker)
+
+Python 3.11+ recommended.
+
+```bash
 pip install -r requirements.txt
-
-# Install the library in editable mode
+pip install -r backend/requirements.txt
 pip install -e .
 
-# Install backend dependencies
-pip install -r backend/requirements.txt
-2. Running via Command Line (CLI)After installing with pip install -e ., the alloskin command will be available.alloskin static \
-  --active_traj /path/to/active.xtc \
-  --active_topo /path/to/active.pdb \
-  --inactive_traj /path/to/inactive.xtc \
-  --inactive_topo /path/to/inactive.pdb
-
-3. Running with Docker (Recommended)
-This is the simplest way to run the backend and frontend.# From the root AllosKin/ directory
-docker-compose up --build
-API will be available at http://127.0.0.1:8000/docs
-Frontend will be available at http://127.0.0.1:3000
-
-4. Running the Web Server Manually
-# From the root AllosKin/ directory
+# Backend
 uvicorn backend.main:app --reload
+```
 
-## Project & System Workflow
-The backend now stores uploaded data as reusable systems inside projects. Each system contains the active and inactive PDB files plus compressed descriptor NPZ files so analyses can be queued without re-uploading trajectories.
+Start the frontend in another terminal:
 
-1. **Create a project** – `POST /api/v1/projects` with a JSON body such as `{ "name": "My GPCR Project" }`.
-2. **Preprocess a system** – `POST /api/v1/projects/{project_id}/systems` as multipart form data containing the active/inactive PDBs, trajectories, and optional stride/residue-selection fields. The server runs the descriptor pipeline and persists the generated NPZ files next to the stored PDBs.
-3. **Queue analyses** – call `/api/v1/submit/static` or `/submit/simulation` with a JSON payload that includes the `project_id`, `system_id`, and analysis parameters. Workers now load the stored descriptors instead of the raw trajectories.
-4. **Download structures for visualization** – retrieve system metadata via `GET /api/v1/projects/{project_id}/systems/{system_id}` and download the prepared PDBs from `/projects/{project_id}/systems/{system_id}/structures/{state}` (`state` is `active` or `inactive`) so the frontend can switch between conformations without additional uploads.
+```bash
+cd frontend
+npm install
+npm start
+```
+
+## Repository Structure
+
+```
+alloskin/                Core library
+backend/                 FastAPI + RQ workers
+frontend/                React UI
+docs/                    Documentation
+```
+
+## Notes
+
+- The backend uses Redis to queue jobs. In Docker, Redis is started automatically.
+- Results are persisted to `ALLOSKIN_DATA_ROOT/results` and referenced in run metadata.
+- For API details, use the OpenAPI docs at `/docs`.

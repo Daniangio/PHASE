@@ -1,13 +1,21 @@
 import json
 import os
+import time
 import traceback
 from pathlib import Path
 from datetime import datetime
-from rq import get_current_job
-from typing import Dict, Any
+from rq import Queue, Worker, get_current_job
+from rq.job import Job
+from typing import Dict, Any, List
 from alloskin.pipeline.runner import run_analysis
 from alloskin.simulation.main import parse_args as parse_simulation_args
 from alloskin.simulation.main import run_pipeline as run_simulation_pipeline
+from backend.services.metastable_clusters import (
+    generate_metastable_cluster_npz,
+    prepare_cluster_workspace,
+    reduce_cluster_workspace,
+    run_cluster_chunk,
+)
 from backend.services.project_store import ProjectStore
 
 # Define the persistent results directory (aligned with ALLOSKIN_DATA_ROOT).
@@ -44,6 +52,25 @@ def _relativize_path(path: Path) -> str:
         return str(path.relative_to(DATA_ROOT))
     except Exception:
         return str(path)
+
+
+def _update_cluster_entry(
+    project_id: str,
+    system_id: str,
+    cluster_id: str,
+    updates: Dict[str, Any],
+) -> None:
+    try:
+        system_meta = project_store.get_system(project_id, system_id)
+    except Exception:
+        return
+    clusters = system_meta.metastable_clusters or []
+    entry = next((c for c in clusters if c.get("cluster_id") == cluster_id), None)
+    if not entry:
+        return
+    entry.update(updates)
+    system_meta.metastable_clusters = clusters
+    project_store.save_system(system_meta)
 
 
 # --- Master Analysis Job ---
@@ -242,6 +269,19 @@ def run_simulation_job(
 
     result_filepath = RESULTS_DIR / f"{job_uuid}.json"
 
+    def force_single_thread():
+        os.environ["OMP_NUM_THREADS"] = "1"
+        os.environ["MKL_NUM_THREADS"] = "1"
+        os.environ["OPENBLAS_NUM_THREADS"] = "1"
+        os.environ["NUMEXPR_NUM_THREADS"] = "1"
+        try:
+            import torch
+
+            torch.set_num_threads(1)
+            torch.set_num_interop_threads(1)
+        except Exception:
+            pass
+
     def save_progress(status_msg: str, progress: int):
         if job:
             job.meta["status"] = status_msg
@@ -260,6 +300,7 @@ def run_simulation_job(
             payload["error"] = f"Failed to save result file: {e}"
 
     try:
+        force_single_thread()
         save_progress("Initializing...", 0)
         write_result_to_disk(result_payload)
 
@@ -325,11 +366,7 @@ def run_simulation_job(
         rex_thin = sim_params.get("rex_thin")
         if rex_thin is not None:
             args_list += ["--rex-thin-rounds", str(int(rex_thin))]
-        rex_max_workers = sim_params.get("rex_max_workers")
-        if rex_max_workers is None:
-            rex_max_workers = 1
-        if rex_max_workers is not None:
-            args_list += ["--rex-max-workers", str(int(rex_max_workers))]
+        args_list += ["--rex-max-workers", "1"]
 
         sa_reads = sim_params.get("sa_reads")
         if sa_reads is not None:
@@ -430,3 +467,199 @@ def run_simulation_job(
 
     save_progress("Simulation completed", 100)
     return sanitized_payload
+
+
+def run_cluster_chunk_job(work_dir: str, residue_index: int) -> Dict[str, Any]:
+    """Cluster a single residue from a prepared workspace."""
+    return run_cluster_chunk(Path(work_dir), residue_index)
+
+
+def run_cluster_job(
+    job_uuid: str,
+    project_id: str,
+    system_id: str,
+    cluster_id: str,
+    params: Dict[str, Any],
+):
+    """
+    Run per-residue clustering in the background and update cluster metadata.
+    """
+    job = get_current_job()
+    start_time = datetime.utcnow()
+
+    def save_progress(status_msg: str, progress: int):
+        if job:
+            job.meta["status"] = status_msg
+            job.meta["progress"] = progress
+            job.save_meta()
+        _update_cluster_entry(
+            project_id,
+            system_id,
+            cluster_id,
+            {
+                "status": "running" if progress < 100 else "finished",
+                "progress": progress,
+                "status_message": status_msg,
+                "updated_at": datetime.utcnow().isoformat(),
+            },
+        )
+        print(f"[Cluster {job_uuid}] {status_msg}")
+
+    def progress_callback(status_msg: str, current: int, total: int):
+        if not total:
+            return
+        ratio = max(0.0, min(1.0, current / float(total)))
+        progress = 10 + int(ratio * 70)
+        save_progress(status_msg, min(progress, 90))
+
+    try:
+        save_progress("Initializing...", 0)
+        _update_cluster_entry(
+            project_id,
+            system_id,
+            cluster_id,
+            {"status": "running", "started_at": start_time.isoformat()},
+        )
+
+        meta_ids = params.get("metastable_ids") or []
+        if not meta_ids:
+            raise ValueError("Provide at least one metastable_id.")
+
+        parallel_ok = False
+        queue = None
+        if job and job.connection:
+            workers = Worker.all(connection=job.connection)
+            parallel_ok = len(workers) > 1
+            queue = Queue(name=job.origin, connection=job.connection)
+
+        if not parallel_ok or queue is None:
+            save_progress("Clustering residues...", 10)
+            npz_path, meta = generate_metastable_cluster_npz(
+                project_id,
+                system_id,
+                meta_ids,
+                max_clusters_per_residue=params.get("max_clusters_per_residue", 6),
+                max_cluster_frames=params.get("max_cluster_frames"),
+                random_state=params.get("random_state", 0),
+                contact_cutoff=params.get("contact_cutoff", 10.0),
+                contact_atom_mode=params.get("contact_atom_mode", "CA"),
+                cluster_algorithm=params.get("cluster_algorithm", "density_peaks"),
+                dbscan_eps=params.get("dbscan_eps", 0.5),
+                dbscan_min_samples=params.get("dbscan_min_samples", 5),
+                hierarchical_n_clusters=params.get("hierarchical_n_clusters"),
+                hierarchical_linkage=params.get("hierarchical_linkage", "ward"),
+                density_maxk=params.get("density_maxk", 100),
+                density_z=params.get("density_z"),
+                tomato_k=params.get("tomato_k", 15),
+                tomato_tau=params.get("tomato_tau", "auto"),
+                tomato_k_max=params.get("tomato_k_max"),
+                progress_callback=progress_callback,
+            )
+        else:
+            save_progress("Preparing clustering workspace...", 5)
+            dirs = project_store.ensure_directories(project_id, system_id)
+            cluster_dir = dirs["system_dir"] / "metastable" / "clusters"
+            work_dir = cluster_dir / f"{cluster_id}_work"
+            manifest = prepare_cluster_workspace(
+                project_id,
+                system_id,
+                meta_ids,
+                max_clusters_per_residue=params.get("max_clusters_per_residue", 6),
+                max_cluster_frames=params.get("max_cluster_frames"),
+                random_state=params.get("random_state", 0),
+                contact_cutoff=params.get("contact_cutoff", 10.0),
+                contact_atom_mode=params.get("contact_atom_mode", "CA"),
+                cluster_algorithm=params.get("cluster_algorithm", "density_peaks"),
+                density_maxk=params.get("density_maxk", 100),
+                density_z=params.get("density_z"),
+                dbscan_eps=params.get("dbscan_eps", 0.5),
+                dbscan_min_samples=params.get("dbscan_min_samples", 5),
+                hierarchical_n_clusters=params.get("hierarchical_n_clusters"),
+                hierarchical_linkage=params.get("hierarchical_linkage", "ward"),
+                tomato_k=params.get("tomato_k", 15),
+                tomato_tau=params.get("tomato_tau", "auto"),
+                tomato_k_max=params.get("tomato_k_max"),
+                work_dir=work_dir,
+            )
+
+            residue_total = int(manifest.get("n_residues", 0))
+            if residue_total <= 0:
+                raise ValueError("No residues found to cluster.")
+
+            chunk_job_ids: List[str] = []
+            for idx in range(residue_total):
+                chunk_job = queue.enqueue(
+                    run_cluster_chunk_job,
+                    args=(str(work_dir), idx),
+                    job_timeout="2h",
+                    result_ttl=86400,
+                    job_id=f"cluster-chunk-{cluster_id}-{idx}",
+                )
+                chunk_job_ids.append(chunk_job.id)
+
+            completed = 0
+            failed = 0
+            while completed < residue_total:
+                completed = 0
+                failed = 0
+                for job_id in chunk_job_ids:
+                    try:
+                        chunk_job = Job.fetch(job_id, connection=queue.connection)
+                    except Exception:
+                        failed += 1
+                        continue
+                    status = chunk_job.get_status()
+                    if status == "finished":
+                        completed += 1
+                    elif status == "failed":
+                        failed += 1
+                if failed:
+                    raise RuntimeError(f"{failed} clustering chunks failed.")
+                save_progress(
+                    f"Clustering residues: {completed}/{residue_total}",
+                    10 + int((completed / float(residue_total)) * 70),
+                )
+                if completed >= residue_total:
+                    break
+                time.sleep(2)
+
+            save_progress("Reducing cluster outputs...", 90)
+            npz_path, meta = reduce_cluster_workspace(work_dir)
+
+        save_progress("Saving cluster metadata...", 90)
+        dirs = project_store.ensure_directories(project_id, system_id)
+        try:
+            rel_path = str(npz_path.relative_to(dirs["system_dir"]))
+        except Exception:
+            rel_path = str(npz_path)
+
+        _update_cluster_entry(
+            project_id,
+            system_id,
+            cluster_id,
+            {
+                "status": "finished",
+                "progress": 100,
+                "path": rel_path,
+                "generated_at": meta.get("generated_at") if isinstance(meta, dict) else None,
+                "contact_edge_count": meta.get("contact_edge_count") if isinstance(meta, dict) else None,
+                "error": None,
+                "completed_at": datetime.utcnow().isoformat(),
+            },
+        )
+        save_progress("Cluster completed", 100)
+    except Exception as exc:
+        _update_cluster_entry(
+            project_id,
+            system_id,
+            cluster_id,
+            {
+                "status": "failed",
+                "error": str(exc),
+                "progress": 100,
+                "status_message": "Failed",
+                "completed_at": datetime.utcnow().isoformat(),
+            },
+        )
+        print(f"[Cluster {job_uuid}] FAILED: {exc}")
+        raise

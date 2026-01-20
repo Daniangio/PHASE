@@ -1,0 +1,260 @@
+import json
+from typing import Any, Dict, List, Optional
+
+import MDAnalysis as mda
+import numpy as np
+from fastapi import APIRouter, HTTPException, Query
+
+from backend.api.v1.common import get_state_or_404, project_store
+from backend.services.descriptors import load_descriptor_npz
+
+
+router = APIRouter()
+
+
+@router.get(
+    "/projects/{project_id}/systems/{system_id}/states/{state_id}/descriptors",
+    summary="Preview descriptor angles for a state (for visualization)",
+)
+async def get_state_descriptors(
+    project_id: str,
+    system_id: str,
+    state_id: str,
+    residue_keys: Optional[str] = Query(
+        None,
+        description="Comma-separated residue keys to include; defaults to all keys for the state.",
+    ),
+    metastable_ids: Optional[str] = Query(
+        None,
+        description="Comma-separated metastable IDs to filter frames; defaults to all frames.",
+    ),
+    cluster_id: Optional[str] = Query(
+        None,
+        description="ID of a saved cluster NPZ to use for coloring (optional).",
+    ),
+    max_points: int = Query(
+        2000,
+        ge=10,
+        le=50000,
+        description="Maximum number of points returned per residue (down-sampled evenly).",
+    ),
+):
+    """
+    Returns a down-sampled set of phi/psi/chi1 angles (in degrees) for the requested state.
+    Intended for client-side scatter plotting; not for bulk export.
+    """
+    try:
+        system = project_store.get_system(project_id, system_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"System '{system_id}' not found.")
+
+    state_meta = get_state_or_404(system, state_id)
+    if not state_meta.descriptor_file:
+        raise HTTPException(status_code=404, detail="No descriptors stored for this state.")
+
+    descriptor_path = project_store.resolve_path(project_id, system_id, state_meta.descriptor_file)
+    if not descriptor_path.exists():
+        raise HTTPException(status_code=404, detail="Descriptor file missing on disk.")
+
+    try:
+        feature_dict = load_descriptor_npz(descriptor_path)
+    except Exception as exc:  # pragma: no cover
+        raise HTTPException(status_code=500, detail=f"Failed to load descriptor file: {exc}") from exc
+
+    keys_to_use = list(feature_dict.keys())
+    if residue_keys:
+        requested = [key.strip() for key in residue_keys.split(",") if key.strip()]
+        keys_to_use = [k for k in keys_to_use if k in requested]
+        if not keys_to_use:
+            raise HTTPException(status_code=400, detail="No matching residue keys found in descriptor file.")
+
+    angles_payload: Dict[str, Any] = {}
+    residue_labels: Dict[str, str] = {}
+    sample_stride = 1
+
+    # Try to resolve residue names from the stored PDB for nicer labels
+    resname_map: Dict[int, str] = {}
+    if state_meta.pdb_file:
+        try:
+            pdb_path = project_store.resolve_path(project_id, system_id, state_meta.pdb_file)
+            if pdb_path.exists():
+                u = mda.Universe(str(pdb_path))
+                for res in u.residues:
+                    resname_map[int(res.resid)] = str(res.resname).strip()
+        except Exception:
+            resname_map = {}
+
+    # --- Metastable filtering ---
+    metastable_filter_ids = []
+    if metastable_ids:
+        metastable_filter_ids = [mid.strip() for mid in metastable_ids.split(",") if mid.strip()]
+    meta_id_to_index = {}
+    index_to_meta_id = {}
+    state_metastables = [
+        m for m in (system.metastable_states or []) if m.get("macro_state_id") == state_id
+    ]
+    if state_metastables:
+        for m in state_metastables:
+            mid = m.get("metastable_id")
+            if mid is None:
+                continue
+            meta_id_to_index[mid] = m.get("metastable_index")
+            if m.get("metastable_index") is not None:
+                index_to_meta_id[m.get("metastable_index")] = mid
+
+    # --- Cluster NPZ ---
+    cluster_npz = None
+    cluster_meta = None
+    merged_lookup = {}
+    cluster_residue_indices: Dict[str, int] = {}
+    merged_labels_arr: Optional[np.ndarray] = None
+    cluster_legend: List[Dict[str, Any]] = []
+
+    def _build_lookup(entry_key: str, npz_dict, keys_dict):
+        """
+        Build a mapping (state_id, frame_idx) -> row index.
+        Falls back to sequential frame indices for backward-compatible NPZs that
+        lack the explicit frame_indices array.
+        """
+        if not keys_dict or "frame_state_ids" not in keys_dict:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Cluster NPZ is missing frame index metadata for '{entry_key}'. Regenerate clusters.",
+            )
+        if keys_dict["frame_state_ids"] not in npz_dict:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Cluster NPZ is missing array '{keys_dict['frame_state_ids']}'. Regenerate clusters.",
+            )
+
+        frame_states = np.asarray(npz_dict[keys_dict["frame_state_ids"]])
+        if "frame_indices" in keys_dict and keys_dict.get("frame_indices") in npz_dict:
+            frame_indices = np.asarray(npz_dict[keys_dict["frame_indices"]])
+        else:
+            frame_indices = np.arange(len(frame_states), dtype=int)
+
+        lookup = {}
+        for i, (sid, fidx) in enumerate(zip(frame_states, frame_indices)):
+            lookup[(str(sid), int(fidx))] = i
+        return lookup
+
+    if cluster_id:
+        entry = next((c for c in system.metastable_clusters or [] if c.get("cluster_id") == cluster_id), None)
+        if not entry:
+            raise HTTPException(status_code=404, detail="Cluster NPZ not found.")
+        rel_path = entry.get("path")
+        if not rel_path:
+            raise HTTPException(status_code=404, detail="Cluster NPZ path missing.")
+        cluster_path = project_store.resolve_path(project_id, system_id, rel_path)
+        if not cluster_path.exists():
+            raise HTTPException(status_code=404, detail="Cluster NPZ file missing.")
+        cluster_npz = np.load(cluster_path, allow_pickle=True)
+        try:
+            cluster_meta = json.loads(cluster_npz["metadata_json"].item())
+        except Exception:
+            cluster_meta = None
+        if not isinstance(cluster_meta, dict) or not cluster_meta:
+            raise HTTPException(status_code=400, detail="Cluster NPZ missing metadata_json. Regenerate clusters.")
+        cluster_res_keys = list(cluster_meta.get("residue_keys", []))
+        cluster_residue_indices = {k: i for i, k in enumerate(cluster_res_keys)}
+        merged_keys = cluster_meta.get("merged", {}).get("npz_keys", {})
+        if (
+            not merged_keys
+            or "labels" not in merged_keys
+            or "frame_state_ids" not in merged_keys
+            or "frame_indices" not in merged_keys
+        ):
+            raise HTTPException(status_code=400, detail="Cluster NPZ missing merged frame metadata. Regenerate clusters.")
+        merged_lookup = _build_lookup("merged", cluster_npz, merged_keys)
+        merged_labels_arr = cluster_npz[merged_keys.get("labels")]
+        unique_clusters = sorted({int(v) for v in np.unique(merged_labels_arr) if int(v) >= 0})
+        cluster_legend = [{"id": c, "label": f"Merged c{c}"} for c in unique_clusters]
+
+    # Shared frame selection (metastable filter + sampling) computed once
+    labels_meta = None
+    needs_meta_labels = bool(metastable_filter_ids) or bool(state_metastables)
+    if needs_meta_labels:
+        labels_meta = feature_dict.get("metastable_labels")
+        if labels_meta is None and state_meta.metastable_labels_file:
+            label_path = project_store.resolve_path(project_id, system_id, state_meta.metastable_labels_file)
+            if label_path.exists():
+                labels_meta = np.load(label_path)
+        if labels_meta is None and metastable_filter_ids:
+            raise HTTPException(status_code=400, detail="Metastable labels missing for this state.")
+
+    first_arr = feature_dict[keys_to_use[0]]
+    total_frames = first_arr.shape[0] if hasattr(first_arr, "shape") else 0
+    indices = np.arange(total_frames)
+    if metastable_filter_ids:
+        selected_idx = {meta_id_to_index.get(mid) for mid in metastable_filter_ids if mid in meta_id_to_index}
+        if not selected_idx:
+            raise HTTPException(status_code=400, detail="Selected metastable IDs not found on this system.")
+        mask = np.isin(labels_meta, list(selected_idx))
+        indices = np.where(mask)[0]
+        if indices.size == 0:
+            raise HTTPException(status_code=400, detail="No frames match selected metastable states for this state.")
+
+    n_frames_filtered = indices.size
+    sample_stride = max(1, n_frames_filtered // max_points) if n_frames_filtered > max_points else 1
+    sample_indices = indices[::sample_stride]
+    n_frames_out = n_frames_filtered
+
+    merged_rows_for_samples = None
+    if cluster_npz is not None and merged_lookup:
+        merged_rows_for_samples = np.array(
+            [merged_lookup.get((state_meta.state_id, int(f)), -1) for f in sample_indices], dtype=int
+        )
+
+    for key in keys_to_use:
+        arr = feature_dict[key]
+        if arr.ndim != 3 or arr.shape[2] < 3:
+            continue
+
+        sampled = arr[sample_indices, 0, :]
+        phi = (sampled[:, 0] * 180.0 / 3.141592653589793).tolist()
+        psi = (sampled[:, 1] * 180.0 / 3.141592653589793).tolist()
+        chi1 = (sampled[:, 2] * 180.0 / 3.141592653589793).tolist()
+        angles_payload[key] = {"phi": phi, "psi": psi, "chi1": chi1}
+
+        if cluster_npz is not None:
+            res_idx = cluster_residue_indices.get(key, None)
+            if res_idx is not None:
+                if merged_rows_for_samples is not None and merged_labels_arr is not None:
+                    safe_rows = np.clip(merged_rows_for_samples, 0, merged_labels_arr.shape[0] - 1)
+                    labels_for_res = merged_labels_arr[safe_rows, res_idx].astype(int)
+                    labels_for_res[merged_rows_for_samples < 0] = -1
+                    angles_payload[key]["cluster_labels"] = labels_for_res.tolist()
+
+        label = key
+        selection = (state_meta.residue_mapping or {}).get(key) or ""
+        resid_tokens = [
+            tok for tok in selection.replace("resid", "").split() if tok.strip().lstrip("-").isdigit()
+        ]
+        resid_val = int(resid_tokens[0]) if resid_tokens else None
+        if resid_val is not None and resid_val in resname_map:
+            label = f"{key}_{resname_map[resid_val]}"
+        residue_labels[key] = label
+
+    if not angles_payload:
+        raise HTTPException(status_code=500, detail="Descriptor file contained no usable angle data.")
+
+    return {
+        "residue_keys": keys_to_use,
+        "residue_mapping": state_meta.residue_mapping or {},
+        "residue_labels": residue_labels,
+        "n_frames": n_frames_out,
+        "sample_stride": sample_stride,
+        "angles": angles_payload,
+        "cluster_legend": cluster_legend,
+        "metastable_labels": labels_meta[sample_indices].astype(int).tolist() if labels_meta is not None else [],
+        "metastable_legend": [
+            {
+                "id": m.get("metastable_id"),
+                "index": m.get("metastable_index"),
+                "label": m.get("name") or m.get("default_name") or m.get("metastable_id"),
+            }
+            for m in state_metastables
+            if m.get("metastable_index") is not None
+        ],
+        "metastable_filter_applied": bool(metastable_filter_ids),
+    }

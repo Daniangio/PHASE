@@ -9,20 +9,275 @@ import {
   deleteStateTrajectory,
   addSystemState,
   deleteState,
+  renameState, // Import the new renameState function
   fetchMetastableStates,
   recomputeMetastableStates,
   renameMetastableState,
-  downloadMetastableClusters,
+  submitMetastableClusterJob,
+  renameMetastableCluster,
   confirmMacroStates,
   confirmMetastableStates,
   clearMetastableStates,
   downloadSavedCluster,
   deleteSavedCluster,
 } from '../api/projects';
-import { submitStaticJob, submitSimulationJob } from '../api/jobs';
+import { submitStaticJob, submitSimulationJob, fetchJobStatus } from '../api/jobs';
 import StaticAnalysisForm from '../components/analysis/StaticAnalysisForm';
 import SimulationAnalysisForm from '../components/analysis/SimulationAnalysisForm';
-import { Download, Eye, Info, X } from 'lucide-react';
+import { Download, Eye, Info, Plus, X, Pencil } from 'lucide-react';
+
+function StateCard({ state, onDownload, onUpload, onDeleteTrajectory, onDeleteState, uploading, progress, processing }) {
+  const [file, setFile] = useState(null);
+  const [stride, setStride] = useState(state?.stride || 1);
+
+  const descriptorLabel = state?.descriptor_file ? 'Ready' : 'Not built';
+  const trajectoryLabel = state?.source_traj || '—';
+
+  return (
+    <article className="bg-gray-900 rounded-lg p-4 border border-gray-700 space-y-3">
+      <div className="flex items-center justify-between">
+        <div>
+          <h3 className="text-md font-semibold text-white">{state.name}</h3>
+          <p className="text-xs text-gray-500">{state.state_id?.slice(0, 8)}</p>
+        </div>
+        <button
+          onClick={onDownload}
+          disabled={!state?.pdb_file}
+          className="flex items-center space-x-1 text-sm text-cyan-400 hover:text-cyan-300 disabled:opacity-50"
+        >
+          <Download className="h-4 w-4" />
+          <span>PDB</span>
+        </button>
+      </div>
+
+      <dl className="space-y-1 text-sm text-gray-300">
+        <div className="flex justify-between">
+          <dt>Trajectory</dt>
+          <dd className="truncate text-gray-200">{trajectoryLabel}</dd>
+        </div>
+        <div className="flex justify-between">
+          <dt>Frames</dt>
+          <dd>{state?.n_frames ?? 0}</dd>
+        </div>
+        <div className="flex justify-between">
+          <dt>Stride</dt>
+          <dd>{state?.stride ?? 1}</dd>
+        </div>
+        <div className="flex justify-between">
+          <dt>Descriptors</dt>
+          <dd className="truncate text-gray-200">{descriptorLabel}</dd>
+        </div>
+      </dl>
+
+      {(uploading || progress !== undefined || processing) && (
+        <div className="space-y-1 text-xs text-gray-300">
+          <div className="flex items-center justify-between">
+            <span>{processing ? 'Processing descriptors' : 'Uploading trajectory'}</span>
+            <span>{progress !== undefined ? `${progress}%` : ''}</span>
+          </div>
+          <div className="h-2 bg-gray-800 rounded-full overflow-hidden">
+            <div
+              className={`h-full ${processing ? 'bg-amber-400 animate-pulse' : 'bg-cyan-500'}`}
+              style={{ width: progress !== undefined ? `${progress}%` : '33%' }}
+            />
+          </div>
+        </div>
+      )}
+
+      <div className="space-y-2">
+        <div>
+          <label className="block text-sm text-gray-300 mb-1">Upload trajectory</label>
+          <input
+            type="file"
+            onChange={(e) => setFile(e.target.files?.[0] || null)}
+            className="w-full text-sm text-gray-300"
+          />
+        </div>
+        <div>
+          <label className="block text-sm text-gray-300 mb-1">Stride</label>
+          <input
+            type="number"
+            min={1}
+            value={stride}
+            onChange={(e) => setStride(Number(e.target.value) || 1)}
+            className="w-full bg-gray-800 border border-gray-700 rounded-md px-2 py-1 text-white"
+          />
+        </div>
+        <button
+          onClick={() => onUpload(state.state_id, file, stride)}
+          disabled={uploading || !file}
+          className="w-full bg-cyan-600 hover:bg-cyan-500 text-white font-semibold py-2 rounded-md transition-colors disabled:opacity-50"
+        >
+          {uploading ? 'Uploading...' : 'Upload & Build'}
+        </button>
+      </div>
+
+      <div className="flex items-center justify-between text-xs">
+        <button
+          onClick={onDeleteTrajectory}
+          className="text-red-300 hover:text-red-200 disabled:opacity-50"
+          disabled={!state?.trajectory_file && !state?.descriptor_file}
+        >
+          Remove trajectory
+        </button>
+        <button onClick={onDeleteState} className="text-gray-400 hover:text-red-300">
+          Delete state
+        </button>
+      </div>
+    </article>
+  );
+}
+
+function MetastableCard({ meta, onRename }) {
+  const [name, setName] = useState(meta.name || meta.default_name || `Meta ${meta.metastable_index}`);
+  const [isSaving, setIsSaving] = useState(false);
+
+  const handleSave = async () => {
+    if (!meta.metastable_id) return;
+    setIsSaving(true);
+    try {
+      await onRename(meta.metastable_id, name);
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  return (
+    <div className="bg-gray-900 border border-gray-700 rounded-lg p-3 space-y-2">
+      <div className="flex items-center justify-between">
+        <p className="text-xs text-gray-400">{meta.macro_state}</p>
+        <span className="text-xs text-gray-500">Frames: {meta.n_frames ?? '—'}</span>
+      </div>
+      <div>
+        <label className="block text-xs text-gray-400 mb-1">Name</label>
+        <input
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          className="w-full bg-gray-800 border border-gray-700 rounded-md px-2 py-1 text-white text-sm"
+        />
+      </div>
+      <div className="flex items-center justify-between text-xs text-gray-400">
+        <span>ID: {meta.metastable_id || meta.metastable_index}</span>
+        <button
+          onClick={handleSave}
+          disabled={isSaving || !meta.metastable_id}
+          className="text-cyan-400 hover:text-cyan-300 disabled:opacity-50"
+        >
+          {isSaving ? 'Saving…' : 'Save'}
+        </button>
+      </div>
+      {meta.representative_pdb && (
+        <p className="text-xs text-cyan-400 break-all">
+          Representative PDB: {meta.representative_pdb}
+        </p>
+      )}
+    </div>
+  );
+}
+
+const DOC_FILES = {
+  metastable_states: '/docs/metastable_states.md',
+  vamp_tica: '/docs/vamp_tica.md',
+  msm: '/docs/msm.md',
+  pcca: '/docs/pcca.md',
+  potts_overview: '/docs/potts_overview.md',
+  potts_model: '/docs/potts_model.md',
+  potts_gibbs: '/docs/potts_gibbs.md',
+  potts_sa_qubo: '/docs/potts_sa_qubo.md',
+  potts_beta_eff: '/docs/potts_beta_eff.md',
+};
+
+function getClusterDisplayName(run) {
+  if (!run) return 'Cluster';
+  return run.name || run.path?.split('/').pop() || run.cluster_id || 'Cluster';
+}
+
+function formatClusterAlgorithm(run) {
+  if (!run) return '';
+  const algo = (run.cluster_algorithm || '').toLowerCase();
+  const params = run.algorithm_params || {};
+  if (algo === 'dbscan') {
+    return `dbscan (eps=${params.eps ?? '—'}, min_samples=${params.min_samples ?? '—'})`;
+  }
+  if (algo === 'hierarchical') {
+    return `hierarchical (n_clusters=${params.n_clusters ?? '—'}, linkage=${params.linkage || 'ward'})`;
+  }
+  if (algo === 'tomato') {
+    return `tomato (k=${params.k_neighbors ?? '—'}, tau=${params.tau ?? '—'}, k_max=${params.k_max ?? '—'})`;
+  }
+  if (algo === 'density_peaks' || algo === 'kmeans') {
+    return `${algo} (max_clusters=${run.max_clusters_per_residue ?? '—'})`;
+  }
+  return algo ? `${algo}` : 'cluster';
+}
+
+function DocOverlay({ docId, onClose, onNavigate }) {
+  const cacheRef = useRef({});
+  const [docState, setDocState] = useState({
+    title: 'Documentation',
+    blocks: [],
+    loading: true,
+    error: null,
+  });
+
+  useEffect(() => {
+    let isMounted = true;
+    const targetId = DOC_FILES[docId] ? docId : 'metastable_states';
+    const cached = cacheRef.current[targetId];
+    if (cached) {
+      setDocState({ ...cached, loading: false, error: null });
+      return () => {};
+    }
+    setDocState((prev) => ({ ...prev, loading: true, error: null }));
+    fetch(DOC_FILES[targetId])
+      .then((res) => {
+        if (!res.ok) throw new Error(`Failed to load ${targetId} documentation.`);
+        return res.text();
+      })
+      .then((text) => {
+        const parsed = parseMarkdown(text);
+        if (!isMounted) return;
+        cacheRef.current[targetId] = parsed;
+        setDocState({ ...parsed, loading: false, error: null });
+      })
+      .catch((err) => {
+        if (!isMounted) return;
+        setDocState((prev) => ({
+          ...prev,
+          loading: false,
+          error: err.message || 'Failed to load documentation.',
+        }));
+      });
+    return () => {
+      isMounted = false;
+    };
+  }, [docId]);
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4 py-8">
+      <div className="w-full max-w-3xl bg-gray-900 border border-gray-700 rounded-lg shadow-xl">
+        <div className="flex items-center justify-between border-b border-gray-800 px-4 py-3">
+          <h3 className="text-lg font-semibold text-white">{docState.title}</h3>
+          <button
+            type="button"
+            onClick={onClose}
+            className="text-gray-400 hover:text-gray-200"
+            aria-label="Close"
+          >
+            <X className="h-5 w-5" />
+          </button>
+        </div>
+        <div className="p-5 max-h-[75vh] overflow-y-auto space-y-4 text-sm text-gray-200">
+          {docState.loading && <p className="text-gray-400">Loading documentation...</p>}
+          {docState.error && <ErrorMessage message={docState.error} />}
+          {!docState.loading &&
+            !docState.error &&
+            docState.blocks.map((block, idx) => renderDocBlock(block, idx, onNavigate))}
+        </div>
+      </div>
+    </div>
+  );
+}
 
 export default function SystemDetailPage() {
   const { projectId, systemId } = useParams();
@@ -54,7 +309,12 @@ export default function SystemDetailPage() {
   const [selectedMetastableIds, setSelectedMetastableIds] = useState([]);
   const [clusterError, setClusterError] = useState(null);
   const [clusterLoading, setClusterLoading] = useState(false);
+  const [clusterPanelOpen, setClusterPanelOpen] = useState(false);
+  const [clusterName, setClusterName] = useState('');
+  const [clusterDetailState, setClusterDetailState] = useState(null);
+  const [clusterJobStatus, setClusterJobStatus] = useState({});
   const [maxClustersPerResidue, setMaxClustersPerResidue] = useState(6);
+  const [maxClusterFrames, setMaxClusterFrames] = useState(0);
   const [contactMode, setContactMode] = useState('CA');
   const [contactCutoff, setContactCutoff] = useState(10);
   const [clusterAlgorithm, setClusterAlgorithm] = useState('DENSITY_PEAKS');
@@ -73,6 +333,7 @@ export default function SystemDetailPage() {
   const [showMetastableInfo, setShowMetastableInfo] = useState(false);
   const [docId, setDocId] = useState('metastable_states');
   const [macroChoiceLoading, setMacroChoiceLoading] = useState(false);
+  const [infoOverlayState, setInfoOverlayState] = useState(null); // New state for info overlay
   const navigate = useNavigate();
 
   useEffect(() => {
@@ -109,6 +370,10 @@ export default function SystemDetailPage() {
   const metastableLocked = system?.metastable_locked;
   const analysisMode = system?.analysis_mode || null;
   const clusterRuns = useMemo(() => system?.metastable_clusters || [], [system]);
+  const readyClusterRuns = useMemo(
+    () => clusterRuns.filter((run) => run.path && run.status !== 'failed'),
+    [clusterRuns]
+  );
   const descriptorsReady = useMemo(
     () => states.length > 0 && states.every((state) => state.descriptor_file),
     [states]
@@ -116,25 +381,102 @@ export default function SystemDetailPage() {
   const macroReady = Boolean(macroLocked && descriptorsReady);
   const showSidebar = macroReady;
   const effectiveChoice = analysisMode || metaChoice;
+  const clustersUnlocked = macroReady && (analysisMode === 'macro' || metastableLocked);
   const analysisUnlocked = macroReady && (metastableLocked || effectiveChoice === 'macro');
-  const showPottsPanel = metastableLocked;
-  const analysisNote = metastableLocked
-    ? 'Static needs two descriptor-ready states; Potts uses saved cluster NPZ files.'
-    : 'Static needs two descriptor-ready states. Potts requires metastable discovery and saved cluster NPZ files.';
+  const showPottsPanel = metastableLocked || effectiveChoice === 'macro';
+  const analysisNote =
+    metastableLocked || effectiveChoice === 'macro'
+      ? 'Static needs two descriptor-ready states; Potts uses saved cluster NPZ files.'
+      : 'Static needs two descriptor-ready states. Potts requires metastable discovery and saved cluster NPZ files.';
   const showMacroChoicePanel =
     macroReady && !metastableLocked && effectiveChoice !== 'macro' && analysisMode !== 'metastable';
-  const showMetastablePanel = macroReady && effectiveChoice !== 'macro';
+  const showMetastablePanel = macroReady && effectiveChoice !== 'macro' && !metastableLocked;
+  const clusterSelectableStates = useMemo(() => {
+    if (metastableLocked) return metastableStates;
+    if (analysisMode === 'macro') {
+      return states.map((state) => ({
+        metastable_id: state.state_id,
+        metastable_index: 0,
+        macro_state_id: state.state_id,
+        macro_state: state.name,
+        name: state.name,
+        default_name: state.name,
+        n_frames: state.n_frames ?? 0,
+      }));
+    }
+    return metastableStates;
+  }, [analysisMode, metastableLocked, metastableStates, states]);
+  const selectedClusterFrameCount = useMemo(() => {
+    const framesById = new Map();
+    clusterSelectableStates.forEach((m) => {
+      const metaId = m.metastable_id || `${m.macro_state}-${m.metastable_index}`;
+      const count = Number(m.n_frames ?? 0);
+      framesById.set(metaId, Number.isFinite(count) ? count : 0);
+    });
+    return selectedMetastableIds.reduce((sum, id) => sum + (framesById.get(id) || 0), 0);
+  }, [clusterSelectableStates, selectedMetastableIds]);
+  const clusterFrameCap = useMemo(() => {
+    if (!selectedClusterFrameCount) return 0;
+    if (maxClusterFrames > 0) return Math.min(maxClusterFrames, selectedClusterFrameCount);
+    return selectedClusterFrameCount;
+  }, [maxClusterFrames, selectedClusterFrameCount]);
+  const activeClusterJobs = useMemo(
+    () =>
+      clusterRuns.filter(
+        (run) =>
+          run.job_id &&
+          !run.path &&
+          run.status !== 'failed' &&
+          run.status !== 'finished'
+      ),
+    [clusterRuns]
+  );
 
   useEffect(() => {
     setSelectedMetastableIds((prev) =>
       prev.filter((id) =>
-        metastableStates.some((m) => {
+        clusterSelectableStates.some((m) => {
           const metaId = m.metastable_id || `${m.macro_state}-${m.metastable_index}`;
           return metaId === id;
         })
       )
     );
-  }, [metastableStates]);
+  }, [clusterSelectableStates]);
+
+  useEffect(() => {
+    if (!activeClusterJobs.length) return;
+    let cancelled = false;
+    const poll = async () => {
+      let shouldRefresh = false;
+      const updates = {};
+      for (const run of activeClusterJobs) {
+        if (!run.job_id) continue;
+        try {
+          const status = await fetchJobStatus(run.job_id);
+          updates[run.cluster_id] = status;
+          if (status.status === 'finished' || status.status === 'failed') {
+            shouldRefresh = true;
+          }
+        } catch (err) {
+          updates[run.cluster_id] = { status: 'failed', result: { error: err.message } };
+          shouldRefresh = true;
+        }
+      }
+      if (!cancelled && Object.keys(updates).length) {
+        setClusterJobStatus((prev) => ({ ...prev, ...updates }));
+      }
+      if (!cancelled && shouldRefresh) {
+        await refreshSystem();
+      }
+    };
+    poll();
+    const timer = setInterval(poll, 5000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeClusterJobs]);
 
   useEffect(() => {
     if (!macroReady) {
@@ -360,12 +702,25 @@ export default function SystemDetailPage() {
     }
   };
 
+  const handleRenameMacroState = async (stateId, newName) => {
+    if (!newName.trim()) return;
+    setActionError(null);
+    try {
+      await renameState(projectId, systemId, stateId, newName.trim());
+      await refreshSystem();
+      setInfoOverlayState(null); // Close overlay after rename
+    } catch (err) {
+      setActionError(err.message);
+    }
+  };
+
   const handleRenameMetastable = async (metastableId, name) => {
     if (!name.trim()) return;
     setMetaActionError(null);
     try {
       await renameMetastableState(projectId, systemId, metastableId, name.trim());
       await loadMetastable();
+      setInfoOverlayState(null); // Close overlay after rename
     } catch (err) {
       setMetaActionError(err.message);
     }
@@ -416,12 +771,17 @@ export default function SystemDetailPage() {
 
   const handleDownloadClusters = async () => {
     if (!selectedMetastableIds.length) {
-      setClusterError('Select at least one metastable state to cluster.');
+      setClusterError(
+        analysisMode === 'macro'
+          ? 'Select at least one macro-state to cluster.'
+          : 'Select at least one metastable state to cluster.'
+      );
       return;
     }
     setClusterError(null);
     setClusterLoading(true);
     try {
+      const trimmedName = clusterName.trim();
       const algo = (clusterAlgorithm || 'DENSITY_PEAKS').toLowerCase();
       const algorithmParams = {};
       if (algo === 'dbscan') {
@@ -438,12 +798,14 @@ export default function SystemDetailPage() {
           algorithmParams.Z = 'auto';
         }
         algorithmParams.maxk = densityMaxk;
-      } else if (algo === 'hierarchical') {
-        algorithmParams.n_clusters = hierClusters;
-        algorithmParams.linkage = hierLinkage;
-      }
-      await downloadMetastableClusters(projectId, systemId, selectedMetastableIds, {
+        } else if (algo === 'hierarchical') {
+          algorithmParams.n_clusters = hierClusters;
+          algorithmParams.linkage = hierLinkage;
+        }
+      await submitMetastableClusterJob(projectId, systemId, selectedMetastableIds, {
+        cluster_name: trimmedName || undefined,
         max_clusters_per_residue: maxClustersPerResidue,
+        max_cluster_frames: maxClusterFrames > 0 ? maxClusterFrames : undefined,
         contact_atom_mode: contactMode,
         contact_cutoff: contactCutoff,
         cluster_algorithm: algo,
@@ -451,11 +813,27 @@ export default function SystemDetailPage() {
         dbscan_eps: dbscanEps,
         dbscan_min_samples: dbscanMinSamples,
       });
+      setClusterPanelOpen(false);
+      setClusterName('');
       await refreshSystem();
     } catch (err) {
       setClusterError(err.message);
     } finally {
       setClusterLoading(false);
+    }
+  };
+
+  const handleRenameCluster = async (clusterId, name) => {
+    if (!name.trim()) return;
+    setClusterError(null);
+    try {
+      await renameMetastableCluster(projectId, systemId, clusterId, name.trim());
+      setClusterDetailState((prev) =>
+        prev && prev.cluster_id === clusterId ? { ...prev, name: name.trim() } : prev
+      );
+      await refreshSystem();
+    } catch (err) {
+      setClusterError(err.message);
     }
   };
 
@@ -482,9 +860,14 @@ export default function SystemDetailPage() {
     try {
       await deleteSavedCluster(projectId, systemId, clusterId);
       await refreshSystem();
+      setClusterDetailState((prev) => (prev && prev.cluster_id === clusterId ? null : prev));
     } catch (err) {
       setClusterError(err.message);
     }
+  };
+
+  const handleCloseInfoOverlay = () => {
+    setInfoOverlayState(null);
   };
 
   return (
@@ -530,25 +913,35 @@ export default function SystemDetailPage() {
                               onClick={(event) => {
                                 event.preventDefault();
                                 event.stopPropagation();
-                                navigate(
-                                  `/projects/${projectId}/systems/${systemId}/descriptors/visualize?state_id=${encodeURIComponent(
-                                    state.state_id
-                                  )}`
-                                );
+                                setInfoOverlayState({ type: 'macro', data: state });
                               }}
                               className="text-gray-400 hover:text-cyan-300"
-                              aria-label={`Visualize ${state.name}`}
+                              aria-label={`Show info for ${state.name}`}
                             >
-                              <Eye className="h-4 w-4" />
+                              <Info className="h-4 w-4" />
                             </button>
                           </span>
                           <span className="text-xs text-gray-400">{metaForState.length} meta</span>
                         </summary>
                         <div className="mt-2 space-y-1 text-xs text-gray-300">
                           {metaForState.map((m) => (
-                            <div key={m.metastable_id} className="flex justify-between">
+                            <div key={m.metastable_id} className="flex justify-between items-center">
                               <span>{m.name || m.default_name || m.metastable_id}</span>
-                              <span className="text-gray-500">#{m.metastable_index}</span>
+                              <div className="flex items-center gap-2">
+                                <span className="text-gray-500">#{m.metastable_index}</span>
+                                <button
+                                  type="button"
+                                  onClick={(event) => {
+                                    event.preventDefault();
+                                    event.stopPropagation();
+                                    setInfoOverlayState({ type: 'meta', data: m });
+                                  }}
+                                  className="text-gray-400 hover:text-cyan-300"
+                                  aria-label={`Show info for ${m.name || m.default_name || m.metastable_id}`}
+                                >
+                                  <Info className="h-4 w-4" />
+                                </button>
+                              </div>
                             </div>
                           ))}
                         </div>
@@ -557,33 +950,147 @@ export default function SystemDetailPage() {
                       <div className="flex items-center justify-between text-sm text-gray-200">
                         <span className="flex items-center gap-2">
                           {state.name}
-                          <button
-                            type="button"
-                            onClick={() =>
-                              navigate(
-                                `/projects/${projectId}/systems/${systemId}/descriptors/visualize?state_id=${encodeURIComponent(
-                                  state.state_id
-                                )}`
-                              )
-                            }
-                            className="text-gray-400 hover:text-cyan-300"
-                            aria-label={`Visualize ${state.name}`}
-                          >
-                            <Eye className="h-4 w-4" />
-                          </button>
                         </span>
                         <span className="text-xs text-gray-500">
                           {state.descriptor_file ? 'Descriptors ready' : 'Descriptors missing'}
                         </span>
+                        <button
+                          type="button"
+                          onClick={() => setInfoOverlayState({ type: 'macro', data: state })}
+                          className="text-gray-400 hover:text-cyan-300"
+                          aria-label={`Show info for ${state.name}`}
+                        >
+                          <Info className="h-4 w-4" />
+                        </button>
                       </div>
                     )}
                   </div>
                 );
               })}
-              {!metastableLocked && (
-                <p className="text-xs text-gray-500">Confirm how to proceed to unlock clustering and analysis.</p>
-              )}
             </div>
+            {!clustersUnlocked && (
+              <p className="text-xs text-gray-500">Confirm how to proceed to unlock clustering and analysis.</p>
+            )}
+            {clustersUnlocked && (
+              <div className="border-t border-gray-700 pt-3 space-y-2">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h3 className="text-sm font-semibold text-white">Cluster NPZ</h3>
+                    <p className="text-xs text-gray-400">Residue cluster runs for Potts sampling.</p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setClusterError(null);
+                      setClusterPanelOpen(true);
+                    }}
+                    className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-gray-700 text-gray-200 hover:border-cyan-500 hover:text-cyan-300 disabled:opacity-50"
+                    disabled={clusterLoading}
+                    aria-label="Create new cluster run"
+                  >
+                    <Plus className="h-4 w-4" />
+                  </button>
+                </div>
+                {analysisMode === 'macro' && (
+                  <p className="text-[11px] text-cyan-300">
+                    Macro-states are treated as metastable sets when clustering.
+                  </p>
+                )}
+                {clusterError && <ErrorMessage message={clusterError} />}
+                {clusterRuns.length === 0 && <p className="text-xs text-gray-400">No cluster runs yet.</p>}
+                {clusterRuns.length > 0 && (
+                  <div className="space-y-2">
+                    {clusterRuns
+                      .slice()
+                      .reverse()
+                      .map((run) => {
+                        const name = getClusterDisplayName(run);
+                        const jobSnapshot = clusterJobStatus[run.cluster_id];
+                        const jobMeta = jobSnapshot?.meta || {};
+                        const jobStatus = jobSnapshot?.status || run.status;
+                        const statusLabel = jobMeta.status || run.status_message || run.status || 'queued';
+                        const progress = jobMeta.progress ?? run.progress;
+                        const isReady = Boolean(run.path) && (run.status === 'finished' || !run.status);
+                        const isFailed = jobStatus === 'failed' || run.status === 'failed';
+                        const isRunning = !isReady && !isFailed;
+                        if (isReady) {
+                          return (
+                            <button
+                              key={run.cluster_id}
+                              type="button"
+                              onClick={() => setClusterDetailState(run)}
+                              className="w-full text-left rounded-md border px-3 py-2 border-gray-700 bg-gray-900/60 hover:border-cyan-500"
+                            >
+                              <div className="flex items-center justify-between text-xs">
+                                <span className="text-gray-200">{name}</span>
+                                <span className="text-[10px] text-gray-500">
+                                  {run.cluster_algorithm ? run.cluster_algorithm.toUpperCase() : 'CLUSTER'}
+                                </span>
+                              </div>
+                              <p className="text-[11px] text-gray-400 mt-1">
+                                {analysisMode === 'macro' ? 'States' : 'Metastable'}:{' '}
+                                {Array.isArray(run.metastable_ids) ? run.metastable_ids.length : '—'} |{' '}
+                                Max clusters: {run.max_clusters_per_residue ?? '—'} | Max frames:{' '}
+                                {run.max_cluster_frames ?? 'all'}
+                              </p>
+                            </button>
+                          );
+                        }
+
+                        return (
+                          <div
+                            key={run.cluster_id}
+                            className="w-full text-left rounded-md border px-3 py-2 border-gray-800 bg-gray-900/40"
+                          >
+                            <div className="flex items-center justify-between text-xs">
+                              <span className="text-gray-200">{name}</span>
+                              <span className="text-[10px] text-gray-500">
+                                {run.cluster_algorithm ? run.cluster_algorithm.toUpperCase() : 'CLUSTER'}
+                              </span>
+                            </div>
+                            <p className="text-[11px] text-gray-400 mt-1">
+                              {analysisMode === 'macro' ? 'States' : 'Metastable'}:{' '}
+                              {Array.isArray(run.metastable_ids) ? run.metastable_ids.length : '—'} |{' '}
+                              Max clusters: {run.max_clusters_per_residue ?? '—'} | Max frames:{' '}
+                              {run.max_cluster_frames ?? 'all'}
+                            </p>
+                            {isRunning && (
+                              <div className="mt-2 space-y-1 text-[11px] text-gray-400">
+                                <div className="flex items-center justify-between">
+                                  <span>{statusLabel}</span>
+                                  <span>{Number.isFinite(progress) ? `${progress}%` : '—'}</span>
+                                </div>
+                                <div className="h-2 bg-gray-800 rounded-full overflow-hidden">
+                                  <div
+                                    className="h-full bg-cyan-500 animate-pulse"
+                                    style={{ width: Number.isFinite(progress) ? `${progress}%` : '40%' }}
+                                  />
+                                </div>
+                              </div>
+                            )}
+                            {isFailed && (
+                              <div className="mt-2 flex items-center justify-between text-[11px] text-red-300">
+                                <span>{run.error || jobSnapshot?.result?.error || 'Clustering failed.'}</span>
+                                <button
+                                  type="button"
+                                  onClick={(event) => {
+                                    event.preventDefault();
+                                    event.stopPropagation();
+                                    handleDeleteSavedCluster(run.cluster_id);
+                                  }}
+                                  className="text-[11px] text-red-200 hover:text-red-100"
+                                >
+                                  Delete
+                                </button>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                  </div>
+                )}
+              </div>
+            )}
           </aside>
         )}
 
@@ -850,48 +1357,262 @@ export default function SystemDetailPage() {
         </section>
       )}
 
-      {metastableLocked && (
+      {analysisUnlocked && (
         <section className="bg-gray-800 border border-gray-700 rounded-lg p-4 space-y-4">
           <div className="flex items-center justify-between">
-            <h2 className="text-lg font-semibold text-white">Residue cluster NPZ</h2>
-            <div className="flex items-center space-x-2">
-              <button
-                onClick={handleDownloadClusters}
-                disabled={clusterLoading || selectedMetastableIds.length === 0}
-                className="text-xs px-3 py-1 rounded-md border border-emerald-500 text-emerald-300 hover:bg-emerald-500/10 disabled:opacity-50"
-              >
-                {clusterLoading ? 'Generating…' : 'Generate'}
-              </button>
+            <h2 className="text-lg font-semibold text-white">Run Analysis</h2>
+            <p className="text-xs text-gray-400">{analysisNote}</p>
+          </div>
+          {analysisError && <ErrorMessage message={analysisError} />}
+          <div className={showPottsPanel ? 'grid lg:grid-cols-2 gap-6' : ''}>
+            <div className="bg-gray-900 border border-gray-700 rounded-lg p-4 space-y-4">
+              <div>
+                <h3 className="text-md font-semibold text-white">Static Reporters</h3>
+                <p className="text-xs text-gray-500 mt-1">Select two descriptor-ready states to compare.</p>
+              </div>
+              <StatePairSelector
+                options={analysisStateOptions}
+                value={statePair}
+                onChange={(updater) => {
+                  setAnalysisError(null);
+                  setStatePair(updater);
+                }}
+              />
+              <StaticAnalysisForm onSubmit={(params) => enqueueStaticJob(submitStaticJob, params)} />
             </div>
-          </div>
-          {clusterError && <ErrorMessage message={clusterError} />}
-          <p className="text-xs text-gray-400">
-            Select locked metastable states to cluster per-residue angles; generated NPZ files are saved and listed below.
-          </p>
-          <div className="flex flex-wrap gap-2">
-            {metastableStates.map((m) => {
-              const metaId = m.metastable_id || `${m.macro_state}-${m.metastable_index}`;
-              const label = m.name || m.default_name || metaId;
-              const checked = selectedMetastableIds.includes(metaId);
-              return (
-                <label
-                  key={metaId}
-                  className={`flex items-center space-x-2 px-3 py-2 rounded-md border cursor-pointer ${
-                    checked ? 'border-emerald-400 bg-emerald-500/10' : 'border-gray-700 bg-gray-800/60'
-                  }`}
-                >
-                  <input
-                    type="checkbox"
-                    checked={checked}
-                    onChange={() => toggleMetastableSelection(metaId)}
-                    className="accent-emerald-400"
+            {showPottsPanel && (
+              <div className="bg-gray-900 border border-gray-700 rounded-lg p-4">
+                <div className="flex items-center gap-2 mb-2">
+                  <h3 className="text-md font-semibold text-white">Potts Sampling</h3>
+                  <InfoTooltip
+                    ariaLabel="Potts analysis documentation"
+                    text="Open documentation for the Potts model, sampling, and diagnostics."
+                    onClick={() => openDoc('potts_overview')}
                   />
-                  <span className="text-sm text-gray-200">{label}</span>
-                </label>
-              );
-            })}
+                </div>
+                <SimulationAnalysisForm clusterRuns={readyClusterRuns} onSubmit={enqueueSimulationJob} />
+              </div>
+            )}
           </div>
-          <div className="grid md:grid-cols-5 gap-3 text-xs text-gray-300">
+        </section>
+      )}
+      {clusterPanelOpen && (
+        <ClusterBuildOverlay
+          metastableStates={clusterSelectableStates}
+          selectedMetastableIds={selectedMetastableIds}
+          onToggleMetastable={toggleMetastableSelection}
+          clusterName={clusterName}
+          setClusterName={setClusterName}
+          analysisMode={analysisMode}
+          clusterAlgorithm={clusterAlgorithm}
+          setClusterAlgorithm={setClusterAlgorithm}
+          tomatoK={tomatoK}
+          setTomatoK={setTomatoK}
+          tomatoTauMode={tomatoTauMode}
+          setTomatoTauMode={setTomatoTauMode}
+          tomatoTauValue={tomatoTauValue}
+          setTomatoTauValue={setTomatoTauValue}
+          tomatoKMax={tomatoKMax}
+          setTomatoKMax={setTomatoKMax}
+          densityZMode={densityZMode}
+          setDensityZMode={setDensityZMode}
+          densityZValue={densityZValue}
+          setDensityZValue={setDensityZValue}
+          densityMaxk={densityMaxk}
+          setDensityMaxk={setDensityMaxk}
+          maxClustersPerResidue={maxClustersPerResidue}
+          setMaxClustersPerResidue={setMaxClustersPerResidue}
+          maxClusterFrames={maxClusterFrames}
+          setMaxClusterFrames={setMaxClusterFrames}
+          selectedClusterFrameCount={selectedClusterFrameCount}
+          clusterFrameCap={clusterFrameCap}
+          dbscanEps={dbscanEps}
+          setDbscanEps={setDbscanEps}
+          dbscanMinSamples={dbscanMinSamples}
+          setDbscanMinSamples={setDbscanMinSamples}
+          hierClusters={hierClusters}
+          setHierClusters={setHierClusters}
+          hierLinkage={hierLinkage}
+          setHierLinkage={setHierLinkage}
+          contactMode={contactMode}
+          setContactMode={setContactMode}
+          contactCutoff={contactCutoff}
+          setContactCutoff={setContactCutoff}
+          clusterError={clusterError}
+          clusterLoading={clusterLoading}
+          onClose={() => setClusterPanelOpen(false)}
+          onSubmit={handleDownloadClusters}
+        />
+      )}
+      {clusterDetailState && (
+        <ClusterDetailOverlay
+          cluster={clusterDetailState}
+          analysisMode={analysisMode}
+          onClose={() => setClusterDetailState(null)}
+          onRename={handleRenameCluster}
+          onDownload={handleDownloadSavedCluster}
+          onDelete={handleDeleteSavedCluster}
+          onVisualize={(clusterId) =>
+            navigate(
+              `/projects/${projectId}/systems/${systemId}/descriptors/visualize?cluster_id=${encodeURIComponent(
+                clusterId
+              )}`
+            )
+          }
+        />
+      )}
+      {showMetastableInfo && (
+        <DocOverlay docId={docId} onClose={() => setShowMetastableInfo(false)} onNavigate={setDocId} />
+      )}
+      {infoOverlayState && (
+        <InfoOverlay
+          state={infoOverlayState.data}
+          type={infoOverlayState.type}
+          onClose={handleCloseInfoOverlay}
+          onRenameMacro={handleRenameMacroState}
+          onRenameMeta={handleRenameMetastable}
+        />
+      )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function InfoTooltip({ text, ariaLabel, onClick }) {
+  return (
+    <span className="relative inline-flex group">
+      <button
+        type="button"
+        className="inline-flex items-center justify-center text-gray-500 hover:text-gray-300 focus:outline-none"
+        aria-label={ariaLabel}
+        aria-haspopup={onClick ? 'dialog' : undefined}
+        onClick={onClick}
+      >
+        <Info className="h-4 w-4" />
+      </button>
+      <span className="pointer-events-none absolute left-1/2 top-full z-20 mt-2 w-72 -translate-x-1/2 rounded-md border border-gray-700 bg-gray-900 px-3 py-2 text-xs text-gray-200 opacity-0 shadow-lg transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
+        {text}
+      </span>
+    </span>
+  );
+}
+
+function ClusterBuildOverlay({
+  metastableStates,
+  selectedMetastableIds,
+  onToggleMetastable,
+  clusterName,
+  setClusterName,
+  analysisMode,
+  clusterAlgorithm,
+  setClusterAlgorithm,
+  tomatoK,
+  setTomatoK,
+  tomatoTauMode,
+  setTomatoTauMode,
+  tomatoTauValue,
+  setTomatoTauValue,
+  tomatoKMax,
+  setTomatoKMax,
+  densityZMode,
+  setDensityZMode,
+  densityZValue,
+  setDensityZValue,
+  densityMaxk,
+  setDensityMaxk,
+  maxClustersPerResidue,
+  setMaxClustersPerResidue,
+  maxClusterFrames,
+  setMaxClusterFrames,
+  selectedClusterFrameCount,
+  clusterFrameCap,
+  dbscanEps,
+  setDbscanEps,
+  dbscanMinSamples,
+  setDbscanMinSamples,
+  hierClusters,
+  setHierClusters,
+  hierLinkage,
+  setHierLinkage,
+  contactMode,
+  setContactMode,
+  contactCutoff,
+  setContactCutoff,
+  clusterError,
+  clusterLoading,
+  onClose,
+  onSubmit,
+}) {
+  const hasMetastable = metastableStates.length > 0;
+  const canSubmit = selectedMetastableIds.length > 0 && !clusterLoading;
+  const macroOnly = analysisMode === 'macro';
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4 py-8">
+      <div className="w-full max-w-5xl bg-gray-900 border border-gray-700 rounded-lg shadow-xl">
+        <div className="flex items-center justify-between border-b border-gray-800 px-4 py-3">
+          <h3 className="text-lg font-semibold text-white">New Cluster NPZ</h3>
+          <button
+            type="button"
+            onClick={onClose}
+            className="text-gray-400 hover:text-gray-200"
+            aria-label="Close"
+          >
+            <X className="h-5 w-5" />
+          </button>
+        </div>
+        <div className="p-5 max-h-[75vh] overflow-y-auto space-y-4 text-sm text-gray-200">
+          <label className="space-y-1">
+            <span className="block text-xs text-gray-400">Cluster name (optional)</span>
+            <input
+              type="text"
+              value={clusterName}
+              onChange={(e) => setClusterName(e.target.value)}
+              placeholder="e.g. beta sweep cluster"
+              className="w-full bg-gray-800 border border-gray-700 rounded-md px-3 py-2 text-white"
+            />
+          </label>
+
+          <div className="space-y-2">
+            <p className="text-xs text-gray-400">
+              {macroOnly
+                ? 'Select macro-states to cluster per-residue angles. Each macro-state contributes all its frames.'
+                : 'Select metastable states to cluster per-residue angles. Generated NPZ files are saved for Potts sampling.'}
+            </p>
+            {!hasMetastable && (
+              <p className="text-xs text-amber-300">
+                {macroOnly ? 'No macro-states available.' : 'No metastable states available.'}
+              </p>
+            )}
+            {hasMetastable && (
+              <div className="flex flex-wrap gap-2">
+                {metastableStates.map((m) => {
+                  const metaId = m.metastable_id || `${m.macro_state}-${m.metastable_index}`;
+                  const label = m.name || m.default_name || metaId;
+                  const checked = selectedMetastableIds.includes(metaId);
+                  return (
+                    <label
+                      key={metaId}
+                      className={`flex items-center space-x-2 px-3 py-2 rounded-md border cursor-pointer ${
+                        checked ? 'border-emerald-400 bg-emerald-500/10' : 'border-gray-700 bg-gray-800/60'
+                      }`}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={() => onToggleMetastable(metaId)}
+                        className="accent-emerald-400"
+                      />
+                      <span className="text-sm text-gray-200">{label}</span>
+                    </label>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
+          <div className="grid md:grid-cols-4 gap-3 text-xs text-gray-300">
             <label className="space-y-1">
               <span className="block text-gray-400">Algorithm</span>
               <select
@@ -905,6 +1626,20 @@ export default function SystemDetailPage() {
                 <option value="KMEANS">Periodic K-Means</option>
                 <option value="HIERARCHICAL">Hierarchical (periodic)</option>
               </select>
+            </label>
+            <label className="space-y-1 md:col-span-2">
+              <span className="block text-gray-400">Max frames to cluster (0 = all)</span>
+              <input
+                type="number"
+                min={0}
+                value={maxClusterFrames}
+                onChange={(e) => setMaxClusterFrames(Math.max(0, Number(e.target.value) || 0))}
+                className="w-full bg-gray-800 border border-gray-700 rounded-md px-2 py-1 text-white"
+              />
+              <p className="text-[11px] text-gray-400 leading-snug">
+                Selected frames: {selectedClusterFrameCount || 0}. Clustering uses up to {clusterFrameCap || 0} frames
+                per dataset (uniform sample). Remaining frames are assigned by nearest-neighbor majority.
+              </p>
             </label>
             {clusterAlgorithm === 'TOMATO' && (
               <>
@@ -940,7 +1675,7 @@ export default function SystemDetailPage() {
                       />
                     ) : (
                       <p className="text-[11px] text-gray-400 leading-snug">
-                        Automatically picks τ from the largest persistence gap in the residue trajectory.
+                        Automatically picks tau from the largest persistence gap in the residue trajectory.
                       </p>
                     )}
                   </div>
@@ -999,7 +1734,7 @@ export default function SystemDetailPage() {
                 </label>
               </>
             )}
-            {(clusterAlgorithm === 'KMEANS') && (
+            {clusterAlgorithm === 'KMEANS' && (
               <label className="space-y-1">
                 <span className="block text-gray-400">Max clusters / residue</span>
                 <input
@@ -1077,7 +1812,7 @@ export default function SystemDetailPage() {
               </select>
             </label>
             <label className="space-y-1">
-              <span className="block text-gray-400">Contact cutoff (Å)</span>
+              <span className="block text-gray-400">Contact cutoff (A)</span>
               <input
                 type="number"
                 min={1}
@@ -1094,354 +1829,167 @@ export default function SystemDetailPage() {
               </p>
             </div>
           </div>
-          <p className="text-gray-400 text-xs">
-            NPZ includes per-metastable and merged cluster vectors, contact map edge_index (pyg format), and metadata JSON.
-          </p>
-          <div className="bg-gray-900 border border-gray-700 rounded-md p-3">
-            <h3 className="text-sm font-semibold text-white mb-2">Saved cluster NPZ files</h3>
-            {clusterRuns.length === 0 && <p className="text-xs text-gray-400">None yet.</p>}
-            {clusterRuns.length > 0 && (
-              <div className="space-y-2">
-                {clusterRuns
-                  .slice()
-                  .reverse()
-                  .map((run) => {
-                    const name = run.path?.split('/').pop();
-                    return (
-                      <div
-                        key={run.cluster_id}
-                        className="flex items-center justify-between text-xs bg-gray-800 border border-gray-700 rounded-md p-2"
-                      >
-                        <div className="space-y-1">
-                          <p className="text-gray-200">{name || run.cluster_id}</p>
-                          <p className="text-gray-400">
-                            Metastable: {Array.isArray(run.metastable_ids) ? run.metastable_ids.join(', ') : '—'} | Max clusters:{' '}
-                            {run.max_clusters_per_residue ?? '—'}
-                          </p>
-                          <p className="text-gray-400">
-                            Contact: {run.contact_atom_mode || run.contact_mode || 'CA'} @ {run.contact_cutoff ?? 10} Å | Edges:{' '}
-                            {run.contact_edge_count ?? '—'}
-                          </p>
-                          <p className="text-gray-400">
-                            Algo: {run.cluster_algorithm || 'dbscan'}{' '}
-                            {(() => {
-                              const a = (run.cluster_algorithm || '').toLowerCase();
-                              const params = run.algorithm_params || {};
-                              if (a === 'dbscan') {
-                                return `(eps=${params.eps ?? '—'}, min_samples=${params.min_samples ?? '—'})`;
-                              }
-                              if (a === 'hierarchical') {
-                                return `(n_clusters=${params.n_clusters ?? '—'}, linkage=${params.linkage || 'ward'})`;
-                              }
-                              if (a === 'tomato') {
-                                return `(k=${params.k_neighbors ?? '—'}, tau=${params.tau ?? '—'}, k_max=${params.k_max ?? '—'})`;
-                              }
-                              if (a === 'density_peaks' || a === 'kmeans') {
-                                return `(max_clusters=${run.max_clusters_per_residue ?? '—'})`;
-                              }
-                              return '';
-                            })()}
-                          </p>
-                          <p className="text-gray-500">{run.generated_at || ''}</p>
-                        </div>
-                        <div className="flex items-center gap-2">
-                          <button
-                            onClick={() => handleDownloadSavedCluster(run.cluster_id, name)}
-                            className="text-emerald-300 border border-emerald-500 px-2 py-1 rounded-md hover:bg-emerald-500/10"
-                          >
-                            Download
-                          </button>
-                          <button
-                            onClick={() =>
-                              navigate(
-                                `/projects/${projectId}/systems/${systemId}/descriptors/visualize?cluster_id=${encodeURIComponent(
-                                  run.cluster_id
-                                )}&cluster_mode=merged`
-                              )
-                            }
-                            className="text-cyan-300 border border-cyan-500 px-2 py-1 rounded-md hover:bg-cyan-500/10"
-                          >
-                            Visualize
-                          </button>
-                          <button
-                            onClick={() => handleDeleteSavedCluster(run.cluster_id)}
-                            className="text-red-300 border border-red-400 px-2 py-1 rounded-md hover:bg-red-500/10"
-                          >
-                            Delete
-                          </button>
-                        </div>
-                      </div>
-                    );
-                  })}
-              </div>
-            )}
-          </div>
-        </section>
-      )}
 
-      {analysisUnlocked && (
-        <section className="bg-gray-800 border border-gray-700 rounded-lg p-4 space-y-4">
-          <div className="flex items-center justify-between">
-            <h2 className="text-lg font-semibold text-white">Run Analysis</h2>
-            <p className="text-xs text-gray-400">{analysisNote}</p>
-          </div>
-          {analysisError && <ErrorMessage message={analysisError} />}
-          <div className={showPottsPanel ? 'grid lg:grid-cols-2 gap-6' : ''}>
-            <div className="bg-gray-900 border border-gray-700 rounded-lg p-4 space-y-4">
-              <div>
-                <h3 className="text-md font-semibold text-white">Static Reporters</h3>
-                <p className="text-xs text-gray-500 mt-1">Select two descriptor-ready states to compare.</p>
-              </div>
-              <StatePairSelector
-                options={analysisStateOptions}
-                value={statePair}
-                onChange={(updater) => {
-                  setAnalysisError(null);
-                  setStatePair(updater);
-                }}
-              />
-              <StaticAnalysisForm onSubmit={(params) => enqueueStaticJob(submitStaticJob, params)} />
-            </div>
-            {showPottsPanel && (
-              <div className="bg-gray-900 border border-gray-700 rounded-lg p-4">
-                <h3 className="text-md font-semibold text-white mb-2">Potts Sampling</h3>
-                <SimulationAnalysisForm clusterRuns={clusterRuns} onSubmit={enqueueSimulationJob} />
-              </div>
-            )}
-          </div>
-        </section>
-      )}
-      {showMetastableInfo && (
-        <DocOverlay docId={docId} onClose={() => setShowMetastableInfo(false)} onNavigate={setDocId} />
-      )}
+          <p className="text-gray-400 text-xs">
+            NPZ includes merged cluster vectors, contact map edge_index (pyg format), and metadata JSON.
+          </p>
+          {clusterError && <ErrorMessage message={clusterError} />}
+        </div>
+        <div className="flex items-center justify-end gap-2 border-t border-gray-800 px-4 py-3">
+          <button
+            type="button"
+            onClick={onClose}
+            className="text-xs px-3 py-2 rounded-md border border-gray-600 text-gray-200 hover:bg-gray-700/60"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={onSubmit}
+            disabled={!canSubmit}
+            className="text-xs px-3 py-2 rounded-md border border-emerald-500 text-emerald-300 hover:bg-emerald-500/10 disabled:opacity-50"
+          >
+            {clusterLoading ? 'Generating...' : 'Run clustering'}
+          </button>
         </div>
       </div>
     </div>
   );
 }
 
-function InfoTooltip({ text, ariaLabel, onClick }) {
-  return (
-    <span className="relative inline-flex group">
-      <button
-        type="button"
-        className="inline-flex items-center justify-center text-gray-500 hover:text-gray-300 focus:outline-none"
-        aria-label={ariaLabel}
-        aria-haspopup={onClick ? 'dialog' : undefined}
-        onClick={onClick}
-      >
-        <Info className="h-4 w-4" />
-      </button>
-      <span className="pointer-events-none absolute left-1/2 top-full z-20 mt-2 w-72 -translate-x-1/2 rounded-md border border-gray-700 bg-gray-900 px-3 py-2 text-xs text-gray-200 opacity-0 shadow-lg transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
-        {text}
-      </span>
-    </span>
-  );
-}
-
-function StateCard({ state, onDownload, onUpload, onDeleteTrajectory, onDeleteState, uploading, progress, processing }) {
-  const [file, setFile] = useState(null);
-  const [stride, setStride] = useState(state?.stride || 1);
-
-  const descriptorLabel = state?.descriptor_file ? 'Ready' : 'Not built';
-  const trajectoryLabel = state?.source_traj || '—';
-
-  return (
-    <article className="bg-gray-900 rounded-lg p-4 border border-gray-700 space-y-3">
-      <div className="flex items-center justify-between">
-        <div>
-          <h3 className="text-md font-semibold text-white">{state.name}</h3>
-          <p className="text-xs text-gray-500">{state.state_id?.slice(0, 8)}</p>
-        </div>
-        <button
-          onClick={onDownload}
-          disabled={!state?.pdb_file}
-          className="flex items-center space-x-1 text-sm text-cyan-400 hover:text-cyan-300 disabled:opacity-50"
-        >
-          <Download className="h-4 w-4" />
-          <span>PDB</span>
-        </button>
-      </div>
-
-      <dl className="space-y-1 text-sm text-gray-300">
-        <div className="flex justify-between">
-          <dt>Trajectory</dt>
-          <dd className="truncate text-gray-200">{trajectoryLabel}</dd>
-        </div>
-        <div className="flex justify-between">
-          <dt>Frames</dt>
-          <dd>{state?.n_frames ?? 0}</dd>
-        </div>
-        <div className="flex justify-between">
-          <dt>Stride</dt>
-          <dd>{state?.stride ?? 1}</dd>
-        </div>
-        <div className="flex justify-between">
-          <dt>Descriptors</dt>
-          <dd className="truncate text-gray-200">{descriptorLabel}</dd>
-        </div>
-      </dl>
-
-      {(uploading || progress !== undefined || processing) && (
-        <div className="space-y-1 text-xs text-gray-300">
-          <div className="flex items-center justify-between">
-            <span>{processing ? 'Processing descriptors' : 'Uploading trajectory'}</span>
-            <span>{progress !== undefined ? `${progress}%` : ''}</span>
-          </div>
-          <div className="h-2 bg-gray-800 rounded-full overflow-hidden">
-            <div
-              className={`h-full ${processing ? 'bg-amber-400 animate-pulse' : 'bg-cyan-500'}`}
-              style={{ width: progress !== undefined ? `${progress}%` : '33%' }}
-            />
-          </div>
-        </div>
-      )}
-
-      <div className="space-y-2">
-        <div>
-          <label className="block text-sm text-gray-300 mb-1">Upload trajectory</label>
-          <input
-            type="file"
-            onChange={(e) => setFile(e.target.files?.[0] || null)}
-            className="w-full text-sm text-gray-300"
-          />
-        </div>
-        <div>
-          <label className="block text-sm text-gray-300 mb-1">Stride</label>
-          <input
-            type="number"
-            min={1}
-            value={stride}
-            onChange={(e) => setStride(Number(e.target.value) || 1)}
-            className="w-full bg-gray-800 border border-gray-700 rounded-md px-2 py-1 text-white"
-          />
-        </div>
-        <button
-          onClick={() => onUpload(state.state_id, file, stride)}
-          disabled={uploading || !file}
-          className="w-full bg-cyan-600 hover:bg-cyan-500 text-white font-semibold py-2 rounded-md transition-colors disabled:opacity-50"
-        >
-          {uploading ? 'Uploading...' : 'Upload & Build'}
-        </button>
-      </div>
-
-      <div className="flex items-center justify-between text-xs">
-        <button
-          onClick={onDeleteTrajectory}
-          className="text-red-300 hover:text-red-200 disabled:opacity-50"
-          disabled={!state?.trajectory_file && !state?.descriptor_file}
-        >
-          Remove trajectory
-        </button>
-        <button onClick={onDeleteState} className="text-gray-400 hover:text-red-300">
-          Delete state
-        </button>
-      </div>
-    </article>
-  );
-}
-
-function MetastableCard({ meta, onRename }) {
-  const [name, setName] = useState(meta.name || meta.default_name || `Meta ${meta.metastable_index}`);
+function ClusterDetailOverlay({ cluster, analysisMode, onClose, onRename, onDownload, onDelete, onVisualize }) {
+  const [name, setName] = useState(getClusterDisplayName(cluster));
   const [isSaving, setIsSaving] = useState(false);
+  const stateLabel = analysisMode === 'macro' ? 'States' : 'Metastable';
+
+  useEffect(() => {
+    setName(getClusterDisplayName(cluster));
+  }, [cluster]);
 
   const handleSave = async () => {
-    if (!meta.metastable_id) return;
+    if (!name.trim()) return;
     setIsSaving(true);
     try {
-      await onRename(meta.metastable_id, name);
+      await onRename(cluster.cluster_id, name.trim());
     } finally {
       setIsSaving(false);
     }
   };
 
+  const algoSummary = formatClusterAlgorithm(cluster);
+  const filename = cluster.path?.split('/').pop();
+
   return (
-    <div className="bg-gray-900 border border-gray-700 rounded-lg p-3 space-y-2">
-      <div className="flex items-center justify-between">
-        <p className="text-xs text-gray-400">{meta.macro_state}</p>
-        <span className="text-xs text-gray-500">Frames: {meta.n_frames ?? '—'}</span>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4 py-8">
+      <div className="w-full max-w-2xl bg-gray-900 border border-gray-700 rounded-lg shadow-xl">
+        <div className="flex items-center justify-between border-b border-gray-800 px-4 py-3">
+          <h3 className="text-lg font-semibold text-white">Cluster NPZ Details</h3>
+          <button
+            type="button"
+            onClick={onClose}
+            className="text-gray-400 hover:text-gray-200"
+            aria-label="Close"
+          >
+            <X className="h-5 w-5" />
+          </button>
+        </div>
+        <div className="p-5 space-y-4 text-sm text-gray-200">
+          <div>
+            <label className="block text-xs text-gray-400 mb-1">Cluster name</label>
+            <div className="flex items-center gap-2">
+              <input
+                type="text"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                className="flex-1 bg-gray-800 border border-gray-700 rounded-md px-3 py-2 text-white"
+              />
+              <button
+                type="button"
+                onClick={handleSave}
+                disabled={isSaving || !name.trim()}
+                className="text-xs px-3 py-2 rounded-md border border-cyan-500 text-cyan-300 hover:bg-cyan-500/10 disabled:opacity-50"
+              >
+                {isSaving ? 'Saving...' : 'Save'}
+              </button>
+            </div>
+          </div>
+
+          <div className="space-y-1 text-xs text-gray-400">
+            <p>
+              <span className="text-gray-300 font-semibold">ID:</span> {cluster.cluster_id}
+            </p>
+            <p>
+              <span className="text-gray-300 font-semibold">Algorithm:</span> {algoSummary || '—'}
+            </p>
+            <p>
+              <span className="text-gray-300 font-semibold">{stateLabel}:</span>{' '}
+              {Array.isArray(cluster.metastable_ids) ? cluster.metastable_ids.join(', ') : '—'}
+            </p>
+            <p>
+              <span className="text-gray-300 font-semibold">Max clusters:</span> {cluster.max_clusters_per_residue ?? '—'}
+            </p>
+            <p>
+              <span className="text-gray-300 font-semibold">Max frames:</span> {cluster.max_cluster_frames ?? 'all'}
+            </p>
+            <p>
+              <span className="text-gray-300 font-semibold">Contact:</span>{' '}
+              {cluster.contact_atom_mode || cluster.contact_mode || 'CA'} @ {cluster.contact_cutoff ?? 10} A
+            </p>
+            <p>
+              <span className="text-gray-300 font-semibold">Generated:</span> {cluster.generated_at || '—'}
+            </p>
+          </div>
+        </div>
+        <div className="flex flex-wrap items-center justify-end gap-2 border-t border-gray-800 px-4 py-3">
+          <button
+            type="button"
+            onClick={() => onDownload(cluster.cluster_id, filename)}
+            className="text-xs px-3 py-2 rounded-md border border-emerald-500 text-emerald-300 hover:bg-emerald-500/10"
+          >
+            Download
+          </button>
+          <button
+            type="button"
+            onClick={() => onVisualize(cluster.cluster_id)}
+            className="text-xs px-3 py-2 rounded-md border border-cyan-500 text-cyan-300 hover:bg-cyan-500/10"
+          >
+            Visualize
+          </button>
+          <button
+            type="button"
+            onClick={() => onDelete(cluster.cluster_id)}
+            className="text-xs px-3 py-2 rounded-md border border-red-500 text-red-300 hover:bg-red-500/10"
+          >
+            Delete
+          </button>
+        </div>
       </div>
-      <div>
-        <label className="block text-xs text-gray-400 mb-1">Name</label>
-        <input
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          className="w-full bg-gray-800 border border-gray-700 rounded-md px-2 py-1 text-white text-sm"
-        />
-      </div>
-      <div className="flex items-center justify-between text-xs text-gray-400">
-        <span>ID: {meta.metastable_id || meta.metastable_index}</span>
-        <button
-          onClick={handleSave}
-          disabled={isSaving || !meta.metastable_id}
-          className="text-cyan-400 hover:text-cyan-300 disabled:opacity-50"
-        >
-          {isSaving ? 'Saving…' : 'Save'}
-        </button>
-      </div>
-      {meta.representative_pdb && (
-        <p className="text-xs text-cyan-400 break-all">
-          Representative PDB: {meta.representative_pdb}
-        </p>
-      )}
     </div>
   );
 }
 
-const DOC_FILES = {
-  metastable_states: '/docs/metastable_states.md',
-  vamp_tica: '/docs/vamp_tica.md',
-  msm: '/docs/msm.md',
-  pcca: '/docs/pcca.md',
-};
+// New InfoOverlay component
+function InfoOverlay({ state, type, onClose, onRenameMacro, onRenameMeta }) {
+  const [isEditing, setIsEditing] = useState(false);
+  const [name, setName] = useState(state.name || state.default_name || '');
+  const isMetastable = type === 'meta';
 
-function DocOverlay({ docId, onClose, onNavigate }) {
-  const cacheRef = useRef({});
-  const [docState, setDocState] = useState({
-    title: 'Documentation',
-    blocks: [],
-    loading: true,
-    error: null,
-  });
-
-  useEffect(() => {
-    let isMounted = true;
-    const targetId = DOC_FILES[docId] ? docId : 'metastable_states';
-    const cached = cacheRef.current[targetId];
-    if (cached) {
-      setDocState({ ...cached, loading: false, error: null });
-      return () => {};
+  const handleSave = async () => {
+    if (isMetastable) {
+      await onRenameMeta(state.metastable_id, name);
+    } else {
+      await onRenameMacro(state.state_id, name);
     }
-    setDocState((prev) => ({ ...prev, loading: true, error: null }));
-    fetch(DOC_FILES[targetId])
-      .then((res) => {
-        if (!res.ok) throw new Error(`Failed to load ${targetId} documentation.`);
-        return res.text();
-      })
-      .then((text) => {
-        const parsed = parseMarkdown(text);
-        if (!isMounted) return;
-        cacheRef.current[targetId] = parsed;
-        setDocState({ ...parsed, loading: false, error: null });
-      })
-      .catch((err) => {
-        if (!isMounted) return;
-        setDocState((prev) => ({
-          ...prev,
-          loading: false,
-          error: err.message || 'Failed to load documentation.',
-        }));
-      });
-    return () => {
-      isMounted = false;
-    };
-  }, [docId]);
+    setIsEditing(false);
+  };
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4 py-8">
-      <div className="w-full max-w-3xl bg-gray-900 border border-gray-700 rounded-lg shadow-xl">
+      <div className="w-full max-w-xl bg-gray-900 border border-gray-700 rounded-lg shadow-xl">
         <div className="flex items-center justify-between border-b border-gray-800 px-4 py-3">
-          <h3 className="text-lg font-semibold text-white">{docState.title}</h3>
+          <h3 className="text-lg font-semibold text-white">
+            {isMetastable ? 'Metastable State Info' : 'Macro-state Info'}
+          </h3>
           <button
             type="button"
             onClick={onClose}
@@ -1452,13 +2000,109 @@ function DocOverlay({ docId, onClose, onNavigate }) {
           </button>
         </div>
         <div className="p-5 max-h-[75vh] overflow-y-auto space-y-4 text-sm text-gray-200">
-          {docState.loading && <p className="text-gray-400">Loading documentation...</p>}
-          {docState.error && <ErrorMessage message={docState.error} />}
-          {!docState.loading &&
-            !docState.error &&
-            docState.blocks.map((block, idx) => renderDocBlock(block, idx, onNavigate))}
+          <div className="flex items-center gap-2">
+            <h4 className="text-base font-semibold text-white">Name:</h4>
+            <RenameableText
+              value={name}
+              onSave={setName}
+              isEditing={isEditing}
+              setIsEditing={setIsEditing}
+              handleSave={handleSave}
+            />
+          </div>
+
+          <p>
+            <span className="font-semibold">ID:</span>{' '}
+            {isMetastable ? state.metastable_id : state.state_id}
+          </p>
+          {!isMetastable && state.pdb_file && (
+            <p>
+              <span className="font-semibold">PDB File:</span> {state.pdb_file}
+            </p>
+          )}
+          {!isMetastable && state.trajectory_file && (
+            <p>
+              <span className="font-semibold">Trajectory File:</span> {state.trajectory_file}
+            </p>
+          )}
+          {isMetastable && state.macro_state && (
+            <p>
+              <span className="font-semibold">Macro State:</span> {state.macro_state}
+            </p>
+          )}
+          {isMetastable && (
+            <p>
+              <span className="font-semibold">Metastable Index:</span> {state.metastable_index}
+            </p>
+          )}
+          <p>
+            <span className="font-semibold">Number of Frames:</span> {state.n_frames ?? 'N/A'}
+          </p>
+          <p>
+            <span className="font-semibold">Stride:</span> {state.stride ?? 'N/A'}
+          </p>
+          <p>
+            <span className="font-semibold">Descriptors Ready:</span>{' '}
+            {state.descriptor_file ? 'Yes' : 'No'}
+          </p>
+          {isMetastable && state.representative_pdb && (
+            <p>
+              <span className="font-semibold">Representative PDB:</span>{' '}
+              <a href={state.representative_pdb} target="_blank" rel="noreferrer" className="text-cyan-400 hover:underline break-all">
+                {state.representative_pdb}
+              </a>
+            </p>
+          )}
+          {/* Add more relevant info as needed */}
         </div>
       </div>
+    </div>
+  );
+}
+
+function RenameableText({ value, onSave, isEditing, setIsEditing, handleSave }) {
+  const [currentValue, setCurrentValue] = useState(value);
+  const inputRef = useRef(null);
+
+  useEffect(() => {
+    if (isEditing) {
+      inputRef.current?.focus();
+    }
+  }, [isEditing]);
+
+  const handleKeyDown = (e) => {
+    if (e.key === 'Enter') {
+      handleSave();
+    }
+    if (e.key === 'Escape') {
+      setIsEditing(false);
+      setCurrentValue(value); // Reset to original value on escape
+    }
+  };
+
+  return (
+    <div className="flex items-center gap-2">
+      {isEditing ? (
+        <input
+          ref={inputRef}
+          type="text"
+          value={currentValue}
+          onChange={(e) => setCurrentValue(e.target.value)}
+          onBlur={handleSave}
+          onKeyDown={handleKeyDown}
+          className="bg-gray-800 border border-gray-700 rounded-md px-2 py-1 text-white text-sm"
+        />
+      ) : (
+        <span className="text-gray-200">{value}</span>
+      )}
+      <button
+        type="button"
+        onClick={() => (isEditing ? handleSave() : setIsEditing(true))}
+        className="text-gray-400 hover:text-cyan-300"
+        aria-label={isEditing ? 'Save name' : 'Edit name'}
+      >
+        <Pencil className="h-4 w-4" />
+      </button>
     </div>
   );
 }

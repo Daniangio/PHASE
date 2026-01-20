@@ -133,7 +133,7 @@ export default function SimulationAnalysisForm({ clusterRuns, onSubmit }) {
         >
           {clusterOptions.length === 0 && <option value="">No saved clusters</option>}
           {clusterOptions.map((run) => {
-            const name = run.path?.split('/').pop() || run.cluster_id;
+            const name = run.name || run.path?.split('/').pop() || run.cluster_id;
             return (
               <option key={run.cluster_id} value={run.cluster_id}>
                 {name}

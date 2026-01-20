@@ -251,7 +251,7 @@ class DatasetBuilder:
         inactive_slice: Optional[str] = None
     ) -> Tuple[FeatureDict, np.ndarray, Dict[str, str]]:
         """
-        Prepares data for GOAL 1 and GOAL 2 (Static Analysis).
+        Prepares data for Static Analysis.
         Returns the selection mapping as the 3rd tuple item.
         """
         print("\n--- Preparing STATIC Analysis Dataset ---")

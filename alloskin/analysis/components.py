@@ -19,11 +19,11 @@ class AnalysisComponent(ABC):
         pass
 
 
-# --- GOAL 1: Static Atlas Filter (Entropy + State) ---
+# --- Static Atlas Filter (Entropy + State) ---
 
 class BaseStaticReporter(AnalysisComponent):
     """
-    Base class for Static Analysis (Goal 1).
+    Base class for Static Analysis.
     Now supports returning multiple metrics (e.g., ID and Imbalance).
     """
 

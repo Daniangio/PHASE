@@ -1,4 +1,4 @@
-"""Static state sensitivity analysis (Goal 1).
+"""Static state sensitivity analysis.
 
 This module implements a *classifier-based* readout of how predictive each
 residue is of the active / inactive state, together with a simple intrinsic
@@ -321,7 +321,7 @@ def _static_worker_state(
 
 
 class StaticStateSensitivity(BaseStaticReporter):
-    """Goal 1: Intrinsic Dimension + State Sensitivity (classifier-based).
+    """Intrinsic Dimension + State Sensitivity (classifier-based).
 
     This component replaces the earlier MI-based static analysis. It computes,
     for each residue, a pair of metrics:

@@ -176,12 +176,12 @@ def run_analysis(
         )
 
     # ==================================================================
-    # GOAL 1 — Static state sensitivity
+    # Static state sensitivity
     # ==================================================================
     if analysis_type == "static":
         if features_static is None or labels_Y is None:
             raise ValueError("Static analysis dataset could not be prepared.")
-        report("Running Static State Sensitivity (Goal 1)", 20)
+        report("Running Static State Sensitivity", 20)
 
         static = StaticStateSensitivity()
         stats = static.run((features_static, labels_Y), **params)

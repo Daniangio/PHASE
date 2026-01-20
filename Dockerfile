@@ -36,7 +36,7 @@ COPY pyproject.toml .
 COPY README.md .
 COPY alloskin/ alloskin/
 # Install the package
-RUN pip install .
+RUN pip install --no-build-isolation --no-deps .
 
 # --- 3. Final App Stage (Lean Production Image) ---
 FROM python:3.11-slim AS final

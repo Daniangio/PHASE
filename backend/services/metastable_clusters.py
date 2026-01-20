@@ -6,7 +6,7 @@ import json
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 from sklearn.cluster import KMeans, DBSCAN, AgglomerativeClustering
@@ -72,6 +72,13 @@ def _kmeans_sweep(
     return final_labels, best_k, best_score
 
 
+def _angles_to_embedding(samples: np.ndarray) -> np.ndarray:
+    """Convert angle triplets to sin/cos embedding for periodic clustering."""
+    angles = samples[:, :3]
+    emb = np.concatenate([np.sin(angles), np.cos(angles)], axis=1)
+    return np.nan_to_num(emb, nan=0.0, posinf=0.0, neginf=0.0)
+
+
 def _cluster_residue_samples(
     samples: np.ndarray,
     max_k: int,
@@ -97,9 +104,7 @@ def _cluster_residue_samples(
         raise ValueError("Residue samples must be (n_frames, >=3) shaped.")
 
     # Use sin/cos embedding to respect angular periodicity.
-    angles = samples[:, :3]
-    emb = np.concatenate([np.sin(angles), np.cos(angles)], axis=1)
-    emb = np.nan_to_num(emb, nan=0.0, posinf=0.0, neginf=0.0)
+    emb = _angles_to_embedding(samples)
 
     algo = (algorithm or "tomato").lower()
     diagnostics: Dict[str, Any] = {}
@@ -418,6 +423,121 @@ def _cluster_residue_samples(
     return final_labels, int(k_final), diagnostics
 
 
+def _uniform_subsample_indices(n_frames: int, max_frames: int) -> np.ndarray:
+    """Pick roughly uniform indices up to max_frames."""
+    if n_frames <= max_frames:
+        return np.arange(n_frames, dtype=int)
+    idx = np.linspace(0, n_frames - 1, num=max_frames, dtype=int)
+    return np.unique(idx)
+
+
+def _assign_labels_by_knn(
+    emb_full: np.ndarray,
+    emb_subset: np.ndarray,
+    subset_labels: np.ndarray,
+    subset_indices: np.ndarray,
+    k_neighbors: int,
+) -> np.ndarray:
+    """Assign labels to remaining frames by majority vote of nearest neighbors."""
+    n_frames = emb_full.shape[0]
+    full_labels = np.full(n_frames, -1, dtype=np.int32)
+    full_labels[subset_indices] = subset_labels.astype(np.int32)
+    if emb_subset.shape[0] == 0 or k_neighbors <= 0:
+        return full_labels
+
+    k_neighbors = min(int(k_neighbors), emb_subset.shape[0])
+    tree = KDTree(emb_subset)
+    _, idxs = tree.query(emb_full, k=k_neighbors)
+    if idxs.ndim == 1:
+        idxs = idxs[:, None]
+
+    for i in range(n_frames):
+        if full_labels[i] != -1:
+            continue
+        neigh_labels = subset_labels[idxs[i]]
+        valid = neigh_labels[neigh_labels >= 0]
+        if valid.size == 0:
+            continue
+        vals, counts = np.unique(valid, return_counts=True)
+        full_labels[i] = int(vals[np.argmax(counts)])
+
+    return full_labels
+
+
+def _cluster_with_subsample(
+    samples: np.ndarray,
+    max_k: int,
+    random_state: int,
+    *,
+    algorithm: str,
+    density_maxk: int,
+    density_z: float | str | None,
+    dbscan_eps: float,
+    dbscan_min_samples: int,
+    hierarchical_n_clusters: Optional[int],
+    hierarchical_linkage: str,
+    tomato_k: int,
+    tomato_tau: float | str,
+    max_cluster_frames: Optional[int],
+    assign_k: int = 10,
+    subsample_indices: Optional[np.ndarray] = None,
+) -> Tuple[np.ndarray, int, Dict[str, Any], int]:
+    """Cluster on a subsample if requested, then assign remaining frames by neighbor majority."""
+    n_frames = samples.shape[0]
+    if not max_cluster_frames or max_cluster_frames <= 0 or n_frames <= max_cluster_frames:
+        labels, k, diag = _cluster_residue_samples(
+            samples,
+            max_k,
+            random_state,
+            algorithm=algorithm,
+            density_maxk=density_maxk,
+            density_z=density_z,
+            dbscan_eps=dbscan_eps,
+            dbscan_min_samples=dbscan_min_samples,
+            hierarchical_n_clusters=hierarchical_n_clusters,
+            hierarchical_linkage=hierarchical_linkage,
+            tomato_k=tomato_k,
+            tomato_tau=tomato_tau,
+        )
+        diag["subsampled"] = False
+        diag["subsample_size"] = int(n_frames)
+        diag["total_frames"] = int(n_frames)
+        diag["assign_k"] = int(assign_k)
+        return labels, k, diag, int(n_frames)
+
+    subsample_indices = (
+        _uniform_subsample_indices(n_frames, int(max_cluster_frames))
+        if subsample_indices is None
+        else subsample_indices
+    )
+    subsample_indices = np.asarray(subsample_indices, dtype=int)
+    sub_samples = samples[subsample_indices]
+    labels_sub, k, diag = _cluster_residue_samples(
+        sub_samples,
+        max_k,
+        random_state,
+        algorithm=algorithm,
+        density_maxk=density_maxk,
+        density_z=density_z,
+        dbscan_eps=dbscan_eps,
+        dbscan_min_samples=dbscan_min_samples,
+        hierarchical_n_clusters=hierarchical_n_clusters,
+        hierarchical_linkage=hierarchical_linkage,
+        tomato_k=tomato_k,
+        tomato_tau=tomato_tau,
+    )
+
+    emb_full = _angles_to_embedding(samples)
+    emb_sub = emb_full[subsample_indices]
+    assigned = _assign_labels_by_knn(emb_full, emb_sub, labels_sub, subsample_indices, assign_k)
+
+    diag["subsampled"] = True
+    diag["subsample_size"] = int(subsample_indices.size)
+    diag["total_frames"] = int(n_frames)
+    diag["assign_k"] = int(min(assign_k, emb_sub.shape[0]))
+    return assigned.astype(np.int32), k, diag, int(subsample_indices.size)
+
+
 def _resolve_states_for_meta(meta: Dict[str, Any], system: SystemMetadata) -> List[DescriptorState]:
     """Return all states contributing to a metastable macro-state."""
     macro_state_id = meta.get("macro_state_id")
@@ -449,6 +569,19 @@ def _extract_labels_for_state(
     if labels is None:
         raise ValueError(f"No metastable labels found for state '{state.state_id}'.")
     return np.asarray(labels).astype(np.int32)
+
+
+def _infer_frame_count(features: Dict[str, Any]) -> int:
+    """Best-effort frame count inference from descriptor arrays."""
+    for key, arr in features.items():
+        if key == "metastable_labels":
+            continue
+        if arr is None:
+            continue
+        arr = np.asarray(arr)
+        if arr.ndim >= 1:
+            return int(arr.shape[0])
+    return 0
 
 
 def _coerce_residue_keys(
@@ -525,12 +658,155 @@ def _compute_contact_edges(
     return edges
 
 
+def _collect_cluster_inputs(
+    project_id: str,
+    system_id: str,
+    metastable_ids: List[str],
+    cutoff_val: float,
+    contact_atom_mode: str,
+) -> Dict[str, Any]:
+    unique_meta_ids = list(dict.fromkeys([str(mid) for mid in metastable_ids]))
+
+    store = ProjectStore()
+    system = store.get_system(project_id, system_id)
+    macro_only = getattr(system, "analysis_mode", None) == "macro"
+    metastable_lookup = {
+        m.get("metastable_id"): {**m, "meta_kind": "metastable"} for m in system.metastable_states or []
+    }
+    if macro_only:
+        for st in system.states.values():
+            metastable_lookup.setdefault(
+                st.state_id,
+                {
+                    "metastable_id": st.state_id,
+                    "metastable_index": 0,
+                    "macro_state_id": st.state_id,
+                    "macro_state": st.name,
+                    "name": st.name,
+                    "default_name": st.name,
+                    "representative_pdb": st.pdb_file,
+                    "meta_kind": "macro",
+                },
+            )
+
+    residue_keys: List[str] = []
+    residue_mapping: Dict[str, str] = {}
+    merged_angles_per_residue: List[List[np.ndarray]] = []
+    merged_frame_state_ids: List[str] = []
+    merged_frame_meta_ids: List[str] = []
+    merged_frame_indices: List[int] = []
+    contact_edges: set = set()
+    contact_sources: List[str] = []
+
+    for meta_id in unique_meta_ids:
+        meta = metastable_lookup.get(meta_id)
+        if not meta:
+            raise ValueError(f"Metastable state '{meta_id}' not found on this system.")
+        is_macro = meta.get("meta_kind") == "macro"
+        meta_index = meta.get("metastable_index")
+        if meta_index is None:
+            raise ValueError(f"Metastable state '{meta_id}' is missing its index.")
+
+        candidate_states = _resolve_states_for_meta(meta, system)
+        if not candidate_states:
+            raise ValueError(f"No descriptor-ready states found for metastable '{meta_id}'.")
+        matched_frames = 0
+
+        for state in candidate_states:
+            if not state.descriptor_file:
+                continue
+            desc_path = store.resolve_path(project_id, system_id, state.descriptor_file)
+            features = load_descriptor_npz(desc_path)
+            if is_macro:
+                frame_count = _infer_frame_count(features)
+                if frame_count <= 0:
+                    raise ValueError(f"Could not determine frame count for macro-state '{state.state_id}'.")
+                labels = np.zeros(frame_count, dtype=np.int32)
+            else:
+                labels = _extract_labels_for_state(store, project_id, system_id, state, features)
+
+            residue_keys = _coerce_residue_keys(residue_keys, features, state)
+            if not residue_keys:
+                raise ValueError("Could not determine residue keys for clustering.")
+            if not residue_mapping:
+                residue_mapping = dict(state.residue_mapping or system.residue_selections_mapping or {})
+
+            if not merged_angles_per_residue:
+                merged_angles_per_residue = [[] for _ in residue_keys]
+
+            if labels.shape[0] == 0:
+                continue
+            mask = labels == int(meta_index)
+            if not np.any(mask):
+                continue
+
+            matched_indices = np.where(mask)[0]
+            for idx in matched_indices:
+                merged_frame_state_ids.append(state.state_id)
+                merged_frame_meta_ids.append(meta_id)
+                merged_frame_indices.append(int(idx))
+                for col, key in enumerate(residue_keys):
+                    arr = np.asarray(features.get(key))
+                    if arr is None or arr.shape[0] != labels.shape[0]:
+                        raise ValueError(
+                            f"Descriptor array for '{key}' is missing or misaligned in state '{state.state_id}'."
+                        )
+                    if arr.ndim >= 3:
+                        vec = arr[idx, 0, :3]
+                    elif arr.ndim == 2:
+                        vec = arr[idx, :3]
+                    else:
+                        vec = arr[idx : idx + 1]
+                    vec = np.asarray(vec, dtype=float).reshape(-1)
+                    if vec.size < 3:
+                        padded = np.zeros(3, dtype=float)
+                        padded[: vec.size] = vec
+                        vec = padded
+                    else:
+                        vec = vec[:3]
+                    merged_angles_per_residue[col].append(vec)
+                matched_frames += 1
+
+        if matched_frames == 0:
+            raise ValueError(f"No frames matched metastable '{meta_id}'.")
+
+        rep_rel = meta.get("representative_pdb")
+        if rep_rel:
+            rep_path = store.resolve_path(project_id, system_id, rep_rel)
+            if rep_path.exists():
+                contact_sources.append(str(rep_path))
+                try:
+                    edges = _compute_contact_edges(
+                        rep_path,
+                        residue_keys,
+                        residue_mapping,
+                        cutoff_val,
+                        contact_atom_mode,
+                    )
+                    contact_edges.update(edges)
+                except Exception:
+                    pass
+
+    return {
+        "unique_meta_ids": unique_meta_ids,
+        "residue_keys": residue_keys,
+        "residue_mapping": residue_mapping,
+        "merged_angles_per_residue": merged_angles_per_residue,
+        "merged_frame_state_ids": merged_frame_state_ids,
+        "merged_frame_meta_ids": merged_frame_meta_ids,
+        "merged_frame_indices": merged_frame_indices,
+        "contact_edges": contact_edges,
+        "contact_sources": contact_sources,
+    }
+
+
 def generate_metastable_cluster_npz(
     project_id: str,
     system_id: str,
     metastable_ids: List[str],
     *,
     max_clusters_per_residue: int = 6,
+    max_cluster_frames: Optional[int] = None,
     random_state: int = 0,
     contact_cutoff: float = 10.0,
     contact_atom_mode: str = "CA",
@@ -544,6 +820,7 @@ def generate_metastable_cluster_npz(
     tomato_k: int = 15,
     tomato_tau: float | str = "auto",
     tomato_k_max: Optional[int] = None,
+    progress_callback: Optional[Callable[[str, int, int], None]] = None,
 ) -> Tuple[Path, Dict[str, Any]]:
     """
     Build per-residue cluster labels for selected metastable states and save NPZ.
@@ -554,6 +831,14 @@ def generate_metastable_cluster_npz(
         raise ValueError("At least one metastable_id is required.")
     if max_clusters_per_residue < 1:
         raise ValueError("max_clusters_per_residue must be >= 1.")
+    max_cluster_frames_val: Optional[int] = None
+    if max_cluster_frames is not None:
+        try:
+            max_cluster_frames_val = int(max_cluster_frames)
+        except Exception as exc:
+            raise ValueError("max_cluster_frames must be an integer.") from exc
+        if max_cluster_frames_val < 1:
+            raise ValueError("max_cluster_frames must be >= 1.")
     try:
         cutoff_val = float(contact_cutoff)
     except Exception as exc:
@@ -604,159 +889,23 @@ def generate_metastable_cluster_npz(
         except Exception as exc:
             raise ValueError("tomato_tau must be a number or 'auto'.") from exc
 
-    unique_meta_ids = list(dict.fromkeys([str(mid) for mid in metastable_ids]))
-
-    store = ProjectStore()
-    system = store.get_system(project_id, system_id)
-    metastable_lookup = {m.get("metastable_id"): m for m in system.metastable_states or []}
-
-    residue_keys: List[str] = []
-    residue_mapping: Dict[str, str] = {}
-    merged_angles_per_residue: List[List[np.ndarray]] = []
-    merged_frame_state_ids: List[str] = []
-    merged_frame_meta_ids: List[str] = []
-    merged_frame_indices: List[int] = []
-    per_meta_results: Dict[str, Dict[str, Any]] = {}
-    tomato_diag_meta: Optional[Dict[str, Any]] = None
+    inputs = _collect_cluster_inputs(project_id, system_id, metastable_ids, cutoff_val, contact_atom_mode)
+    unique_meta_ids = inputs["unique_meta_ids"]
+    residue_keys = inputs["residue_keys"]
+    residue_mapping = inputs["residue_mapping"]
+    merged_angles_per_residue = inputs["merged_angles_per_residue"]
+    merged_frame_state_ids = inputs["merged_frame_state_ids"]
+    merged_frame_meta_ids = inputs["merged_frame_meta_ids"]
+    merged_frame_indices = inputs["merged_frame_indices"]
+    contact_edges = inputs["contact_edges"]
+    contact_sources = inputs["contact_sources"]
     tomato_diag_merged: Optional[Dict[str, Any]] = None
-    contact_edges: set = set()
-    contact_sources: List[str] = []
-
-    for meta_id in unique_meta_ids:
-        meta = metastable_lookup.get(meta_id)
-        if not meta:
-            raise ValueError(f"Metastable state '{meta_id}' not found on this system.")
-        meta_index = meta.get("metastable_index")
-        if meta_index is None:
-            raise ValueError(f"Metastable state '{meta_id}' is missing its index.")
-
-        candidate_states = _resolve_states_for_meta(meta, system)
-        if not candidate_states:
-            raise ValueError(f"No descriptor-ready states found for metastable '{meta_id}'.")
-
-        per_meta_angles: List[List[np.ndarray]] = []
-        frame_state_ids: List[str] = []
-        frame_indices_for_meta: List[int] = []
-
-        for state in candidate_states:
-            if not state.descriptor_file:
-                continue
-            desc_path = store.resolve_path(project_id, system_id, state.descriptor_file)
-            features = load_descriptor_npz(desc_path)
-            labels = _extract_labels_for_state(store, project_id, system_id, state, features)
-
-            # Lock residue ordering on first valid state.
-            residue_keys = _coerce_residue_keys(residue_keys, features, state)
-            if not residue_keys:
-                raise ValueError("Could not determine residue keys for clustering.")
-            if not residue_mapping:
-                residue_mapping = dict(state.residue_mapping or system.residue_selections_mapping or {})
-
-            if not merged_angles_per_residue:
-                merged_angles_per_residue = [[] for _ in residue_keys]
-            if not per_meta_angles:
-                per_meta_angles = [[] for _ in residue_keys]
-
-            if labels.shape[0] == 0:
-                continue
-            mask = labels == int(meta_index)
-            if not np.any(mask):
-                continue
-
-            matched_indices = np.where(mask)[0]
-            for idx in matched_indices:
-                frame_state_ids.append(state.state_id)
-                frame_indices_for_meta.append(int(idx))
-                merged_frame_state_ids.append(state.state_id)
-                merged_frame_meta_ids.append(meta_id)
-                merged_frame_indices.append(int(idx))
-                for col, key in enumerate(residue_keys):
-                    arr = np.asarray(features.get(key))
-                    if arr is None or arr.shape[0] != labels.shape[0]:
-                        raise ValueError(f"Descriptor array for '{key}' is missing or misaligned in state '{state.state_id}'.")
-                    # Expected (n_frames, 1, 3) radians; fall back gracefully.
-                    if arr.ndim >= 3:
-                        vec = arr[idx, 0, :3]
-                    elif arr.ndim == 2:
-                        vec = arr[idx, :3]
-                    else:
-                        vec = arr[idx : idx + 1]
-                    vec = np.asarray(vec, dtype=float).reshape(-1)
-                    if vec.size < 3:
-                        padded = np.zeros(3, dtype=float)
-                        padded[: vec.size] = vec
-                        vec = padded
-                    else:
-                        vec = vec[:3]
-                    per_meta_angles[col].append(vec)
-                    merged_angles_per_residue[col].append(vec)
-
-        n_frames = len(frame_state_ids)
-        if n_frames == 0:
-            raise ValueError(f"No frames matched metastable '{meta_id}'.")
-
-        labels_matrix = np.zeros((n_frames, len(residue_keys)), dtype=np.int32)
-        cluster_counts = np.zeros(len(residue_keys), dtype=np.int32)
-
-        for col, samples in enumerate(per_meta_angles):
-            sample_arr = np.asarray(samples, dtype=float)
-            if sample_arr.shape[0] != n_frames:
-                raise ValueError(
-                    f"Residue '{residue_keys[col]}' for metastable '{meta_id}' has inconsistent frame count."
-                )
-            labels_arr, k, diag = _cluster_residue_samples(
-                sample_arr,
-                max_clusters_per_residue,
-                random_state,
-                algorithm=algo,
-                density_maxk=density_maxk_val,
-                density_z=density_z_val,
-                dbscan_eps=db_eps_val,
-                dbscan_min_samples=db_min_samples_val,
-                hierarchical_n_clusters=h_n_clusters_val,
-                hierarchical_linkage=h_linkage,
-                tomato_k=t_k,
-                tomato_tau=t_tau,
-            )
-            if labels_arr.size == 0:
-                labels_matrix[:, col] = -1
-                cluster_counts[col] = 0
-            else:
-                if np.any(labels_arr >= 0):
-                    k = max(k, int(labels_arr.max()) + 1)
-                
-                labels_matrix[:, col] = labels_arr
-                cluster_counts[col] = k
-            if algo == "tomato" and col == 0 and diag and tomato_diag_meta is None:
-                tomato_diag_meta = diag
-
-        per_meta_results[meta_id] = {
-            "labels": labels_matrix,
-            "cluster_counts": cluster_counts,
-            "frame_state_ids": np.array(frame_state_ids),
-            "frame_indices": np.array(frame_indices_for_meta, dtype=np.int64),
-            "macro_state": meta.get("macro_state"),
-            "metastable_index": int(meta_index),
-        }
-
-        # Contact map contribution from representative PDB (if present)
-        rep_rel = meta.get("representative_pdb")
-        if rep_rel:
-            rep_path = store.resolve_path(project_id, system_id, rep_rel)
-            if rep_path.exists():
-                contact_sources.append(str(rep_path))
-                try:
-                    edges = _compute_contact_edges(
-                        rep_path,
-                        residue_keys,
-                        residue_mapping,
-                        cutoff_val,
-                        contact_atom_mode,
-                    )
-                    contact_edges.update(edges)
-                except Exception:
-                    # keep robustness; ignore this PDB on failure
-                    pass
+    total_residue_jobs = len(residue_keys)
+    completed_residue_jobs = 0
+    assign_k = 10
+    if progress_callback:
+        progress_callback("Clustering residues...", 0, total_residue_jobs)
+    store = ProjectStore()
 
     # Build merged clusters
     if not merged_angles_per_residue:
@@ -765,11 +914,17 @@ def generate_metastable_cluster_npz(
     merged_frame_count = len(merged_frame_state_ids)
     merged_labels = np.zeros((merged_frame_count, len(residue_keys)), dtype=np.int32)
     merged_counts = np.zeros(len(residue_keys), dtype=np.int32)
+    merged_subsample_indices = None
+    if max_cluster_frames_val and merged_frame_count > max_cluster_frames_val:
+        merged_subsample_indices = _uniform_subsample_indices(merged_frame_count, max_cluster_frames_val)
+    merged_clustered_frames = (
+        merged_subsample_indices.size if merged_subsample_indices is not None else merged_frame_count
+    )
     for col, samples in enumerate(merged_angles_per_residue):
         sample_arr = np.asarray(samples, dtype=float)
         if sample_arr.shape[0] != merged_frame_count:
             raise ValueError("Merged residue samples have inconsistent frame counts.")
-        labels_arr, k, diag = _cluster_residue_samples(
+        labels_arr, k, diag, _ = _cluster_with_subsample(
             sample_arr,
             max_clusters_per_residue,
             random_state,
@@ -782,6 +937,9 @@ def generate_metastable_cluster_npz(
             hierarchical_linkage=h_linkage,
             tomato_k=t_k,
             tomato_tau=t_tau,
+            max_cluster_frames=max_cluster_frames_val,
+            assign_k=assign_k,
+            subsample_indices=merged_subsample_indices,
         )
         if labels_arr.size == 0:
             merged_labels[:, col] = -1
@@ -793,6 +951,13 @@ def generate_metastable_cluster_npz(
             merged_counts[col] = k
         if algo == "tomato" and col == 0 and diag and tomato_diag_merged is None:
             tomato_diag_merged = diag
+        if progress_callback and total_residue_jobs:
+            completed_residue_jobs += 1
+            progress_callback(
+                f"Clustering residues: {completed_residue_jobs}/{total_residue_jobs}",
+                completed_residue_jobs,
+                total_residue_jobs,
+            )
 
     # Persist NPZ
     dirs = store.ensure_directories(project_id, system_id)
@@ -818,6 +983,8 @@ def generate_metastable_cluster_npz(
             "density_maxk": density_maxk_val,
             "density_z": density_z_val,
             "max_clusters_per_residue": max_clusters_per_residue,
+            "max_cluster_frames": max_cluster_frames_val,
+            "assign_k": assign_k,
             "random_state": random_state,
         },
         "residue_keys": residue_keys,
@@ -828,23 +995,9 @@ def generate_metastable_cluster_npz(
         "contact_cutoff": cutoff_val,
         "contact_sources": contact_sources,
         "contact_edge_count": len(contact_edges),
-        "per_metastable": {
-            mid: {
-                "n_frames": res["labels"].shape[0],
-                "metastable_index": res["metastable_index"],
-                "macro_state": res["macro_state"],
-                "state_ids": sorted(set(res["frame_state_ids"].tolist())),
-                "npz_keys": {
-                    "labels": f"{_slug(mid)}__labels",
-                    "cluster_counts": f"{_slug(mid)}__cluster_counts",
-                    "frame_state_ids": f"{_slug(mid)}__frame_state_ids",
-                    "frame_indices": f"{_slug(mid)}__frame_indices",
-                },
-            }
-            for mid, res in per_meta_results.items()
-        },
         "merged": {
             "n_frames": merged_frame_count,
+            "clustered_frames": int(merged_clustered_frames),
             "npz_keys": {
                 "labels": "merged__labels",
                 "cluster_counts": "merged__cluster_counts",
@@ -856,8 +1009,6 @@ def generate_metastable_cluster_npz(
     }
     if algo == "tomato":
         tomato_meta = {}
-        if tomato_diag_meta:
-            tomato_meta["per_meta_example"] = tomato_diag_meta
         if tomato_diag_merged:
             tomato_meta["merged_example"] = tomato_diag_merged
         metadata["cluster_params"]["tomato_diagnostics"] = tomato_meta
@@ -878,12 +1029,255 @@ def generate_metastable_cluster_npz(
     payload["contact_edge_index"] = edge_index
     payload["contact_mode"] = np.array(contact_atom_mode)
     payload["contact_cutoff"] = np.array(cutoff_val)
-    for mid, res in per_meta_results.items():
-        key = _slug(mid)
-        payload[f"{key}__labels"] = res["labels"]
-        payload[f"{key}__cluster_counts"] = res["cluster_counts"]
-        payload[f"{key}__frame_state_ids"] = res["frame_state_ids"]
-        payload[f"{key}__frame_indices"] = res["frame_indices"]
+
+    np.savez_compressed(out_path, **payload)
+    return out_path, metadata
+
+
+def prepare_cluster_workspace(
+    project_id: str,
+    system_id: str,
+    metastable_ids: List[str],
+    *,
+    max_clusters_per_residue: int,
+    max_cluster_frames: Optional[int],
+    random_state: int,
+    contact_cutoff: float,
+    contact_atom_mode: str,
+    cluster_algorithm: str,
+    density_maxk: int,
+    density_z: float | str | None,
+    dbscan_eps: float,
+    dbscan_min_samples: int,
+    hierarchical_n_clusters: Optional[int],
+    hierarchical_linkage: str,
+    tomato_k: int,
+    tomato_tau: float | str,
+    tomato_k_max: Optional[int],
+    work_dir: Path,
+) -> Dict[str, Any]:
+    """Precompute and persist clustering inputs for fan-out chunk jobs."""
+    work_dir.mkdir(parents=True, exist_ok=True)
+    cutoff_val = float(contact_cutoff)
+    contact_atom_mode = str(contact_atom_mode or "CA").upper()
+
+    inputs = _collect_cluster_inputs(project_id, system_id, metastable_ids, cutoff_val, contact_atom_mode)
+    residue_keys = inputs["residue_keys"]
+    merged_angles_per_residue = inputs["merged_angles_per_residue"]
+    merged_frame_state_ids = inputs["merged_frame_state_ids"]
+    merged_frame_meta_ids = inputs["merged_frame_meta_ids"]
+    merged_frame_indices = inputs["merged_frame_indices"]
+    contact_edges = inputs["contact_edges"]
+    contact_sources = inputs["contact_sources"]
+    residue_mapping = inputs["residue_mapping"]
+    unique_meta_ids = inputs["unique_meta_ids"]
+
+    if not merged_angles_per_residue:
+        raise ValueError("No frames gathered across the selected metastable states.")
+
+    n_frames = len(merged_frame_state_ids)
+    n_residues = len(residue_keys)
+    angles_arr = np.stack(
+        [np.asarray(samples, dtype=np.float32) for samples in merged_angles_per_residue], axis=1
+    )
+    angles_path = work_dir / "angles.npy"
+    np.save(angles_path, angles_arr)
+
+    np.save(work_dir / "frame_state_ids.npy", np.array(merged_frame_state_ids))
+    np.save(work_dir / "frame_meta_ids.npy", np.array(merged_frame_meta_ids))
+    np.save(work_dir / "frame_indices.npy", np.array(merged_frame_indices, dtype=np.int64))
+
+    if contact_edges:
+        edge_index = np.array(sorted(contact_edges), dtype=np.int64).T
+    else:
+        edge_index = np.zeros((2, 0), dtype=np.int64)
+    np.save(work_dir / "contact_edge_index.npy", edge_index)
+    np.save(work_dir / "contact_mode.npy", np.array(contact_atom_mode))
+    np.save(work_dir / "contact_cutoff.npy", np.array(cutoff_val))
+
+    manifest = {
+        "project_id": project_id,
+        "system_id": system_id,
+        "selected_metastable_ids": unique_meta_ids,
+        "residue_keys": residue_keys,
+        "residue_mapping": residue_mapping,
+        "n_frames": n_frames,
+        "n_residues": n_residues,
+        "angles_path": "angles.npy",
+        "frame_state_ids_path": "frame_state_ids.npy",
+        "frame_meta_ids_path": "frame_meta_ids.npy",
+        "frame_indices_path": "frame_indices.npy",
+        "contact_edge_index_path": "contact_edge_index.npy",
+        "contact_mode_path": "contact_mode.npy",
+        "contact_cutoff_path": "contact_cutoff.npy",
+        "contact_sources": contact_sources,
+        "cluster_algorithm": cluster_algorithm,
+        "cluster_params": {
+            "dbscan_eps": float(dbscan_eps),
+            "dbscan_min_samples": int(dbscan_min_samples),
+            "hierarchical_n_clusters": int(hierarchical_n_clusters)
+            if hierarchical_n_clusters is not None
+            else None,
+            "hierarchical_linkage": str(hierarchical_linkage or "ward"),
+            "tomato_k": int(tomato_k),
+            "tomato_tau": tomato_tau,
+            "density_maxk": int(density_maxk),
+            "density_z": density_z,
+            "max_clusters_per_residue": int(max_clusters_per_residue),
+            "max_cluster_frames": int(max_cluster_frames) if max_cluster_frames else None,
+            "assign_k": 10,
+            "random_state": int(random_state),
+            "tomato_k_max": int(tomato_k_max) if tomato_k_max is not None else None,
+        },
+        "timestamp": datetime.utcnow().isoformat(),
+    }
+    (work_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
+    return manifest
+
+
+def run_cluster_chunk(
+    work_dir: Path,
+    residue_index: int,
+) -> Dict[str, Any]:
+    """Run clustering for a single residue and persist labels."""
+    manifest_path = work_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+
+    angles_path = work_dir / manifest["angles_path"]
+    angles = np.load(angles_path, mmap_mode="r")
+    n_frames, n_residues, _ = angles.shape
+    if residue_index < 0 or residue_index >= n_residues:
+        raise ValueError(f"Residue index {residue_index} out of range (0..{n_residues - 1}).")
+
+    params = manifest.get("cluster_params", {})
+    algo = manifest.get("cluster_algorithm", "density_peaks")
+    sample_arr = np.asarray(angles[:, residue_index, :], dtype=float)
+    labels, k, diag, _ = _cluster_with_subsample(
+        sample_arr,
+        int(params.get("max_clusters_per_residue", 6)),
+        int(params.get("random_state", 0)),
+        algorithm=algo,
+        density_maxk=int(params.get("density_maxk", 100)),
+        density_z=params.get("density_z", "auto"),
+        dbscan_eps=float(params.get("dbscan_eps", 0.5)),
+        dbscan_min_samples=int(params.get("dbscan_min_samples", 5)),
+        hierarchical_n_clusters=params.get("hierarchical_n_clusters"),
+        hierarchical_linkage=params.get("hierarchical_linkage", "ward"),
+        tomato_k=int(params.get("tomato_k", 15)),
+        tomato_tau=params.get("tomato_tau", "auto"),
+        max_cluster_frames=params.get("max_cluster_frames"),
+        assign_k=int(params.get("assign_k", 10)),
+    )
+
+    out_path = work_dir / f"chunk_{residue_index:04d}.npz"
+    payload: Dict[str, Any] = {
+        "labels": labels.astype(np.int32),
+        "cluster_count": np.array([int(k)], dtype=np.int32),
+    }
+    if residue_index == 0 and algo == "tomato":
+        payload["diagnostics_json"] = np.array(json.dumps(diag))
+
+    np.savez_compressed(out_path, **payload)
+    return {"residue_index": residue_index, "path": str(out_path)}
+
+
+def reduce_cluster_workspace(work_dir: Path) -> Tuple[Path, Dict[str, Any]]:
+    """Combine chunk outputs into a final cluster NPZ."""
+    manifest = json.loads((work_dir / "manifest.json").read_text())
+    project_id = manifest["project_id"]
+    system_id = manifest["system_id"]
+    residue_keys = manifest["residue_keys"]
+    residue_mapping = manifest.get("residue_mapping") or {}
+    n_frames = int(manifest.get("n_frames", 0))
+    n_residues = int(manifest.get("n_residues", len(residue_keys)))
+    selected_meta_ids = manifest.get("selected_metastable_ids") or []
+    cluster_params = manifest.get("cluster_params") or {}
+    algo = manifest.get("cluster_algorithm") or "density_peaks"
+
+    merged_labels = np.zeros((n_frames, n_residues), dtype=np.int32)
+    merged_counts = np.zeros(n_residues, dtype=np.int32)
+    tomato_diag_merged = None
+
+    for idx in range(n_residues):
+        chunk_path = work_dir / f"chunk_{idx:04d}.npz"
+        if not chunk_path.exists():
+            raise ValueError(f"Missing cluster chunk output for residue index {idx}.")
+        data = np.load(chunk_path, allow_pickle=True)
+        labels = np.asarray(data["labels"], dtype=np.int32)
+        if labels.shape[0] != n_frames:
+            raise ValueError(f"Chunk {idx} has {labels.shape[0]} frames, expected {n_frames}.")
+        merged_labels[:, idx] = labels
+        merged_counts[idx] = int(np.asarray(data["cluster_count"]).reshape(-1)[0])
+        if idx == 0 and "diagnostics_json" in data:
+            try:
+                tomato_diag_merged = json.loads(str(data["diagnostics_json"].item()))
+            except Exception:
+                tomato_diag_merged = None
+
+    max_cluster_frames_val = cluster_params.get("max_cluster_frames")
+    if max_cluster_frames_val and n_frames > int(max_cluster_frames_val):
+        merged_clustered_frames = len(_uniform_subsample_indices(n_frames, int(max_cluster_frames_val)))
+    else:
+        merged_clustered_frames = n_frames
+
+    store = ProjectStore()
+    dirs = store.ensure_directories(project_id, system_id)
+    cluster_dir = dirs["system_dir"] / "metastable" / "clusters"
+    cluster_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.utcnow().strftime("%Y%m%dT%H%M%S")
+    suffix = "-".join(_slug(mid)[:24] for mid in selected_meta_ids) or "metastable"
+    out_path = cluster_dir / f"{suffix}_clusters_{timestamp}.npz"
+
+    frame_state_ids = np.load(work_dir / manifest["frame_state_ids_path"], allow_pickle=True)
+    frame_meta_ids = np.load(work_dir / manifest["frame_meta_ids_path"], allow_pickle=True)
+    frame_indices = np.load(work_dir / manifest["frame_indices_path"], allow_pickle=True)
+    contact_edge_index = np.load(work_dir / manifest["contact_edge_index_path"], allow_pickle=True)
+    contact_mode = np.load(work_dir / manifest["contact_mode_path"], allow_pickle=True)
+    contact_cutoff = np.load(work_dir / manifest["contact_cutoff_path"], allow_pickle=True)
+    contact_sources = manifest.get("contact_sources") or []
+
+    metadata = {
+        "project_id": project_id,
+        "system_id": system_id,
+        "generated_at": datetime.utcnow().isoformat(),
+        "selected_metastable_ids": selected_meta_ids,
+        "cluster_algorithm": algo,
+        "cluster_params": cluster_params,
+        "residue_keys": residue_keys,
+        "residue_mapping": residue_mapping,
+        "max_clusters_per_residue": cluster_params.get("max_clusters_per_residue"),
+        "random_state": cluster_params.get("random_state"),
+        "contact_mode": str(contact_mode.item() if hasattr(contact_mode, "item") else contact_mode),
+        "contact_cutoff": float(contact_cutoff.item() if hasattr(contact_cutoff, "item") else contact_cutoff),
+        "contact_sources": contact_sources,
+        "contact_edge_count": int(contact_edge_index.shape[1]) if contact_edge_index.ndim == 2 else 0,
+        "merged": {
+            "n_frames": n_frames,
+            "clustered_frames": int(merged_clustered_frames),
+            "npz_keys": {
+                "labels": "merged__labels",
+                "cluster_counts": "merged__cluster_counts",
+                "frame_state_ids": "merged__frame_state_ids",
+                "frame_metastable_ids": "merged__frame_metastable_ids",
+                "frame_indices": "merged__frame_indices",
+            },
+        },
+    }
+    if algo == "tomato" and tomato_diag_merged:
+        metadata["cluster_params"]["tomato_diagnostics"] = {"merged_example": tomato_diag_merged}
+
+    payload = {
+        "residue_keys": np.array(residue_keys),
+        "metadata_json": np.array(json.dumps(metadata)),
+        "merged__labels": merged_labels,
+        "merged__cluster_counts": merged_counts,
+        "merged__frame_state_ids": frame_state_ids,
+        "merged__frame_metastable_ids": frame_meta_ids,
+        "merged__frame_indices": frame_indices,
+        "contact_edge_index": contact_edge_index,
+        "contact_mode": np.array(contact_mode),
+        "contact_cutoff": np.array(contact_cutoff),
+    }
 
     np.savez_compressed(out_path, **payload)
     return out_path, metadata

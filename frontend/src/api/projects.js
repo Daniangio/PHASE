@@ -212,6 +212,14 @@ export function addSystemState(projectId, systemId, payload) {
   });
 }
 
+
+export function renameState(projectId, systemId, stateId, name) {
+  return requestJSON(`/projects/${projectId}/systems/${systemId}/states/${stateId}`, {
+    method: 'PATCH',
+    body: { name },
+  });
+}
+
 export function deleteState(projectId, systemId, stateId) {
   return requestJSON(`/projects/${projectId}/systems/${systemId}/states/${stateId}`, {
     method: 'DELETE',
@@ -226,7 +234,6 @@ export function fetchStateDescriptors(projectId, systemId, stateId, params = {})
     qs.set('metastable_ids', params.metastable_ids.join(','));
   }
   if (params.cluster_id) qs.set('cluster_id', params.cluster_id);
-  if (params.cluster_mode) qs.set('cluster_mode', params.cluster_mode);
   const suffix = qs.toString() ? `?${qs.toString()}` : '';
   return requestJSON(`/projects/${projectId}/systems/${systemId}/states/${stateId}/descriptors${suffix}`);
 }
@@ -272,7 +279,9 @@ export function downloadMetastableClusters(projectId, systemId, metastableIds, p
   const payload = {
     metastable_ids: metastableIds,
   };
+  if (params.cluster_name) payload.cluster_name = params.cluster_name;
   if (params.max_clusters_per_residue) payload.max_clusters_per_residue = params.max_clusters_per_residue;
+  if (params.max_cluster_frames) payload.max_cluster_frames = params.max_cluster_frames;
   if (params.random_state !== undefined) payload.random_state = params.random_state;
   if (params.contact_atom_mode) payload.contact_atom_mode = params.contact_atom_mode;
   if (params.contact_cutoff) payload.contact_cutoff = params.contact_cutoff;
@@ -287,6 +296,33 @@ export function downloadMetastableClusters(projectId, systemId, metastableIds, p
       body: payload,
     }
   );
+}
+
+export function submitMetastableClusterJob(projectId, systemId, metastableIds, params = {}) {
+  const payload = {
+    metastable_ids: metastableIds,
+  };
+  if (params.cluster_name) payload.cluster_name = params.cluster_name;
+  if (params.max_clusters_per_residue) payload.max_clusters_per_residue = params.max_clusters_per_residue;
+  if (params.max_cluster_frames) payload.max_cluster_frames = params.max_cluster_frames;
+  if (params.random_state !== undefined) payload.random_state = params.random_state;
+  if (params.contact_atom_mode) payload.contact_atom_mode = params.contact_atom_mode;
+  if (params.contact_cutoff) payload.contact_cutoff = params.contact_cutoff;
+  if (params.cluster_algorithm) payload.cluster_algorithm = params.cluster_algorithm;
+  if (params.algorithm_params) payload.algorithm_params = params.algorithm_params;
+  if (params.dbscan_eps) payload.dbscan_eps = params.dbscan_eps;
+  if (params.dbscan_min_samples) payload.dbscan_min_samples = params.dbscan_min_samples;
+  return requestJSON(`/projects/${projectId}/systems/${systemId}/metastable/cluster_jobs`, {
+    method: 'POST',
+    body: payload,
+  });
+}
+
+export function renameMetastableCluster(projectId, systemId, clusterId, name) {
+  return requestJSON(`/projects/${projectId}/systems/${systemId}/metastable/clusters/${clusterId}`, {
+    method: 'PATCH',
+    body: { name },
+  });
 }
 
 export function confirmMacroStates(projectId, systemId) {

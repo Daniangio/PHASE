@@ -28,7 +28,7 @@ def main():
     parser.add_argument("--active_slice", default=None)
     parser.add_argument("--inactive_slice", default=None)
 
-    # Goal 1 Params
+    # Clustering Params
     parser.add_argument("--maxk", type=int, default=100)
 
     

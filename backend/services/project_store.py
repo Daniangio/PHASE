@@ -242,6 +242,15 @@ class ProjectStore:
         meta_path = self._system_meta_path(metadata.project_id, metadata.system_id)
         _write_json(meta_path, self._encode_system(metadata))
 
+    def rename_state(self, project_id: str, system_id: str, state_id: str, new_name: str) -> SystemMetadata:
+        system_meta = self.get_system(project_id, system_id)
+        if state_id not in system_meta.states:
+            raise FileNotFoundError(f"State '{state_id}' not found in system '{system_id}'.")
+        
+        system_meta.states[state_id].name = new_name
+        self.save_system(system_meta)
+        return system_meta
+
     # ------------------------------------------------------------------
     # Filesystem utilities
     # ------------------------------------------------------------------

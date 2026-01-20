@@ -47,7 +47,6 @@ export default function DescriptorVizPage() {
   const [maxPoints, setMaxPoints] = useState(2000);
   const [appliedStateQuery, setAppliedStateQuery] = useState('');
   const [selectedClusterId, setSelectedClusterId] = useState('');
-  const [clusterMode, setClusterMode] = useState('merged');
   const [clusterLegend, setClusterLegend] = useState([]);
 
   const [anglesByState, setAnglesByState] = useState({});
@@ -80,18 +79,17 @@ export default function DescriptorVizPage() {
     [system]
   );
   const metastableStates = useMemo(() => system?.metastable_states || [], [system]);
-  const clusterOptions = useMemo(() => system?.metastable_clusters || [], [system]);
+  const clusterOptions = useMemo(
+    () => (system?.metastable_clusters || []).filter((run) => run.path && run.status !== 'failed'),
+    [system]
+  );
 
   // Hydrate from query params (cluster selection) whenever search changes.
   useEffect(() => {
     const params = new URLSearchParams(location.search || '');
     const clusterId = params.get('cluster_id');
-    const mode = params.get('cluster_mode');
     if (clusterId) {
       setSelectedClusterId(clusterId);
-    }
-    if (mode && (mode === 'merged' || mode === 'per_meta')) {
-      setClusterMode(mode);
     }
   }, [location.search]);
 
@@ -390,7 +388,6 @@ export default function DescriptorVizPage() {
       const qs = { max_points: bootstrapOnly ? Math.min(maxPoints, 500) : maxPoints };
       if (selectedClusterId) {
         qs.cluster_id = selectedClusterId;
-        qs.cluster_mode = clusterMode;
       }
       if (selectedResidue) {
         qs.residue_keys = selectedResidue;
@@ -416,7 +413,6 @@ export default function DescriptorVizPage() {
           n_frames: data.n_frames,
           sample_stride: data.sample_stride,
           cluster_legend: data.cluster_legend || [],
-          cluster_mode: data.cluster_mode,
           metastable_labels: data.metastable_labels || [],
           metastable_legend: data.metastable_legend || [],
         };
@@ -469,7 +465,6 @@ export default function DescriptorVizPage() {
       setLoadingAngles(false);
     }
   }, [
-    clusterMode,
     maxPoints,
     projectId,
     selectedClusterId,
@@ -487,7 +482,7 @@ export default function DescriptorVizPage() {
       setSelectedResidue('');
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedStates, selectedClusterId, clusterMode, selectedResidue]);
+  }, [selectedStates, selectedClusterId, selectedResidue]);
 
   const traces3d = useMemo(() => {
     const traces = [];
@@ -627,36 +622,10 @@ export default function DescriptorVizPage() {
                 <option value="">None</option>
                 {clusterOptions.map((c) => (
                   <option key={c.cluster_id} value={c.cluster_id}>
-                    {c.path?.split('/').pop() || c.cluster_id}
+                    {c.name || c.path?.split('/').pop() || c.cluster_id}
                   </option>
                 ))}
               </select>
-              {selectedClusterId && (
-                <div className="mt-2 flex items-center space-x-3 text-xs text-gray-300">
-                  <label className="flex items-center space-x-1">
-                    <input
-                      type="radio"
-                      name="cluster-mode"
-                      value="merged"
-                      checked={clusterMode === 'merged'}
-                      onChange={() => setClusterMode('merged')}
-                      className="accent-emerald-400"
-                    />
-                    <span>Merged</span>
-                  </label>
-                  <label className="flex items-center space-x-1">
-                    <input
-                      type="radio"
-                      name="cluster-mode"
-                      value="per_meta"
-                      checked={clusterMode === 'per_meta'}
-                      onChange={() => setClusterMode('per_meta')}
-                      className="accent-emerald-400"
-                    />
-                    <span>Per metastable</span>
-                  </label>
-                </div>
-              )}
               {clusterLegend.length > 0 && (
                 <p className="text-[11px] text-gray-500 mt-2">
                   Clusters loaded: {clusterLegend.map((c) => c.label).join(' • ')}
