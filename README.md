@@ -2,7 +2,7 @@
 
 PHASE (Protein Hamiltonian for Annealed Sampling of conformational Ensembles) is a modular framework for learning reduced Hamiltonians from molecular dynamics trajectories and generating novel protein conformations via calibrated annealed sampling. It bridges analysis and generation by combining trajectory preprocessing, descriptor extraction, metastable state discovery, residue-level clustering, and Potts-based sampling into a reproducible pipeline.
 
-This repository is a monorepo with:
+This repository contains:
 
 - `phase/`: core Python library (feature extraction, metastable analysis, clustering, Potts sampling).
 - `backend/`: FastAPI server + RQ workers for background jobs.
@@ -23,7 +23,7 @@ This repository is a monorepo with:
 ## Typical Workflow (Web Server)
 
 1. **Create a project**
-   - `POST /api/v1/projects` with `{ "name": "My Project" }`.
+   - Decide project name and add optional description.
 2. **Create a system**
    - Upload PDBs for the macro-states (multipart form).
 3. **Upload trajectories + build descriptors**
@@ -86,7 +86,7 @@ npm install
 npm start
 ```
 
-## Local Potts Model Fitting (Optional)
+## Local Potts Model Fitting
 
 You can fit Potts models on a separate machine (e.g., with CUDA) and upload the
 `potts_model.npz` back to the web UI.
@@ -94,28 +94,19 @@ You can fit Potts models on a separate machine (e.g., with CUDA) and upload the
 1) Create a dedicated uv environment once:
 
 ```bash
-./scripts/potts_setup_uv.sh
+./scripts/potts_setup.sh
 source .venv-potts-fit/bin/activate
 ```
 
 2) Run the interactive fitter (requires an active venv):
 
 ```bash
-./scripts/potts_fit_uv.sh
+./scripts/potts_fit.sh
 ```
 
 The script prompts for the input Cluster NPZ, PLM hyperparameters, and device
 (`auto`, `cuda`, or `cpu`). The fitted model is saved as `potts_model.npz` in the
 chosen results directory.
-
-## Repository Structure
-
-```
-phase/                  Core library
-backend/                FastAPI + RQ workers
-frontend/               React UI
-docs/                   Documentation
-```
 
 ## Notes
 
