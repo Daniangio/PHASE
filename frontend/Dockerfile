@@ -1,5 +1,5 @@
 #
-# Dockerfile for the AllosKin Frontend (React + Tailwind)
+# Dockerfile for the PHASE Frontend (React + Tailwind)
 # This is for PRODUCTION builds.
 #
 

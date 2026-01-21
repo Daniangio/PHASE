@@ -3,12 +3,12 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "alloskin"
+name = "phase"
 version = "0.1.0"
 authors = [
-  { name="AllosKin Developer", email="dev@example.com" },
+  { name="PHASE Developer", email="dev@example.com" },
 ]
-description = "A pipeline for causal analysis of allosteric signaling in GPCRs."
+description = "Modular framework for learning reduced Hamiltonians from MD trajectories and generating conformational ensembles."
 readme = "README.md"
 requires-python = ">=3.9"
 classifiers = [
@@ -42,9 +42,9 @@ dev = [
 ]
 
 [project.scripts]
-# This creates the `alloskin` command
-alloskin = "alloskin.cli:main"
+# This creates the `phase` command
+phase = "phase.cli:main"
 
-## This explicitly tells setuptools to *only* look for packages starting with 'alloskin'
+## This explicitly tells setuptools to *only* look for packages starting with 'phase'
 [tool.setuptools.packages.find]
-include = ["alloskin*"]
+include = ["phase*"]

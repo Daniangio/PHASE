@@ -8,28 +8,28 @@ from typing import Sequence
 
 import numpy as np
 
-from alloskin.io.data import load_npz
-from alloskin.simulation.potts_model import (
+from phase.io.data import load_npz
+from phase.simulation.potts_model import (
     compute_pseudolikelihood_loss_torch,
     fit_potts_pmi,
     fit_potts_pseudolikelihood_torch,
     load_potts_model,
     save_potts_model,
 )
-from alloskin.simulation.qubo import potts_to_qubo_onehot, decode_onehot
-from alloskin.simulation.sampling import (
+from phase.simulation.qubo import potts_to_qubo_onehot, decode_onehot
+from phase.simulation.sampling import (
     gibbs_sample_potts,
     make_beta_ladder,
     replica_exchange_gibbs_potts,
     sa_sample_qubo_neal,
 )
-from alloskin.simulation.metrics import (
+from phase.simulation.metrics import (
     marginals,
     pairwise_joints_on_edges,
     per_residue_js,
     combined_distance,
 )
-from alloskin.simulation.plotting import plot_marginal_summary_from_npz
+from phase.simulation.plotting import plot_marginal_summary_from_npz
 
 
 def _parse_float_list(s: str) -> list[float]:
@@ -783,7 +783,7 @@ def run_pipeline(
         beta_eff_distances_result = distances_by_schedule[0] if distances_by_schedule else []
         beta_eff_value = beta_eff_by_schedule[0] if beta_eff_by_schedule else None
 
-        from alloskin.simulation.plotting import plot_beta_scan_curve
+        from phase.simulation.plotting import plot_beta_scan_curve
         outp = plot_beta_scan_curve(
             betas=grid,
             distances=distances_by_schedule,

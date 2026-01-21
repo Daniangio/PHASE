@@ -9,7 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from alloskin.analysis.vamp_pipeline import run_metastable_pipeline_for_system
+from phase.analysis.vamp_pipeline import run_metastable_pipeline_for_system
 from backend.services.project_store import ProjectStore, SystemMetadata, DescriptorState
 
 

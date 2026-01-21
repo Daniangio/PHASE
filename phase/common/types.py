@@ -1,5 +1,5 @@
 """
-Common type hints used across the alloskin library.
+Common type hints used across the phase library.
 """
 
 from typing import Dict

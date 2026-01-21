@@ -7,10 +7,10 @@ from typing import Dict, List, Optional, Tuple, Union
 
 import numpy as np
 
-from alloskin.features.extraction import FeatureDict, FeatureExtractor
-from alloskin.io.readers import MDAnalysisReader
-from alloskin.pipeline.builder import DatasetBuilder
-from alloskin.pipeline.selection_parser import parse_and_expand_selections
+from phase.features.extraction import FeatureDict, FeatureExtractor
+from phase.io.readers import MDAnalysisReader
+from phase.pipeline.builder import DatasetBuilder
+from phase.pipeline.selection_parser import parse_and_expand_selections
 
 
 @dataclass

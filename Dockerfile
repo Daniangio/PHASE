@@ -1,7 +1,7 @@
 #
-# Dockerfile for the AllosKin Backend Service
+# Dockerfile for the PHASE Backend Service
 # This uses a multi-stage build for efficiency.
-# Build context: Root of the AllosKin directory
+# Build context: Root of the PHASE directory
 #
 
 # --- 1. Base Stage ---
@@ -31,10 +31,10 @@ RUN pip install -r backend_requirements.txt
 
 # --- 2. Builder Stage (Packages the application code) ---
 FROM base AS builder
-# Copy the source code for the alloskin library
+# Copy the source code for the phase library
 COPY pyproject.toml .
 COPY README.md .
-COPY alloskin/ alloskin/
+COPY phase/ phase/
 # Install the package
 RUN pip install --no-build-isolation --no-deps .
 

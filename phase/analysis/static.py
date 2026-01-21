@@ -41,7 +41,7 @@ from typing import Dict, Any, Callable
 # Optional: circular transform helper (not strictly needed here, but imported
 # to keep backwards compatibility for users that relied on it externally).
 try:  # pragma: no cover - optional dependency
-    from alloskin.features.extraction import transform_to_circular  # noqa: F401
+    from phase.features.extraction import transform_to_circular  # noqa: F401
 except Exception:  # pragma: no cover - defensive
     transform_to_circular = None  # type: ignore
 

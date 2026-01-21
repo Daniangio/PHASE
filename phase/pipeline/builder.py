@@ -19,9 +19,9 @@ import Bio.Align
 
 # We need the other components for the new logic
 # Assuming they are in the same module directory
-from alloskin.io.readers import AbstractTrajectoryReader
-from alloskin.pipeline.selection_parser import parse_and_expand_selections
-from alloskin.features.extraction import FeatureExtractor, FeatureDict
+from phase.io.readers import AbstractTrajectoryReader
+from phase.pipeline.selection_parser import parse_and_expand_selections
+from phase.features.extraction import FeatureExtractor, FeatureDict
 
 def sequence_alignment(mobile, reference):
     """

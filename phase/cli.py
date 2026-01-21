@@ -1,11 +1,13 @@
 """
-CLI for AllosKin.
+CLI for PHASE.
 """
 import argparse, sys, json
-from alloskin.pipeline.runner import run_analysis
+from phase.pipeline.runner import run_analysis
 
 def main():
-    parser = argparse.ArgumentParser(description="AllosKin: Hierarchical Information Atlas (local debug CLI)")
+    parser = argparse.ArgumentParser(
+        description="PHASE: Protein Hamiltonian for Annealed Sampling of conformational Ensembles (local debug CLI)"
+    )
     parser.add_argument("analysis", choices=["static"])
 
     # Descriptor inputs (preferred for current pipeline)

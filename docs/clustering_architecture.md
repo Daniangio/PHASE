@@ -72,7 +72,7 @@ falls back to the single-process path to avoid deadlock.
 
 Recommended:
 
-- Run multiple RQ workers in the `alloskin-jobs` queue (e.g., 4–32 depending on CPU/RAM).
+- Run multiple RQ workers in the `phase-jobs` queue (e.g., 4–32 depending on CPU/RAM).
 - Avoid over-subscribing BLAS/OpenMP threads when using many processes.
 
 ## Code References

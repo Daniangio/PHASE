@@ -4,13 +4,13 @@
 services:
   backend:
     # Override the command to enable --reload for uvicorn
-    command: uvicorn backend.main:app --reload --host 0.0.0.0 --port 8000 --reload-dir /app/alloskin --reload-dir /app/backend
+    command: uvicorn backend.main:app --reload --host 0.0.0.0 --port 8000 --reload-dir /app/phase --reload-dir /app/backend
     volumes:
       # Volumes are already defined in the base file,
       # but we re-state them here for clarity.
-      - ./alloskin:/app/alloskin
+      - ./phase:/app/phase
       - ./backend:/app/backend
-      - /scratch/docker/alloskin-data:/data/alloskin
+      - /scratch/docker/phase-data:/data/phase
 
   frontend:
     # Use the dev-specific Dockerfile
@@ -31,14 +31,14 @@ services:
   # Add an override for the 'worker' service for live-reloading
   worker:
     # This command uses 'watchmedo' (from the 'watchdog' package)
-    # to monitor the /app/alloskin directory for .py file changes
+    # to monitor the /app/phase directory for .py file changes
     # and automatically restart the 'rq worker' command.
     command: >
       watchmedo auto-restart
-        --directory=/app/alloskin
+        --directory=/app/phase
         --pattern="*.py"
         --recursive
         --
-        rq worker alloskin-jobs --url redis://redis:6379/0
+        rq worker phase-jobs --url redis://redis:6379/0
     # The volumes are inherited from docker-compose.yml,
     # so the local files are already mounted.

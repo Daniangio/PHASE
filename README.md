@@ -1,10 +1,10 @@
-# AllosKin
+# PHASE
 
-AllosKin (Allostery + Kinetics) is a research framework for analyzing conformational dynamics and allosteric signaling in proteins. It combines descriptor extraction, metastable state discovery, residue clustering, and Potts-based sampling to compare ensembles and quantify state-specific signatures.
+PHASE (Protein Hamiltonian for Annealed Sampling of conformational Ensembles) is a modular framework for learning reduced Hamiltonians from molecular dynamics trajectories and generating novel protein conformations via calibrated annealed sampling. It bridges analysis and generation by combining trajectory preprocessing, descriptor extraction, metastable state discovery, residue-level clustering, and Potts-based sampling into a reproducible pipeline.
 
 This repository is a monorepo with:
 
-- `alloskin/`: core Python library (feature extraction, metastable analysis, clustering, Potts sampling).
+- `phase/`: core Python library (feature extraction, metastable analysis, clustering, Potts sampling).
 - `backend/`: FastAPI server + RQ workers for background jobs.
 - `frontend/`: React UI for project and results management.
 - `docs/`: method notes and architecture documents.
@@ -52,7 +52,7 @@ Services:
 - Backend API: `http://localhost:8000` (OpenAPI docs at `/docs`)
 - Frontend: `http://localhost:3000`
 
-Data is stored under the Docker volume mapped to `ALLOSKIN_DATA_ROOT` (default in compose: `/data/alloskin`).
+Data is stored under the Docker volume mapped to `PHASE_DATA_ROOT` (default in compose: `/data/phase`).
 
 ### Multiple Workers
 
@@ -111,15 +111,15 @@ chosen results directory.
 ## Repository Structure
 
 ```
-alloskin/                Core library
-backend/                 FastAPI + RQ workers
-frontend/                React UI
-docs/                    Documentation
+phase/                  Core library
+backend/                FastAPI + RQ workers
+frontend/               React UI
+docs/                   Documentation
 ```
 
 ## Notes
 
 - The backend uses Redis to queue jobs. In Docker, Redis is started automatically.
-- Results are persisted to `ALLOSKIN_DATA_ROOT/results` and referenced in run metadata.
+- Results are persisted to `PHASE_DATA_ROOT/results` and referenced in run metadata.
 - For API details, use the OpenAPI docs at `/docs`.
 - Potts models can be fit once and reused for sampling. See `docs/potts_overview.md` for CLI examples.

@@ -1,4 +1,4 @@
-# VAMP and TICA in AllosKin
+# VAMP and TICA in PHASE
 
 This page explains how VAMP/TICA are used in the code base and how they connect
 to the metastable pipeline.

@@ -54,7 +54,7 @@ echo "numpy<2" > "$CONSTRAINTS_TMP"
 echo "Installing base dependencies (numpy)..."
 uv pip install -r "$CONSTRAINTS_TMP"
 
-INSTALL_FULL="$(prompt "Install full AllosKin deps (y/N)" "N")"
+INSTALL_FULL="$(prompt "Install full PHASE deps (y/N)" "N")"
 if [[ "$INSTALL_FULL" =~ ^[Yy]$ ]]; then
   echo "Installing full dependencies (excluding torch)..."
   uv pip install -r "$REQ_TMP" --constraints "$CONSTRAINTS_TMP"
@@ -76,7 +76,7 @@ if [[ "$INSTALL_TORCH" =~ ^[Yy]$ ]]; then
   uv pip install "$TORCH_SPEC" --torch-backend "${CUDA_FLAVOR}"
 fi
 
-echo "Installing alloskin package (no deps)..."
+echo "Installing phase package (no deps)..."
 uv pip install -e "${ROOT_DIR}" --no-deps
 
 echo "Done. Activate with: source ${VENV_DIR}/bin/activate"

@@ -19,7 +19,7 @@ from backend.services.preprocessing import DescriptorPreprocessor
 from backend.services.project_store import DescriptorState, ProjectMetadata, ProjectStore, SystemMetadata
 
 
-DATA_ROOT = Path(os.getenv("ALLOSKIN_DATA_ROOT", "/app/data"))
+DATA_ROOT = Path(os.getenv("PHASE_DATA_ROOT", "/app/data"))
 RESULTS_DIR = DATA_ROOT / "results"
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 project_store = ProjectStore()

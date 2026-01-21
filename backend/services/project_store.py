@@ -18,7 +18,7 @@ import shutil
 
 
 # Allow overriding the data root (e.g., to point to a larger, persistent volume).
-DATA_ROOT = Path(os.getenv("ALLOSKIN_DATA_ROOT", "/app/data"))
+DATA_ROOT = Path(os.getenv("PHASE_DATA_ROOT", "/app/data"))
 PROJECTS_DIR = DATA_ROOT / "projects"
 PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
 SelectionInput = Union[Dict[str, str], List[str]]

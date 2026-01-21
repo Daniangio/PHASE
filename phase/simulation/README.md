@@ -72,7 +72,7 @@ To truly map to Kelvin you’d need calibration (e.g., MD at multiple temperatur
 
 ## Running the pipeline
 
-> NOTE: the updated `main.py` in the bundle uses package-style imports (`alloskin...`).  
+> NOTE: the updated `main.py` in the bundle uses package-style imports (`phase...`).  
 > If your repo uses flat scripts, either:
 > - place files under the matching package structure, or
 > - adjust imports to your local layout.

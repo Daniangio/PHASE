@@ -94,8 +94,8 @@ REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 # Initialize Redis connection and RQ Queue
 try:
     redis_conn = redis.from_url(REDIS_URL)
-    # The queue name must match the worker's queue name (alloskin-jobs)
-    task_queue = Queue('alloskin-jobs', connection=redis_conn)
+    # The queue name must match the worker's queue name (phase-jobs)
+    task_queue = Queue('phase-jobs', connection=redis_conn)
 except Exception as e:
     # If Redis connection fails, we can't enqueue jobs, which will be caught in the health check
     print(f"FATAL: Could not connect to Redis: {e}")
@@ -105,8 +105,8 @@ except Exception as e:
 
 
 app = FastAPI(
-    title="AllosKin API",
-    description="API for the AllosKin causal analysis pipeline.",
+    title="PHASE API",
+    description="API for the PHASE analysis and sampling pipeline.",
     version="0.1.0",
 )
 
@@ -163,4 +163,4 @@ async def read_root():
     """
     Root endpoint for health check.
     """
-    return {"message": "Welcome to the AllosKin API. Go to /docs for details."}
+    return {"message": "Welcome to the PHASE API. Go to /docs for details."}

@@ -5,11 +5,11 @@ Runner for static state-sensitivity analysis.
 import numpy as np
 from typing import Dict, Any, Optional, Tuple, List
 
-from alloskin.io.readers import MDAnalysisReader
-from alloskin.features.extraction import FeatureExtractor
-from alloskin.pipeline.builder import DatasetBuilder
+from phase.io.readers import MDAnalysisReader
+from phase.features.extraction import FeatureExtractor
+from phase.pipeline.builder import DatasetBuilder
 
-from alloskin.analysis.static import StaticStateSensitivity
+from phase.analysis.static import StaticStateSensitivity
 
 
 # ======================================================================

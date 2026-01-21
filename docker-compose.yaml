@@ -7,16 +7,16 @@ services:
       - "8000:8000"
     volumes:
       # Mount code for live-reload during development
-      - ./alloskin:/app/alloskin
+      - ./phase:/app/phase
       - ./backend:/app/backend
       # Persist application data (projects, trajectories, descriptors) on /scratch
-      - /scratch/docker/alloskin-data:/data/alloskin
+      - /scratch/docker/phase-data:/data/phase
     environment:
       - PYTHONUNBUFFERED=1
       # Note: We use the internal service name 'redis' and its default internal port '6379'
       - REDIS_URL=redis://redis:6379/0
-      - ALLOSKIN_DATA_ROOT=/data/alloskin
-      - TMPDIR=/data/alloskin/tmp
+      - PHASE_DATA_ROOT=/data/phase
+      - TMPDIR=/data/phase/tmp
     depends_on:
       - redis
 
@@ -34,16 +34,16 @@ services:
       context: .
       dockerfile: Dockerfile # Uses the same Python environment
     # This is the PRODUCTION command
-    command: rq worker alloskin-jobs --url redis://redis:6379/0
+    command: rq worker phase-jobs --url redis://redis:6379/0
     volumes:
       # The worker needs the exact same volumes as the backend
-      - ./alloskin:/app/alloskin
+      - ./phase:/app/phase
       - ./backend:/app/backend
-      - /scratch/docker/alloskin-data:/data/alloskin
+      - /scratch/docker/phase-data:/data/phase
     environment:
       - PYTHONUNBUFFERED=1
-      - ALLOSKIN_DATA_ROOT=/data/alloskin
-      - TMPDIR=/data/alloskin/tmp
+      - PHASE_DATA_ROOT=/data/phase
+      - TMPDIR=/data/phase/tmp
     depends_on:
       - redis
 

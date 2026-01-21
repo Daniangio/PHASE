@@ -8,9 +8,9 @@ from datetime import datetime
 from rq import Queue, Worker, get_current_job
 from rq.job import Job
 from typing import Dict, Any, List
-from alloskin.pipeline.runner import run_analysis
-from alloskin.simulation.main import parse_args as parse_simulation_args
-from alloskin.simulation.main import run_pipeline as run_simulation_pipeline
+from phase.pipeline.runner import run_analysis
+from phase.simulation.main import parse_args as parse_simulation_args
+from phase.simulation.main import run_pipeline as run_simulation_pipeline
 from backend.services.metastable_clusters import (
     generate_metastable_cluster_npz,
     prepare_cluster_workspace,
@@ -19,8 +19,8 @@ from backend.services.metastable_clusters import (
 )
 from backend.services.project_store import ProjectStore
 
-# Define the persistent results directory (aligned with ALLOSKIN_DATA_ROOT).
-DATA_ROOT = Path(os.getenv("ALLOSKIN_DATA_ROOT", "/app/data"))
+# Define the persistent results directory (aligned with PHASE_DATA_ROOT).
+DATA_ROOT = Path(os.getenv("PHASE_DATA_ROOT", "/app/data"))
 RESULTS_DIR = DATA_ROOT / "results"
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 SIMULATION_RESULTS_DIR = RESULTS_DIR / "simulation"

@@ -1,7 +1,7 @@
 # Metastable state discovery (webserver pipeline)
 
 This page describes the metastable-state pipeline used by the webserver and how
-the hyperparameters map to the code in `alloskin/analysis/vamp_pipeline.py`.
+the hyperparameters map to the code in `phase/analysis/vamp_pipeline.py`.
 
 ## Pipeline overview
 1) Load per-residue descriptor NPZ files produced during descriptor building.
@@ -21,7 +21,7 @@ the hyperparameters map to the code in `alloskin/analysis/vamp_pipeline.py`.
 
 ## Notes on the descriptors
 - The pipeline consumes the same per-residue dihedral features used elsewhere in
-  AllosKin (phi/psi/chi1 angles transformed to sin/cos).
+  PHASE (phi/psi/chi1 angles transformed to sin/cos).
 - Features are stacked in residue order to form a single frame vector.
 
 ## Outputs

@@ -17,7 +17,7 @@ export default function AppLayout({ children }) {
               AK
             </div>
             <div>
-              <h1 className="text-2xl font-bold tracking-tight text-white">AllosKin</h1>
+              <h1 className="text-2xl font-bold tracking-tight text-white">PHASE</h1>
               <p className="text-xs text-gray-400">Causal Analysis Pipeline</p>
             </div>
           </div>
@@ -43,7 +43,7 @@ export default function AppLayout({ children }) {
       </header>
       <main className="flex-grow container mx-auto px-4 py-8">{children}</main>
       <footer className="bg-gray-800 text-gray-400 text-sm text-center py-4 border-t border-gray-700">
-        © {new Date().getFullYear()} AllosKin
+        © {new Date().getFullYear()} PHASE
       </footer>
     </div>
   );

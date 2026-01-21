@@ -81,7 +81,7 @@ if [ "$FIT_METHOD" != "pmi" ]; then
 fi
 
 CMD=(
-  "$PYTHON_BIN" -m alloskin.simulation.main
+  "$PYTHON_BIN" -m phase.simulation.main
   --npz "$NPZ_PATH"
   --results-dir "$RESULTS_DIR"
   --fit-only

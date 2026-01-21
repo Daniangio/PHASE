@@ -140,7 +140,7 @@ export default function VisualizePage() {
       const component = await plugin.builders.structure.tryCreateComponentFromExpression(
         structureCell,
         expression,
-        'alloskin-selection'
+        'phase-selection'
       );
       if (!component) return;
       highlightComponentsRef.current.push(component);
@@ -183,7 +183,7 @@ export default function VisualizePage() {
         const baseComponent = await pluginRef.current.builders.structure.tryCreateComponentFromExpression(
           structureCell,
           allExpr,
-          'alloskin-base'
+          'phase-base'
         );
         if (baseComponent) {
           await pluginRef.current.builders.structure.representation.addRepresentation(baseComponent, {
