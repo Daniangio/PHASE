@@ -1,12 +1,15 @@
 import json
 import os
 import shutil
+import uuid
+from datetime import datetime
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Query, Response
+import numpy as np
+from fastapi import APIRouter, HTTPException, Query, Response, UploadFile, File, Form
 from fastapi.responses import FileResponse
 
-from backend.api.v1.common import DATA_ROOT, RESULTS_DIR
+from backend.api.v1.common import DATA_ROOT, RESULTS_DIR, get_cluster_entry, project_store, stream_upload
 
 
 router = APIRouter()
@@ -33,6 +36,20 @@ def _artifact_media_type(path: Path) -> str:
     if suffix == ".html":
         return "text/html"
     return "application/octet-stream"
+
+
+def _relativize_path(path: Path) -> str:
+    try:
+        return str(path.relative_to(DATA_ROOT))
+    except Exception:
+        return str(path)
+
+
+def _safe_filename(name: str | None, fallback: str) -> str:
+    if not isinstance(name, str) or not name.strip():
+        return fallback
+    base = Path(name).name.strip()
+    return base or fallback
 
 
 def _remove_results_dir(path_value: str | None) -> None:
@@ -238,6 +255,141 @@ async def download_result_artifact(job_uuid: str, artifact: str, download: bool 
     else:
         filename = artifact_path.name
     return FileResponse(artifact_path, filename=filename, media_type=media_type, headers=headers)
+
+
+@router.post("/results/simulation/upload", summary="Upload a local Potts sampling result")
+async def upload_simulation_result(
+    project_id: str = Form(...),
+    system_id: str = Form(...),
+    cluster_id: str = Form(...),
+    summary_npz: UploadFile = File(...),
+    potts_model: UploadFile = File(...),
+):
+    try:
+        system_meta = project_store.get_system(project_id, system_id)
+    except FileNotFoundError:
+        raise HTTPException(
+            status_code=404,
+            detail=f"System '{system_id}' not found in project '{project_id}'.",
+        )
+
+    entry = get_cluster_entry(system_meta, cluster_id)
+    rel_path = entry.get("path")
+    if not rel_path:
+        raise HTTPException(status_code=404, detail="Cluster NPZ path missing in system metadata.")
+    cluster_path = Path(rel_path)
+    if not cluster_path.is_absolute():
+        cluster_path = project_store.resolve_path(project_id, system_id, rel_path)
+    if not cluster_path.exists():
+        raise HTTPException(status_code=404, detail="Cluster NPZ file is missing on disk.")
+
+    if summary_npz.filename and not summary_npz.filename.lower().endswith(".npz"):
+        raise HTTPException(status_code=400, detail="Summary upload must be an .npz file.")
+    if potts_model.filename and not potts_model.filename.lower().endswith(".npz"):
+        raise HTTPException(status_code=400, detail="Potts model upload must be an .npz file.")
+
+    job_uuid = str(uuid.uuid4())
+    results_dir = RESULTS_DIR / "simulation" / job_uuid
+    results_dir.mkdir(parents=True, exist_ok=True)
+
+    summary_path = results_dir / "run_summary.npz"
+    await stream_upload(summary_npz, summary_path)
+
+    dirs = project_store.ensure_directories(project_id, system_id)
+    system_dir = dirs["system_dir"]
+    model_filename = _safe_filename(potts_model.filename, f"{cluster_id}_potts_model.npz")
+    if not model_filename.lower().endswith(".npz"):
+        model_filename = f"{model_filename}.npz"
+    model_path = dirs["potts_models_dir"] / model_filename
+    await stream_upload(potts_model, model_path)
+    model_rel = str(model_path.relative_to(system_dir))
+    entry["potts_model_path"] = model_rel
+    entry["potts_model_updated_at"] = datetime.utcnow().isoformat()
+    entry["potts_model_source"] = "upload"
+    entry["potts_model_name"] = Path(model_filename).stem
+    project_store.save_system(system_meta)
+
+    try:
+        from phase.simulation.plotting import plot_beta_scan_curve, plot_marginal_summary_from_npz, plot_sampling_report_from_npz
+
+        plot_path = plot_marginal_summary_from_npz(
+            summary_path=summary_path,
+            out_path=results_dir / "marginals.html",
+            annotate=False,
+        )
+        report_path = plot_sampling_report_from_npz(
+            summary_path=summary_path,
+            out_path=results_dir / "sampling_report.html",
+        )
+        beta_scan_path = None
+        beta_eff_value = None
+        with np.load(summary_path, allow_pickle=False) as data:
+            beta_eff = data["beta_eff"] if "beta_eff" in data else np.array([])
+            if beta_eff.size:
+                beta_eff_value = float(beta_eff[0])
+            grid = data["beta_eff_grid"] if "beta_eff_grid" in data else np.array([])
+            distances = data["beta_eff_distances_by_schedule"] if "beta_eff_distances_by_schedule" in data else np.array([])
+            if grid.size and distances.size:
+                labels = data["sa_schedule_labels"] if "sa_schedule_labels" in data else None
+                if labels is not None:
+                    labels = [str(v) for v in labels.tolist()]
+                beta_scan_path = plot_beta_scan_curve(
+                    betas=grid,
+                    distances=distances,
+                    labels=labels,
+                    out_path=results_dir / "beta_scan.html",
+                )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to generate sampling plots: {exc}") from exc
+
+    try:
+        project_meta = project_store.get_project(project_id)
+        project_name = project_meta.name
+    except Exception:
+        project_name = None
+
+    cluster_name = entry.get("name") if isinstance(entry, dict) else None
+    result_payload = {
+        "job_id": job_uuid,
+        "rq_job_id": f"upload-{job_uuid}",
+        "analysis_type": "simulation",
+        "status": "finished",
+        "created_at": datetime.utcnow().isoformat(),
+        "completed_at": datetime.utcnow().isoformat(),
+        "params": {
+            "source": "upload",
+        },
+        "results": {
+            "results_dir": _relativize_path(results_dir),
+            "summary_npz": _relativize_path(summary_path),
+            "metadata_json": None,
+            "marginals_plot": _relativize_path(plot_path) if plot_path else None,
+            "sampling_report": _relativize_path(report_path) if report_path else None,
+            "beta_scan_plot": _relativize_path(beta_scan_path) if beta_scan_path else None,
+            "cluster_npz": _relativize_path(cluster_path),
+            "potts_model": _relativize_path(model_path),
+            "beta_eff": beta_eff_value,
+        },
+        "system_reference": {
+            "project_id": project_id,
+            "system_id": system_id,
+            "project_name": project_name,
+            "system_name": system_meta.name,
+            "cluster_id": cluster_id,
+            "cluster_name": cluster_name,
+            "structures": {},
+            "states": {},
+        },
+        "error": None,
+    }
+
+    result_file = RESULTS_DIR / f"{job_uuid}.json"
+    try:
+        result_file.write_text(json.dumps(result_payload, indent=2))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to write result metadata: {exc}") from exc
+
+    return {"status": "uploaded", "job_id": job_uuid}
 
 
 @router.delete("/results/{job_uuid}", summary="Delete a job and its associated data")

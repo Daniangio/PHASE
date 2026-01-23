@@ -55,3 +55,73 @@ export function downloadResultArtifact(jobId, artifact) {
 export function resultArtifactUrl(jobId, artifact) {
   return `${API_BASE}/results/${jobId}/artifacts/${artifact}`;
 }
+
+export function uploadSimulationResults(
+  projectId,
+  systemId,
+  clusterId,
+  summaryFile,
+  modelFile,
+  options = {}
+) {
+  const { onUploadProgress } = options;
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', `${API_BASE}/results/simulation/upload`);
+    xhr.responseType = 'json';
+
+    if (xhr.upload) {
+      xhr.upload.addEventListener('loadstart', () => {
+        if (typeof onUploadProgress === 'function') onUploadProgress(0);
+      });
+      xhr.upload.addEventListener('progress', (event) => {
+        if (typeof onUploadProgress !== 'function') return;
+        if (!event.lengthComputable) return;
+        const percent = Math.round((event.loaded / event.total) * 100);
+        onUploadProgress(Math.min(100, percent));
+      });
+      xhr.upload.addEventListener('loadend', () => {
+        if (typeof onUploadProgress === 'function') onUploadProgress(100);
+      });
+    }
+
+    const parseResponseJSON = () => {
+      if (xhr.response !== null && xhr.response !== undefined) {
+        return xhr.response;
+      }
+      try {
+        return xhr.responseText ? JSON.parse(xhr.responseText) : null;
+      } catch (err) {
+        return null;
+      }
+    };
+
+    xhr.onreadystatechange = () => {
+      if (xhr.readyState !== XMLHttpRequest.DONE) return;
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve(parseResponseJSON());
+      } else {
+        const response = parseResponseJSON() || {};
+        const message =
+          response.detail ||
+          response.error ||
+          (typeof response === 'string' ? response : '') ||
+          xhr.statusText ||
+          'Failed to upload sampling results.';
+        reject(new Error(message));
+      }
+    };
+
+    xhr.onerror = () => {
+      reject(new Error('Network error while uploading sampling results.'));
+    };
+
+    const payload = new FormData();
+    payload.append('project_id', projectId);
+    payload.append('system_id', systemId);
+    payload.append('cluster_id', clusterId);
+    payload.append('summary_npz', summaryFile);
+    payload.append('potts_model', modelFile);
+    xhr.send(payload);
+  });
+}

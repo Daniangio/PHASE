@@ -506,7 +506,6 @@ def run_simulation_job(
         rex_thin = sim_params.get("rex_thin")
         if rex_thin is not None:
             args_list += ["--rex-thin-rounds", str(int(rex_thin))]
-        args_list += ["--rex-max-workers", "1"]
 
         sa_reads = sim_params.get("sa_reads")
         if sa_reads is not None:
@@ -770,6 +769,7 @@ def run_potts_fit_job(
         result_payload["results"] = {
             "results_dir": _relativize_path(SIMULATION_RESULTS_DIR / job_uuid),
             "potts_model": potts_model_rel,
+            "cluster_npz": _relativize_path(cluster_path),
             "metadata_json": _relativize_path(run_result.get("metadata_path")) if run_result.get("metadata_path") else None,
         }
 

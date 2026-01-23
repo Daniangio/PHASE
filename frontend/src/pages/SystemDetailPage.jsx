@@ -33,6 +33,7 @@ import {
   confirmMetastableStates,
   clearMetastableStates,
   downloadSavedCluster,
+  downloadPottsModel,
   uploadPottsModel,
   renamePottsModel,
   deletePottsModel,
@@ -44,10 +45,12 @@ import {
   submitStaticJob,
   submitSimulationJob,
   fetchJobStatus,
+  uploadSimulationResults,
 } from '../api/jobs';
 import { confirmAndDeleteResult } from '../utils/results';
 import StaticAnalysisForm from '../components/analysis/StaticAnalysisForm';
 import SimulationAnalysisForm from '../components/analysis/SimulationAnalysisForm';
+import SimulationUploadForm from '../components/analysis/SimulationUploadForm';
 import { Eye, Info, Plus, SlidersHorizontal } from 'lucide-react';
 
 export default function SystemDetailPage() {
@@ -121,6 +124,9 @@ export default function SystemDetailPage() {
     plm_batch_size: '',
     plm_progress_every: '',
   });
+  const [samplingMode, setSamplingMode] = useState('run');
+  const [samplingUploadBusy, setSamplingUploadBusy] = useState(false);
+  const [samplingUploadProgress, setSamplingUploadProgress] = useState(null);
   const [pottsFitError, setPottsFitError] = useState(null);
   const [pottsFitSubmitting, setPottsFitSubmitting] = useState(false);
   const [pottsUploadFile, setPottsUploadFile] = useState(null);
@@ -462,6 +468,32 @@ export default function SystemDetailPage() {
     });
     loadResults();
     navigate(`/jobs/${response.job_id}`, { state: { analysis_uuid: response.analysis_uuid } });
+  };
+
+  const handleUploadSimulationResults = async ({ cluster_id, summaryFile, modelFile }) => {
+    setSamplingUploadBusy(true);
+    setSamplingUploadProgress(0);
+    try {
+      const response = await uploadSimulationResults(
+        projectId,
+        systemId,
+        cluster_id,
+        summaryFile,
+        modelFile,
+        { onUploadProgress: (percent) => setSamplingUploadProgress(percent) }
+      );
+      setSamplingUploadProgress(null);
+      await refreshSystem();
+      await loadResults();
+      if (response?.job_id) {
+        navigate(`/simulation/${response.job_id}`);
+      }
+    } catch (err) {
+      throw err;
+    } finally {
+      setSamplingUploadBusy(false);
+      setSamplingUploadProgress(null);
+    }
   };
 
   const enqueuePottsFitJob = async () => {
@@ -830,6 +862,23 @@ export default function SystemDetailPage() {
       URL.revokeObjectURL(url);
     } catch (err) {
       setClusterError(err.message);
+    }
+  };
+
+  const handleDownloadPottsModel = async (clusterId, filename) => {
+    setPottsRenameError(null);
+    try {
+      const blob = await downloadPottsModel(projectId, systemId, clusterId);
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = filename || `potts_model_${clusterId}.npz`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setPottsRenameError(err.message || 'Failed to download Potts model.');
     }
   };
 
@@ -1608,6 +1657,19 @@ export default function SystemDetailPage() {
                             </div>
                             <button
                               type="button"
+                              onClick={() =>
+                                handleDownloadPottsModel(
+                                  run.cluster_id,
+                                  run.potts_model_path?.split('/').pop()
+                                )
+                              }
+                              disabled={isBusy || isDeleting}
+                              className="text-xs px-3 py-2 rounded-md border border-gray-600 text-gray-200 hover:bg-gray-700/60 disabled:opacity-50"
+                            >
+                              Download
+                            </button>
+                            <button
+                              type="button"
                               onClick={() => handleRenamePottsModel(run.cluster_id)}
                               disabled={isBusy || isDeleting}
                               className="text-xs px-3 py-2 rounded-md border border-gray-600 text-gray-200 hover:bg-gray-700/60 disabled:opacity-50"
@@ -1642,15 +1704,54 @@ export default function SystemDetailPage() {
                   )}
                 </div>
                 <div className="bg-gray-900 border border-gray-700 rounded-lg p-4">
-                  <div className="flex items-center gap-2 mb-2">
-                    <h3 className="text-md font-semibold text-white">Potts Sampling</h3>
-                    <InfoTooltip
-                      ariaLabel="Potts analysis documentation"
-                      text="Run sampling with a selected fitted model."
-                      onClick={() => openDoc('potts_overview')}
-                    />
+                  <div className="flex flex-wrap items-center justify-between gap-3 mb-2">
+                    <div className="flex items-center gap-2">
+                      <h3 className="text-md font-semibold text-white">Potts Sampling</h3>
+                      <InfoTooltip
+                        ariaLabel="Potts analysis documentation"
+                        text="Run sampling with a selected fitted model."
+                        onClick={() => openDoc('potts_overview')}
+                      />
+                    </div>
+                    <div className="flex items-center gap-2 text-xs">
+                      <button
+                        type="button"
+                        onClick={() => setSamplingMode('run')}
+                        className={`px-2 py-1 rounded-md border ${
+                          samplingMode === 'run'
+                            ? 'border-cyan-400 text-cyan-200'
+                            : 'border-gray-700 text-gray-400 hover:text-gray-200'
+                        }`}
+                      >
+                        Run on server
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setSamplingMode('upload')}
+                        className={`px-2 py-1 rounded-md border ${
+                          samplingMode === 'upload'
+                            ? 'border-cyan-400 text-cyan-200'
+                            : 'border-gray-700 text-gray-400 hover:text-gray-200'
+                        }`}
+                      >
+                        Upload results
+                      </button>
+                    </div>
                   </div>
-                  <SimulationAnalysisForm clusterRuns={readyClusterRuns} onSubmit={enqueueSimulationJob} />
+                  {samplingMode === 'run' ? (
+                    <SimulationAnalysisForm clusterRuns={readyClusterRuns} onSubmit={enqueueSimulationJob} />
+                  ) : (
+                    <div className="space-y-3">
+                      {samplingUploadProgress !== null && (
+                        <p className="text-xs text-gray-500">Uploading... {samplingUploadProgress}%</p>
+                      )}
+                      <SimulationUploadForm
+                        clusterRuns={readyClusterRuns}
+                        onSubmit={handleUploadSimulationResults}
+                        isBusy={samplingUploadBusy}
+                      />
+                    </div>
+                  )}
                 </div>
               </div>
               <div className="bg-gray-900 border border-gray-700 rounded-lg p-4 space-y-2">

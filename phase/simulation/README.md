@@ -135,7 +135,8 @@ source .venv-potts-fit/bin/activate
   * `--rex-betas` (explicit ladder) OR auto-ladder settings:
 
     * `--rex-n-replicas`, `--rex-beta-min`, `--rex-beta-max`, `--rex-spacing`
-  * `--rex-rounds`, `--rex-burnin-rounds`, `--rex-sweeps-per-round`, `--rex-thin-rounds`
+  * `--rex-rounds` (total across chains), `--rex-burnin-rounds`, `--rex-sweeps-per-round`, `--rex-thin-rounds`
+  * `--rex-chains`: run multiple independent REX chains in parallel (total rounds split across chains; samples concatenated)
 
 ### SA/QUBO sampling (QA proxy)
 

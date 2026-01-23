@@ -79,6 +79,9 @@ export default function ResultsPage() {
               {(result.system_name || result.system_id) && (
                 <span>System: {result.system_name || result.system_id.slice(0, 8)}</span>
               )}
+              {result.analysis_type === 'potts_fit' && result.cluster_npz && (
+                <span>Cluster NPZ: {result.cluster_npz.split('/').pop()}</span>
+              )}
               {result.created_at && <span>Submitted: {new Date(result.created_at).toLocaleString()}</span>}
             </div>
           </div>

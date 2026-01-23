@@ -111,7 +111,6 @@ async def submit_simulation_job(
         "rex_samples": payload.rex_samples,
         "rex_burnin": payload.rex_burnin,
         "rex_thin": payload.rex_thin,
-        "rex_max_workers": payload.rex_max_workers,
         "sa_reads": payload.sa_reads,
         "sa_sweeps": payload.sa_sweeps,
         "plm_epochs": payload.plm_epochs,

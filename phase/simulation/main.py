@@ -4,6 +4,8 @@ import argparse
 import json
 import re
 import sys
+from concurrent.futures import ThreadPoolExecutor
+from threading import Lock
 from pathlib import Path
 from typing import Sequence
 
@@ -780,11 +782,28 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--rex-beta-max", type=float, default=1.0, help="Maximum beta in the ladder (coldest replica).")
     ap.add_argument("--rex-spacing", type=str, default="geom", choices=["geom", "lin"], help="How betas are spaced: geom (geometric): usually better for tempering; lin (linear): sometimes fine for narrow ranges.")
     
-    ap.add_argument("--rex-rounds", type=int, default=2000, help="Number of replica-exchange rounds. Each round does: 1) local Gibbs sweeps in each replica; 2) swap attempts between adjacent replicas.")
+    ap.add_argument(
+        "--rex-rounds",
+        type=int,
+        default=2000,
+        help=(
+            "Total replica-exchange rounds across all chains (split across chains if rex-chains > 1). "
+            "Each round does: 1) local Gibbs sweeps in each replica; 2) swap attempts between adjacent replicas."
+        ),
+    )
     ap.add_argument("--rex-burnin-rounds", type=int, default=50, help="Number of initial rounds discarded before saving samples.")
     ap.add_argument("--rex-sweeps-per-round", type=int, default=2, help="How many Gibbs sweeps each replica does per round before swap attempts.")
     ap.add_argument("--rex-thin-rounds", type=int, default=1, help="Save samples every this many rounds after burn-in.")
-    ap.add_argument("--rex-max-workers", type=int, default=0, help="Max worker threads for replica exchange (0 = auto, 1 = disable parallelism).")
+    ap.add_argument(
+        "--rex-chains",
+        "--rex-chain-count",
+        type=int,
+        default=1,
+        help=(
+            "Number of independent replica-exchange chains run in parallel "
+            "(total rounds split across chains)."
+        ),
+    )
 
     # SA/QUBO
     ap.add_argument("--sa-reads", type=int, default=2000, help="Number of independent SA runs (“reads”). Each read outputs one bitstring sample.")
@@ -1037,9 +1056,57 @@ def run_pipeline(
         betas = [float(args.beta)]
     else:
         report("Sampling Gibbs (replica exchange)", 50)
-        rex_max_workers = None if args.rex_max_workers <= 0 else args.rex_max_workers
+        rex_max_workers = 1
+        total_rounds = max(1, int(args.rex_rounds))
+        rex_chains = max(1, int(args.rex_chains))
+        if rex_chains > total_rounds:
+            print(f"[rex] note: rex-chains ({rex_chains}) exceeds total rounds ({total_rounds}); reducing chains to {total_rounds}.")
+            rex_chains = total_rounds
+        if rex_chains > 1:
+            base_rounds = total_rounds // rex_chains
+            extra = total_rounds % rex_chains
+            chain_rounds = [base_rounds + (1 if i < extra else 0) for i in range(rex_chains)]
+        else:
+            chain_rounds = [total_rounds]
         def _rex_progress(rnd: int, total: int) -> None:
             report(f"Replica exchange {rnd}/{total}", 50 + 10 * rnd / max(1, total))
+
+        chain_progress: dict[int, int] = {}
+        chain_progress_state = {"last_bucket": -1, "last_total": 0}
+        progress_lock = Lock()
+        total_bar = None
+        if args.progress and rex_chains > 1:
+            try:
+                from tqdm import tqdm  # type: ignore
+                total_bar = tqdm(total=total_rounds, desc="REX total", position=0)
+            except Exception:
+                total_bar = None
+
+        def _make_chain_progress(chain_idx: int):
+            def _chain_progress(rnd: int, total: int) -> None:
+                if not callbacks and not args.progress:
+                    return
+                with progress_lock:
+                    chain_progress[chain_idx] = rnd
+                    completed = sum(chain_progress.values())
+                    overall_total = max(1, total_rounds)
+                    pct = int(completed * 100 / overall_total)
+                    if total_bar is not None:
+                        delta = completed - chain_progress_state["last_total"]
+                        if delta > 0:
+                            total_bar.update(delta)
+                            chain_progress_state["last_total"] = completed
+                    else:
+                        bucket = pct // 5
+                        if bucket != chain_progress_state["last_bucket"]:
+                            chain_progress_state["last_bucket"] = bucket
+                            if not args.progress:
+                                print(f"[rex] overall progress {pct}% ({completed}/{overall_total} rounds)")
+                    report(
+                        f"Replica exchange rounds {completed}/{overall_total}",
+                        50 + 10 * pct / 100.0,
+                    )
+            return _chain_progress
         if args.rex_betas.strip():
             betas = _parse_float_list(args.rex_betas)
         else:
@@ -1054,26 +1121,100 @@ def run_pipeline(
         if all(abs(b - args.beta) > 1e-12 for b in betas):
             betas = sorted(set(betas + [float(args.beta)]))
 
-        rex_info = replica_exchange_gibbs_potts(
-            model,
-            betas=betas,
-            sweeps_per_round=args.rex_sweeps_per_round,
-            n_rounds=args.rex_rounds,
-            burn_in_rounds=args.rex_burnin_rounds,
-            thinning_rounds=args.rex_thin_rounds,
-            seed=args.seed,
-            progress=args.progress,
-            progress_callback=_rex_progress if callbacks else None,
-            progress_every=max(1, args.rex_rounds // 20) if args.rex_rounds else 1,
-            max_workers=rex_max_workers,
-        )
-        samples_by_beta = rex_info["samples_by_beta"]  # type: ignore
+        def _run_rex_chain(chain_idx: int, n_rounds: int, burn_in_rounds: int) -> dict[str, object]:
+            chain_seed = args.seed + chain_idx
+            chain_progress = args.progress
+            if rex_chains == 1:
+                chain_callback = _rex_progress if callbacks else None
+                progress_desc = None
+                progress_position = None
+            else:
+                chain_callback = _make_chain_progress(chain_idx)
+                progress_desc = f"REX chain {chain_idx + 1}/{rex_chains}"
+                progress_position = (chain_idx + 1) if args.progress else None
+            return replica_exchange_gibbs_potts(
+                model,
+                betas=betas,
+                sweeps_per_round=args.rex_sweeps_per_round,
+                n_rounds=n_rounds,
+                burn_in_rounds=burn_in_rounds,
+                thinning_rounds=args.rex_thin_rounds,
+                seed=chain_seed,
+                progress=chain_progress,
+                progress_callback=chain_callback,
+                progress_every=max(1, n_rounds // 20) if n_rounds else 1,
+                max_workers=rex_max_workers,
+                progress_desc=progress_desc,
+                progress_position=progress_position,
+            )
+
+        burnin_clipped = False
+        chain_runs = []
+        try:
+            if rex_chains == 1:
+                rounds = chain_rounds[0]
+                burn_in = min(args.rex_burnin_rounds, max(0, rounds - 1))
+                if burn_in < args.rex_burnin_rounds:
+                    print("[rex] note: burn-in rounds truncated for short chain.")
+                rex_info = _run_rex_chain(0, rounds, burn_in)
+                chain_runs = [rex_info]
+            else:
+                print(f"[rex] running {rex_chains} parallel chains (total rounds={total_rounds})")
+                from concurrent.futures import as_completed
+
+                def _chain_job(idx: int):
+                    rounds = chain_rounds[idx]
+                    burn_in = min(args.rex_burnin_rounds, max(0, rounds - 1))
+                    return _run_rex_chain(idx, rounds, burn_in), burn_in != args.rex_burnin_rounds
+
+                with ThreadPoolExecutor(max_workers=rex_chains) as executor:
+                    futures = {executor.submit(_chain_job, i): i for i in range(rex_chains)}
+                    completed = 0
+                    for future in as_completed(futures):
+                        run_info, clipped = future.result()
+                        chain_runs.append(run_info)
+                        burnin_clipped = burnin_clipped or clipped
+                        completed += 1
+                        if not args.progress:
+                            print(f"[rex] chain {completed}/{rex_chains} complete")
+                        if callbacks:
+                            report(
+                                f"Replica exchange chains {completed}/{rex_chains}",
+                                50 + 10 * completed / max(1, rex_chains),
+                            )
+            if burnin_clipped:
+                print("[rex] note: burn-in rounds truncated for short chains.")
+        finally:
+            if total_bar is not None:
+                total_bar.close()
+
+        samples_by_beta: dict[float, np.ndarray] = {}
+        for beta in betas:
+            parts = []
+            for run in chain_runs:
+                beta_samples = run.get("samples_by_beta", {}).get(float(beta))  # type: ignore
+                if isinstance(beta_samples, np.ndarray) and beta_samples.size:
+                    parts.append(beta_samples)
+            if parts:
+                samples_by_beta[float(beta)] = np.concatenate(parts, axis=0)
+            else:
+                samples_by_beta[float(beta)] = np.zeros((0, labels.shape[1]), dtype=int)
+
         X_gibbs = samples_by_beta[float(args.beta)]
 
-        acc = rex_info["swap_accept_rate"]  # type: ignore
-        swap_accept_rate = acc
+        swap_rates = []
+        for run in chain_runs:
+            acc = run.get("swap_accept_rate")
+            if isinstance(acc, np.ndarray) and acc.size:
+                swap_rates.append(acc)
+        if swap_rates:
+            swap_accept_rate = np.mean(np.stack(swap_rates, axis=0), axis=0)
         print(f"[rex] betas={betas}")
-        print(f"[rex] swap_accept_rate (adjacent): mean={float(np.mean(acc)):.3f}, min={float(np.min(acc)):.3f}, max={float(np.max(acc)):.3f}")
+        if swap_accept_rate is not None and swap_accept_rate.size:
+            print(
+                f"[rex] swap_accept_rate (adjacent): mean={float(np.mean(swap_accept_rate)):.3f}, "
+                f"min={float(np.min(swap_accept_rate)):.3f}, max={float(np.max(swap_accept_rate)):.3f}"
+            )
 
     # --- SA/QUBO sampling ---
     report("Sampling SA/QUBO", 70)
@@ -1471,6 +1612,7 @@ def run_pipeline(
                 thinning_rounds=args.rex_thin_rounds,
                 seed=args.seed + 123,
                 progress=args.progress,
+                max_workers=1,
             )
             ref = rex_scan["samples_by_beta"]  # type: ignore
 

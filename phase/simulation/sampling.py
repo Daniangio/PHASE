@@ -9,7 +9,13 @@ from phase.simulation.potts_model import PottsModel
 from phase.simulation.qubo import QUBO
 
 
-def _progress_iterator(total: int, desc: str, enabled: bool) -> Iterable[int]:
+def _progress_iterator(
+    total: int,
+    desc: str,
+    enabled: bool,
+    *,
+    position: int | None = None,
+) -> Iterable[int]:
     """
     Wrap range with a tqdm-style progress bar when available.
     Falls back to a plain range if tqdm is unavailable.
@@ -18,10 +24,22 @@ def _progress_iterator(total: int, desc: str, enabled: bool) -> Iterable[int]:
         return range(total)
     try:
         from tqdm import tqdm  # type: ignore
-        return tqdm(range(total), total=total, desc=desc)
+        return tqdm(range(total), total=total, desc=desc, position=position)
     except Exception:
-        # No tqdm; just return a normal iterator.
-        return range(total)
+        if total <= 0:
+            return range(total)
+
+        def _fallback_iter() -> Iterable[int]:
+            last_bucket = -1
+            for idx in range(total):
+                pct = int((idx + 1) * 100 / total)
+                bucket = pct // 5
+                if bucket != last_bucket or idx == 0 or idx + 1 == total:
+                    print(f"[{desc}] {idx + 1}/{total} ({pct}%)")
+                    last_bucket = bucket
+                yield idx
+
+        return _fallback_iter()
 
 
 def _gibbs_one_sweep(
@@ -140,6 +158,8 @@ def replica_exchange_gibbs_potts(
     progress_callback: Optional[callable] = None,
     progress_every: int = 50,
     max_workers: Optional[int] = None,
+    progress_desc: str | None = None,
+    progress_position: int | None = None,
 ) -> Dict[str, object]:
     """
     Parallel tempering (replica exchange) for the Potts model.
@@ -202,7 +222,8 @@ def replica_exchange_gibbs_potts(
             _gibbs_one_sweep(model, x, beta=b, rng=rng)
         return idx, model.energy(x)
 
-    round_iter = _progress_iterator(n_rounds, "Replica-exchange rounds", progress)
+    desc = progress_desc or "Replica-exchange rounds"
+    round_iter = _progress_iterator(n_rounds, desc, progress, position=progress_position)
     use_parallel = max_workers is None or max_workers > 1
     executor_ctx = ThreadPoolExecutor(max_workers=max_workers or n_rep) if use_parallel else None
     try:

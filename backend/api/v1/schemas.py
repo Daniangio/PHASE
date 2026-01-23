@@ -51,7 +51,6 @@ class SimulationJobRequest(BaseModel):
     rex_samples: Optional[int] = None
     rex_burnin: Optional[int] = None
     rex_thin: Optional[int] = None
-    rex_max_workers: Optional[int] = None
     sa_reads: Optional[int] = None
     sa_sweeps: Optional[int] = None
     sa_beta_hot: Optional[float] = None
