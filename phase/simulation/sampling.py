@@ -42,6 +42,42 @@ def _progress_iterator(
         return _fallback_iter()
 
 
+class _ProgressCounter:
+    def __init__(self, total: int, desc: str, enabled: bool, *, position: int | None = None) -> None:
+        self._enabled = enabled
+        self._total = total
+        self._count = 0
+        self._desc = desc
+        self._bar = None
+        self._last_bucket = -1
+        if not enabled:
+            return
+        try:
+            from tqdm import tqdm  # type: ignore
+            self._bar = tqdm(total=total, desc=desc, position=position)
+        except Exception:
+            self._bar = None
+
+    def update(self, delta: int) -> None:
+        if not self._enabled:
+            return
+        if self._bar is not None:
+            self._bar.update(delta)
+            return
+        if self._total <= 0:
+            return
+        self._count = min(self._total, self._count + delta)
+        pct = int(self._count * 100 / max(1, self._total))
+        bucket = pct // 5
+        if bucket != self._last_bucket or self._count == self._total:
+            print(f"[{self._desc}] {self._count}/{self._total} ({pct}%)")
+            self._last_bucket = bucket
+
+    def close(self) -> None:
+        if self._bar is not None:
+            self._bar.close()
+
+
 def _gibbs_one_sweep(
     model: PottsModel,
     x: np.ndarray,
@@ -81,10 +117,17 @@ def gibbs_sample_potts(
     progress: bool = False,
     progress_callback: Optional[callable] = None,
     progress_every: int = 100,
+    progress_mode: str = "sweeps",
+    progress_desc: str | None = None,
+    progress_position: int | None = None,
 ) -> np.ndarray:
     """
     Single-site Gibbs sampler for Potts model.
     Returns samples shape (n_samples, N).
+
+    progress_mode:
+      - "sweeps": progress over total sweeps
+      - "samples": progress over collected samples
     """
     rng = np.random.default_rng(seed)
     N = len(model.h)
@@ -99,19 +142,35 @@ def gibbs_sample_potts(
     progress_every = max(1, int(progress_every))
     out = np.zeros((n_samples, N), dtype=int)
     oi = 0
+    mode = (progress_mode or "sweeps").strip().lower()
+    if mode not in ("sweeps", "samples"):
+        raise ValueError(f"Unknown progress_mode={progress_mode!r}")
 
-    step_iter = _progress_iterator(total_steps, "Gibbs sweeps", progress)
+    sample_counter = None
+    if progress and mode == "samples":
+        desc = progress_desc or "Gibbs samples"
+        sample_counter = _ProgressCounter(n_samples, desc, True, position=progress_position)
+        step_iter = range(total_steps)
+    else:
+        desc = progress_desc or "Gibbs sweeps"
+        step_iter = _progress_iterator(total_steps, desc, progress, position=progress_position)
+
     for step in step_iter:
         _gibbs_one_sweep(model, x, beta=beta, rng=rng)
 
         if step >= burn_in and ((step - burn_in) % thinning == 0) and oi < n_samples:
             out[oi] = x
             oi += 1
+            if sample_counter is not None:
+                sample_counter.update(1)
 
         if oi >= n_samples:
             break
         if progress_callback and (step == 0 or step + 1 == total_steps or (step + 1) % progress_every == 0):
             progress_callback(step + 1, total_steps)
+
+    if sample_counter is not None:
+        sample_counter.close()
 
     return out
 
@@ -160,6 +219,7 @@ def replica_exchange_gibbs_potts(
     max_workers: Optional[int] = None,
     progress_desc: str | None = None,
     progress_position: int | None = None,
+    progress_mode: str = "rounds",
 ) -> Dict[str, object]:
     """
     Parallel tempering (replica exchange) for the Potts model.
@@ -176,6 +236,10 @@ def replica_exchange_gibbs_potts(
       - "samples_by_beta": dict[float -> np.ndarray shape (S,N)]
       - "swap_accept_rate": np.ndarray shape (n_replicas-1,)
       - "energy_traces": dict[float -> np.ndarray shape (n_saved,)]  (energies at save times)
+
+    progress_mode:
+      - "rounds": progress over total rounds
+      - "samples": progress over saved rounds (after burn-in/thinning)
     """
     betas = [float(b) for b in betas]
     if sorted(betas) != list(betas):
@@ -222,8 +286,20 @@ def replica_exchange_gibbs_potts(
             _gibbs_one_sweep(model, x, beta=b, rng=rng)
         return idx, model.energy(x)
 
-    desc = progress_desc or "Replica-exchange rounds"
-    round_iter = _progress_iterator(n_rounds, desc, progress, position=progress_position)
+    mode = (progress_mode or "rounds").strip().lower()
+    if mode not in ("rounds", "samples"):
+        raise ValueError(f"Unknown progress_mode={progress_mode!r}")
+    if mode == "rounds":
+        desc = progress_desc or "Replica-exchange rounds"
+        round_iter = _progress_iterator(n_rounds, desc, progress, position=progress_position)
+        sample_counter = None
+    else:
+        total_saved = 0
+        if n_rounds > burn_in_rounds and thinning_rounds > 0:
+            total_saved = (n_rounds - burn_in_rounds + thinning_rounds - 1) // thinning_rounds
+        desc = progress_desc or "Replica-exchange samples"
+        sample_counter = _ProgressCounter(total_saved, desc, progress, position=progress_position)
+        round_iter = range(n_rounds)
     use_parallel = max_workers is None or max_workers > 1
     executor_ctx = ThreadPoolExecutor(max_workers=max_workers or n_rep) if use_parallel else None
     try:
@@ -260,6 +336,8 @@ def replica_exchange_gibbs_potts(
                 for i, b in enumerate(betas):
                     samples_by_beta[b].append(replicas[i].copy())
                     energy_traces[b].append(float(energies[i]))
+                if sample_counter is not None:
+                    sample_counter.update(1)
 
             if progress_callback and (
                 rnd == 0 or rnd + 1 == n_rounds or (rnd + 1) % progress_every == 0
@@ -268,6 +346,8 @@ def replica_exchange_gibbs_potts(
     finally:
         if executor_ctx:
             executor_ctx.shutdown(wait=True)
+        if sample_counter is not None:
+            sample_counter.close()
 
     # Convert lists to arrays
     samples_by_beta_arr: Dict[float, np.ndarray] = {}

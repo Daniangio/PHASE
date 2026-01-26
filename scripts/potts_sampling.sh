@@ -88,6 +88,7 @@ BETA="$(prompt "Target beta (used for report)" "1.0")"
 GIBBS_SAMPLES=""
 GIBBS_BURNIN=""
 GIBBS_THIN=""
+GIBBS_CHAINS=""
 REX_BETAS=""
 REX_N_REPLICAS=""
 REX_BETA_MIN=""
@@ -103,6 +104,7 @@ if [ "$GIBBS_METHOD" = "single" ]; then
   GIBBS_SAMPLES="$(prompt "Gibbs samples" "500")"
   GIBBS_BURNIN="$(prompt "Gibbs burn-in sweeps" "50")"
   GIBBS_THIN="$(prompt "Gibbs thin" "2")"
+  GIBBS_CHAINS="$(prompt "Gibbs chain count (parallel independent chains)" "1")"
 else
   REX_BETAS="$(prompt "Explicit beta ladder (comma separated, leave blank for auto)" "")"
   if [ -z "$(trim "$REX_BETAS")" ]; then
@@ -150,7 +152,7 @@ CMD=(
 )
 
 if [ "$GIBBS_METHOD" = "single" ]; then
-  CMD+=(--gibbs-samples "$GIBBS_SAMPLES" --gibbs-burnin "$GIBBS_BURNIN" --gibbs-thin "$GIBBS_THIN")
+  CMD+=(--gibbs-samples "$GIBBS_SAMPLES" --gibbs-burnin "$GIBBS_BURNIN" --gibbs-thin "$GIBBS_THIN" --gibbs-chains "$GIBBS_CHAINS")
 else
   if [ -n "$(trim "$REX_BETAS")" ]; then
     CMD+=(--rex-betas "$(trim "$REX_BETAS")")
