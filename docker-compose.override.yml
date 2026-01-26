@@ -27,6 +27,7 @@ services:
       - CHOKIDAR_USEPOLLING=true
       - HOST=0.0.0.0
       - DANGEROUSLY_DISABLE_HOST_CHECK=true
+      - WDS_SOCKET_PORT=0
   
   # Add an override for the 'worker' service for live-reloading
   worker:
