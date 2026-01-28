@@ -9,7 +9,7 @@ import numpy as np
 from fastapi import APIRouter, HTTPException, Query, Response, UploadFile, File, Form
 from fastapi.responses import FileResponse
 
-from backend.api.v1.common import DATA_ROOT, RESULTS_DIR, get_cluster_entry, project_store, stream_upload
+from backend.api.v1.common import DATA_ROOT, get_cluster_entry, project_store, stream_upload
 from backend.services.metastable_clusters import (
     assign_cluster_labels_to_states,
     update_cluster_metadata_with_assignments,
@@ -432,7 +432,39 @@ def _augment_sampling_summary(
     np.savez_compressed(summary_path, **payload)
 
 
-def _remove_results_dir(path_value: str | None) -> None:
+def _iter_result_files() -> list[Path]:
+    results: list[Path] = []
+    base_dir = project_store.base_dir
+    if not base_dir.exists():
+        return results
+    for project_dir in sorted(base_dir.glob("*")):
+        systems_dir = project_dir / "systems"
+        if not systems_dir.exists():
+            continue
+        for system_dir in sorted(systems_dir.glob("*")):
+            jobs_dir = system_dir / "results" / "jobs"
+            if not jobs_dir.exists():
+                continue
+            results.extend(jobs_dir.glob("*.json"))
+    return results
+
+
+def _find_result_file(job_uuid: str) -> Path | None:
+    base_dir = project_store.base_dir
+    if not base_dir.exists():
+        return None
+    for project_dir in base_dir.glob("*"):
+        systems_dir = project_dir / "systems"
+        if not systems_dir.exists():
+            continue
+        for system_dir in systems_dir.glob("*"):
+            candidate = system_dir / "results" / "jobs" / f"{job_uuid}.json"
+            if candidate.exists():
+                return candidate
+    return None
+
+
+def _remove_results_dir(path_value: str | None, *, system_dir: Path | None = None) -> None:
     if not isinstance(path_value, str) or not path_value:
         return
     candidate = Path(path_value)
@@ -443,28 +475,42 @@ def _remove_results_dir(path_value: str | None) -> None:
         candidate.relative_to(DATA_ROOT)
     except ValueError:
         return
+    if system_dir is not None:
+        results_root = (system_dir / "results").resolve()
+        try:
+            candidate.relative_to(results_root)
+        except ValueError:
+            return
     if candidate.exists() and candidate.is_dir():
         shutil.rmtree(candidate, ignore_errors=True)
 
 
-def _cleanup_empty_simulation_dirs() -> int:
+def _cleanup_empty_result_dirs() -> int:
     removed = 0
-    sim_root = RESULTS_DIR / "simulation"
-    if not sim_root.exists():
+    base_dir = project_store.base_dir
+    if not base_dir.exists():
         return removed
-    for entry in sim_root.iterdir():
-        if not entry.is_dir():
+    for project_dir in base_dir.glob("*"):
+        systems_dir = project_dir / "systems"
+        if not systems_dir.exists():
             continue
-        try:
-            if any(entry.iterdir()):
-                continue
-        except PermissionError:
-            continue
-        try:
-            entry.rmdir()
-            removed += 1
-        except Exception:
-            continue
+        for system_dir in systems_dir.glob("*"):
+            results_dir = system_dir / "results"
+            jobs_dir = results_dir / "jobs"
+            if jobs_dir.exists():
+                try:
+                    if not any(jobs_dir.iterdir()):
+                        jobs_dir.rmdir()
+                        removed += 1
+                except Exception:
+                    pass
+            if results_dir.exists():
+                try:
+                    if not any(results_dir.iterdir()):
+                        results_dir.rmdir()
+                        removed += 1
+                except Exception:
+                    pass
     return removed
 
 
@@ -508,7 +554,7 @@ async def get_results_list():
     """
     results_list = []
     try:
-        sorted_files = sorted(RESULTS_DIR.glob("*.json"), key=lambda f: f.stat().st_mtime, reverse=True)
+        sorted_files = sorted(_iter_result_files(), key=lambda f: f.stat().st_mtime, reverse=True)
 
         for result_file in sorted_files:
             try:
@@ -556,8 +602,8 @@ async def get_result_detail(job_uuid: str):
     using its unique job_uuid.
     """
     try:
-        result_file = RESULTS_DIR / f"{job_uuid}.json"
-        if not result_file.exists() or not result_file.is_file():
+        result_file = _find_result_file(job_uuid)
+        if not result_file or not result_file.exists() or not result_file.is_file():
             raise HTTPException(status_code=404, detail=f"Result file for job '{job_uuid}' not found.")
 
         return Response(
@@ -576,8 +622,8 @@ async def download_result_artifact(job_uuid: str, artifact: str, download: bool 
     """
     Download stored analysis artifacts by name (summary_npz, metadata_json, marginals_plot, beta_scan_plot, potts_model).
     """
-    result_file = RESULTS_DIR / f"{job_uuid}.json"
-    if not result_file.exists() or not result_file.is_file():
+    result_file = _find_result_file(job_uuid)
+    if not result_file or not result_file.exists() or not result_file.is_file():
         raise HTTPException(status_code=404, detail=f"Result file for job '{job_uuid}' not found.")
 
     try:
@@ -673,24 +719,56 @@ async def upload_simulation_result(
         raise HTTPException(status_code=400, detail="Potts model upload must be an .npz file.")
 
     job_uuid = str(uuid.uuid4())
-    results_dir = RESULTS_DIR / "simulation" / job_uuid
-    results_dir.mkdir(parents=True, exist_ok=True)
+    sample_id = str(uuid.uuid4())
+    dirs = project_store.ensure_cluster_directories(project_id, system_id, cluster_id)
+    system_dir = dirs["system_dir"]
+    sample_dir = dirs["samples_dir"] / sample_id
+    sample_dir.mkdir(parents=True, exist_ok=True)
+    results_dir = sample_dir
 
     summary_path = results_dir / "run_summary.npz"
     await stream_upload(summary_npz, summary_path)
 
-    dirs = project_store.ensure_directories(project_id, system_id)
-    system_dir = dirs["system_dir"]
     model_filename = _safe_filename(potts_model.filename, f"{cluster_id}_potts_model.npz")
     if not model_filename.lower().endswith(".npz"):
         model_filename = f"{model_filename}.npz"
-    model_path = dirs["potts_models_dir"] / model_filename
+    model_id = str(uuid.uuid4())
+    model_dir = dirs["potts_models_dir"] / model_id
+    model_dir.mkdir(parents=True, exist_ok=True)
+    model_path = model_dir / model_filename
     await stream_upload(potts_model, model_path)
     model_rel = str(model_path.relative_to(system_dir))
-    entry["potts_model_path"] = model_rel
-    entry["potts_model_updated_at"] = datetime.utcnow().isoformat()
-    entry["potts_model_source"] = "upload"
-    entry["potts_model_name"] = Path(model_filename).stem
+    models = entry.get("potts_models")
+    if not isinstance(models, list):
+        models = []
+    models.append(
+        {
+            "model_id": model_id,
+            "name": Path(model_filename).stem,
+            "path": model_rel,
+            "created_at": datetime.utcnow().isoformat(),
+            "source": "upload",
+            "params": {},
+        }
+    )
+    entry["potts_models"] = models
+    sample_paths = {"summary_npz": str(summary_path.relative_to(system_dir))}
+
+    samples = entry.get("samples")
+    if not isinstance(samples, list):
+        samples = []
+    samples.append(
+        {
+            "sample_id": sample_id,
+            "name": f"Sampling {datetime.utcnow().strftime('%Y%m%d %H:%M')}",
+            "type": "potts_sampling",
+            "method": "upload",
+            "model_id": model_id,
+            "created_at": datetime.utcnow().isoformat(),
+            "paths": sample_paths,
+        }
+    )
+    entry["samples"] = samples
     project_store.save_system(system_meta)
 
     compare_ids = []
@@ -806,7 +884,9 @@ async def upload_simulation_result(
         "error": None,
     }
 
-    result_file = RESULTS_DIR / f"{job_uuid}.json"
+    result_file = _find_result_file(job_uuid)
+    if not result_file or not result_file.exists():
+        raise HTTPException(status_code=404, detail=f"No data found for job UUID '{job_uuid}'.")
     try:
         result_file.write_text(json.dumps(result_payload, indent=2))
     except Exception as exc:
@@ -820,25 +900,26 @@ async def delete_result(job_uuid: str):
     """
     Deletes a job's persisted JSON file.
     """
-    result_file = RESULTS_DIR / f"{job_uuid}.json"
+    results_dirs = project_store.ensure_results_directories(project_id, system_id)
+    result_file = results_dirs["jobs_dir"] / f"{job_uuid}.json"
 
     try:
-        if not result_file.exists():
-            raise HTTPException(status_code=404, detail=f"No data found for job UUID '{job_uuid}'.")
         results_dir_value = None
+        system_dir = None
         try:
             payload = json.loads(result_file.read_text())
             results_payload = payload.get("results") or {}
             results_dir_value = results_payload.get("results_dir")
+            system_ref = payload.get("system_reference") or {}
+            project_id = system_ref.get("project_id")
+            system_id = system_ref.get("system_id")
+            if project_id and system_id:
+                system_dir = project_store.resolve_path(project_id, system_id, "")
         except Exception:
             results_dir_value = None
-        if not results_dir_value:
-            fallback_dir = RESULTS_DIR / "simulation" / job_uuid
-            if fallback_dir.exists():
-                results_dir_value = str(fallback_dir)
-        _remove_results_dir(results_dir_value)
+        _remove_results_dir(results_dir_value, system_dir=system_dir)
         result_file.unlink()
-        _cleanup_empty_simulation_dirs()
+        _cleanup_empty_result_dirs()
         return {"status": "deleted", "job_id": job_uuid}
     except Exception as exc:
         if isinstance(exc, HTTPException):
@@ -849,9 +930,9 @@ async def delete_result(job_uuid: str):
 @router.post("/results/cleanup", summary="Cleanup empty result folders and tmp artifacts")
 async def cleanup_results(include_tmp: bool = Query(True)):
     """
-    Remove empty simulation result folders and stale tmp artifacts.
+    Remove empty job result folders and stale tmp artifacts.
     """
-    empty_removed = _cleanup_empty_simulation_dirs()
+    empty_removed = _cleanup_empty_result_dirs()
     tmp_removed = 0
     tmp_root_value = None
     if include_tmp:
@@ -864,7 +945,7 @@ async def cleanup_results(include_tmp: bool = Query(True)):
             tmp_root_value = str(tmp_root)
             tmp_removed = _cleanup_tmp_artifacts(tmp_root)
     return {
-        "empty_simulation_dirs_removed": empty_removed,
+        "empty_result_dirs_removed": empty_removed,
         "tmp_artifacts_removed": tmp_removed,
         "tmp_root": tmp_root_value,
     }

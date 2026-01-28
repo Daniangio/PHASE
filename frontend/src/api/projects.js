@@ -242,6 +242,7 @@ export function fetchStateDescriptors(projectId, systemId, stateId, params = {})
     qs.set('metastable_ids', params.metastable_ids.join(','));
   }
   if (params.cluster_id) qs.set('cluster_id', params.cluster_id);
+  if (params.cluster_label_mode) qs.set('cluster_label_mode', params.cluster_label_mode);
   const suffix = qs.toString() ? `?${qs.toString()}` : '';
   return requestJSON(`/projects/${projectId}/systems/${systemId}/states/${stateId}/descriptors${suffix}`);
 }
@@ -433,7 +434,7 @@ export function uploadPottsModel(projectId, systemId, clusterId, file, options =
     const xhr = new XMLHttpRequest();
     xhr.open(
       'POST',
-      `${API_BASE}/projects/${projectId}/systems/${systemId}/metastable/clusters/${clusterId}/potts_model`
+      `${API_BASE}/projects/${projectId}/systems/${systemId}/metastable/clusters/${clusterId}/potts_models`
     );
     xhr.responseType = 'json';
 
@@ -489,15 +490,15 @@ export function uploadPottsModel(projectId, systemId, clusterId, file, options =
   });
 }
 
-export function downloadPottsModel(projectId, systemId, clusterId) {
+export function downloadPottsModel(projectId, systemId, clusterId, modelId) {
   return requestBlob(
-    `/projects/${projectId}/systems/${systemId}/metastable/clusters/${clusterId}/potts_model`
+    `/projects/${projectId}/systems/${systemId}/metastable/clusters/${clusterId}/potts_models/${modelId}`
   );
 }
 
-export function renamePottsModel(projectId, systemId, clusterId, name) {
+export function renamePottsModel(projectId, systemId, clusterId, modelId, name) {
   return requestJSON(
-    `/projects/${projectId}/systems/${systemId}/metastable/clusters/${clusterId}/potts_model`,
+    `/projects/${projectId}/systems/${systemId}/metastable/clusters/${clusterId}/potts_models/${modelId}`,
     {
       method: 'PATCH',
       body: { name },
@@ -505,9 +506,9 @@ export function renamePottsModel(projectId, systemId, clusterId, name) {
   );
 }
 
-export function deletePottsModel(projectId, systemId, clusterId) {
+export function deletePottsModel(projectId, systemId, clusterId, modelId) {
   return requestJSON(
-    `/projects/${projectId}/systems/${systemId}/metastable/clusters/${clusterId}/potts_model`,
+    `/projects/${projectId}/systems/${systemId}/metastable/clusters/${clusterId}/potts_models/${modelId}`,
     {
       method: 'DELETE',
     }

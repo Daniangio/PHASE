@@ -147,12 +147,17 @@ def main(argv: list[str] | None = None) -> int:
                 n_jobs=n_jobs,
                 progress_callback=progress_callback,
             )
-            assignments = assign_cluster_labels_to_states(npz_path, args.project_id, args.system_id)
-            update_cluster_metadata_with_assignments(npz_path, assignments)
-
             store = ProjectStore()
+            cluster_dirs = store.ensure_cluster_directories(args.project_id, args.system_id, cluster_id)
+            assignments = assign_cluster_labels_to_states(
+                npz_path,
+                args.project_id,
+                args.system_id,
+                output_dir=cluster_dirs["samples_dir"],
+            )
+            update_cluster_metadata_with_assignments(npz_path, assignments)
             system_meta = store.get_system(args.project_id, args.system_id)
-            rel_path = str(npz_path.relative_to(store.ensure_directories(args.project_id, args.system_id)["system_dir"]))
+            rel_path = str(npz_path.relative_to(cluster_dirs["system_dir"]))
             entry = build_cluster_entry(
                 cluster_id=cluster_id,
                 cluster_name=args.cluster_name,
@@ -169,6 +174,7 @@ def main(argv: list[str] | None = None) -> int:
                     "contact_edge_count": metadata.get("contact_edge_count") if isinstance(metadata, dict) else None,
                     "assigned_state_paths": assignments.get("assigned_state_paths", {}),
                     "assigned_metastable_paths": assignments.get("assigned_metastable_paths", {}),
+                    "samples": assignments.get("samples", []),
                 }
             )
             system_meta.metastable_clusters = (system_meta.metastable_clusters or []) + [entry]

@@ -45,6 +45,7 @@ class SimulationJobRequest(BaseModel):
     cluster_id: str
     use_potts_model: Optional[bool] = True
     potts_model_path: Optional[str] = None
+    potts_model_id: Optional[str] = None
     contact_cutoff: Optional[float] = None
     contact_atom_mode: Optional[str] = None
     rex_betas: Optional[Union[str, List[float]]] = None

@@ -48,6 +48,7 @@ export default function DescriptorVizPage() {
   const [appliedStateQuery, setAppliedStateQuery] = useState('');
   const [selectedClusterId, setSelectedClusterId] = useState('');
   const [clusterLegend, setClusterLegend] = useState([]);
+  const [clusterLabelMode, setClusterLabelMode] = useState('halo');
   const [haloSummary, setHaloSummary] = useState(null);
   const [selectedHaloCondition, setSelectedHaloCondition] = useState('');
 
@@ -392,6 +393,7 @@ export default function DescriptorVizPage() {
       const qs = { max_points: bootstrapOnly ? Math.min(maxPoints, 500) : maxPoints };
       if (selectedClusterId) {
         qs.cluster_id = selectedClusterId;
+        qs.cluster_label_mode = clusterLabelMode;
       }
       if (selectedResidue) {
         qs.residue_keys = selectedResidue;
@@ -488,6 +490,7 @@ export default function DescriptorVizPage() {
     }
   }, [
     maxPoints,
+    clusterLabelMode,
     projectId,
     selectedClusterId,
     selectedResidue,
@@ -504,7 +507,7 @@ export default function DescriptorVizPage() {
       setSelectedResidue('');
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedStates, selectedClusterId, selectedResidue]);
+  }, [selectedStates, selectedClusterId, selectedResidue, clusterLabelMode]);
 
   const traces3d = useMemo(() => {
     const traces = [];
@@ -706,6 +709,35 @@ export default function DescriptorVizPage() {
                   </option>
                 ))}
               </select>
+              {selectedClusterId && (
+                <div className="mt-2 space-y-1">
+                  <p className="text-[11px] text-gray-500">Cluster label mode</p>
+                  <div className="flex items-center gap-2 text-xs text-gray-300">
+                    <label className="flex items-center gap-2">
+                      <input
+                        type="radio"
+                        name="cluster-label-mode"
+                        value="halo"
+                        checked={clusterLabelMode === 'halo'}
+                        onChange={() => setClusterLabelMode('halo')}
+                        className="accent-cyan-500"
+                      />
+                      Halo (-1)
+                    </label>
+                    <label className="flex items-center gap-2">
+                      <input
+                        type="radio"
+                        name="cluster-label-mode"
+                        value="assigned"
+                        checked={clusterLabelMode === 'assigned'}
+                        onChange={() => setClusterLabelMode('assigned')}
+                        className="accent-cyan-500"
+                      />
+                      Assigned
+                    </label>
+                  </div>
+                </div>
+              )}
               {clusterLegend.length > 0 && (
                 <p className="text-[11px] text-gray-500 mt-2">
                   Clusters loaded: {clusterLegend.map((c) => c.label).join(' • ')}

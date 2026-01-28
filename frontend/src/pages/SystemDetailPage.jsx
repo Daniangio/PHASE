@@ -193,10 +193,15 @@ export default function SystemDetailPage() {
     () => clusterRuns.filter((run) => run.path && run.status !== 'failed'),
     [clusterRuns]
   );
-  const pottsModels = useMemo(
-    () => readyClusterRuns.filter((run) => run.potts_model_path),
-    [readyClusterRuns]
+  const selectedCluster = useMemo(
+    () => clusterRuns.find((run) => run.cluster_id === pottsFitClusterId) || null,
+    [clusterRuns, pottsFitClusterId]
   );
+  const pottsModels = useMemo(() => {
+    if (!selectedCluster) return [];
+    const models = selectedCluster.potts_models || [];
+    return models.map((model) => ({ ...model, cluster_id: selectedCluster.cluster_id }));
+  }, [selectedCluster]);
   const selectedClusterName = useMemo(() => {
     if (!pottsFitClusterId) return null;
     return clusterNameById.get(pottsFitClusterId) || pottsFitClusterId;
@@ -589,11 +594,11 @@ export default function SystemDetailPage() {
     setPottsUploadError(null);
     setPottsUploadProgress(0);
     try {
-      await uploadPottsModel(projectId, systemId, pottsFitClusterId, pottsUploadFile, {
+      const response = await uploadPottsModel(projectId, systemId, pottsFitClusterId, pottsUploadFile, {
         onUploadProgress: (percent) => setPottsUploadProgress(percent),
       });
-      if (pottsUploadName.trim()) {
-        await renamePottsModel(projectId, systemId, pottsFitClusterId, pottsUploadName.trim());
+      if (pottsUploadName.trim() && response?.model_id) {
+        await renamePottsModel(projectId, systemId, pottsFitClusterId, response.model_id, pottsUploadName.trim());
       }
       setPottsUploadFile(null);
       setPottsUploadName('');
@@ -607,44 +612,41 @@ export default function SystemDetailPage() {
   };
 
   const formatPottsModelName = (run) => {
-    const raw =
-      run.potts_model_name ||
-      (run.potts_model_path ? run.potts_model_path.split('/').pop() : '') ||
-      'Potts model';
+    const raw = run.name || (run.path ? run.path.split('/').pop() : '') || 'Potts model';
     return raw.replace(/\.npz$/i, '');
   };
 
-  const handleRenamePottsModel = async (clusterId) => {
-    const name = (pottsRenameValues[clusterId] || '').trim();
+  const handleRenamePottsModel = async (clusterId, modelId) => {
+    const name = (pottsRenameValues[modelId] || '').trim();
     if (!name) {
       setPottsRenameError('Provide a model name.');
       return;
     }
     setPottsRenameError(null);
-    setPottsRenameBusy((prev) => ({ ...prev, [clusterId]: true }));
+    setPottsRenameBusy((prev) => ({ ...prev, [modelId]: true }));
     try {
-      await renamePottsModel(projectId, systemId, clusterId, name);
+      await renamePottsModel(projectId, systemId, clusterId, modelId, name);
       await refreshSystem();
     } catch (err) {
       setPottsRenameError(err.message || 'Failed to rename Potts model.');
     } finally {
-      setPottsRenameBusy((prev) => ({ ...prev, [clusterId]: false }));
+      setPottsRenameBusy((prev) => ({ ...prev, [modelId]: false }));
     }
   };
 
-  const handleDeletePottsModel = async (clusterId) => {
+  const handleDeletePottsModel = async (clusterId, modelId) => {
     if (!window.confirm('Delete this fitted Potts model?')) {
       return;
     }
     setPottsDeleteError(null);
-    setPottsDeleteBusy((prev) => ({ ...prev, [clusterId]: true }));
+    setPottsDeleteBusy((prev) => ({ ...prev, [modelId]: true }));
     try {
-      await deletePottsModel(projectId, systemId, clusterId);
+      await deletePottsModel(projectId, systemId, clusterId, modelId);
       await refreshSystem();
     } catch (err) {
       setPottsDeleteError(err.message || 'Failed to delete Potts model.');
     } finally {
-      setPottsDeleteBusy((prev) => ({ ...prev, [clusterId]: false }));
+      setPottsDeleteBusy((prev) => ({ ...prev, [modelId]: false }));
     }
   };
 
@@ -1010,10 +1012,10 @@ export default function SystemDetailPage() {
     }
   };
 
-  const handleDownloadPottsModel = async (clusterId, filename) => {
+  const handleDownloadPottsModel = async (clusterId, modelId, filename) => {
     setPottsRenameError(null);
     try {
-      const blob = await downloadPottsModel(projectId, systemId, clusterId);
+      const blob = await downloadPottsModel(projectId, systemId, clusterId, modelId);
       const url = URL.createObjectURL(blob);
       const link = document.createElement('a');
       link.href = url;
@@ -1156,7 +1158,14 @@ export default function SystemDetailPage() {
               <div className="border-t border-gray-700 pt-3 space-y-2">
                 <div className="flex items-center justify-between">
                   <div>
-                    <h3 className="text-sm font-semibold text-white">Cluster NPZ</h3>
+                    <div className="flex items-center gap-2">
+                      <h3 className="text-sm font-semibold text-white">Cluster NPZ</h3>
+                      <InfoTooltip
+                        ariaLabel="Storage layout info"
+                        text="See how projects, systems, clusters, models, and samples are stored on disk."
+                        onClick={() => openDoc('storage_layout')}
+                      />
+                    </div>
                     <p className="text-xs text-gray-400">Residue cluster runs for Potts sampling.</p>
                   </div>
                   <button
@@ -1199,7 +1208,13 @@ export default function SystemDetailPage() {
                             <button
                               key={run.cluster_id}
                               type="button"
-                              onClick={() => setClusterDetailState(run)}
+                            onClick={() => {
+                              setClusterDetailState(run);
+                              if (run?.cluster_id) {
+                                setPottsFitClusterId(run.cluster_id);
+                                setAnalysisFocus('potts');
+                              }
+                            }}
                               className="w-full text-left rounded-md border px-3 py-2 border-gray-700 bg-gray-900/60 hover:border-cyan-500"
                             >
                               <div className="flex items-center justify-between text-xs">
@@ -1276,22 +1291,27 @@ export default function SystemDetailPage() {
                 )}
                 <div className="border-t border-gray-800 pt-3">
                   <h4 className="text-xs font-semibold text-gray-300">Potts models</h4>
-                  {pottsModels.length === 0 && <p className="text-xs text-gray-500 mt-1">No Potts models yet.</p>}
+                  {!selectedCluster && (
+                    <p className="text-xs text-gray-500 mt-1">Select a cluster to view its Potts models.</p>
+                  )}
+                  {selectedCluster && pottsModels.length === 0 && (
+                    <p className="text-xs text-gray-500 mt-1">No Potts models yet.</p>
+                  )}
                   {pottsModels.length > 0 && (
                     <div className="space-y-2 mt-2">
                       {pottsModels.map((run) => (
                         <div
-                          key={run.cluster_id}
+                          key={run.model_id}
                           className="rounded-md border border-gray-800 bg-gray-900/50 px-3 py-2 text-xs"
                         >
                           <div className="flex items-center justify-between">
                             <span className="text-gray-200">{formatPottsModelName(run)}</span>
                             <span className="text-[10px] text-gray-500">
-                              {run.cluster_id?.slice(0, 8)}
+                              {run.model_id?.slice(0, 8)}
                             </span>
                           </div>
                           <p className="text-[11px] text-gray-500 mt-1">
-                            Cluster: {run.name || run.cluster_id}
+                            Cluster: {selectedCluster?.name || selectedCluster?.cluster_id}
                           </p>
                         </div>
                       ))}
@@ -1889,14 +1909,14 @@ export default function SystemDetailPage() {
                       <p className="text-xs text-gray-400">Uploaded models</p>
                       {pottsModels.map((run) => {
                         const displayName = formatPottsModelName(run);
-                        const value = pottsRenameValues[run.cluster_id] ?? displayName;
-                        const isBusy = pottsRenameBusy[run.cluster_id];
-                        const isDeleting = pottsDeleteBusy[run.cluster_id];
+                        const value = pottsRenameValues[run.model_id] ?? displayName;
+                        const isBusy = pottsRenameBusy[run.model_id];
+                        const isDeleting = pottsDeleteBusy[run.model_id];
                         return (
-                          <div key={run.cluster_id} className="flex items-center gap-2">
+                          <div key={run.model_id} className="flex items-center gap-2">
                             <div className="flex-1">
                               <p className="text-[11px] text-gray-500">
-                                {run.name || run.cluster_id}
+                                {selectedCluster?.name || selectedCluster?.cluster_id}
                               </p>
                               <input
                                 type="text"
@@ -1904,7 +1924,7 @@ export default function SystemDetailPage() {
                                 onChange={(event) =>
                                   setPottsRenameValues((prev) => ({
                                     ...prev,
-                                    [run.cluster_id]: event.target.value,
+                                    [run.model_id]: event.target.value,
                                   }))
                                 }
                                 className="w-full bg-gray-800 border border-gray-700 rounded-md px-2 py-1 text-xs text-white focus:ring-cyan-500"
@@ -1915,7 +1935,8 @@ export default function SystemDetailPage() {
                               onClick={() =>
                                 handleDownloadPottsModel(
                                   run.cluster_id,
-                                  run.potts_model_path?.split('/').pop()
+                                  run.model_id,
+                                  run.path?.split('/').pop()
                                 )
                               }
                               disabled={isBusy || isDeleting}
@@ -1925,7 +1946,7 @@ export default function SystemDetailPage() {
                             </button>
                             <button
                               type="button"
-                              onClick={() => handleRenamePottsModel(run.cluster_id)}
+                              onClick={() => handleRenamePottsModel(run.cluster_id, run.model_id)}
                               disabled={isBusy || isDeleting}
                               className="text-xs px-3 py-2 rounded-md border border-gray-600 text-gray-200 hover:bg-gray-700/60 disabled:opacity-50"
                             >
@@ -1933,7 +1954,7 @@ export default function SystemDetailPage() {
                             </button>
                             <button
                               type="button"
-                              onClick={() => handleDeletePottsModel(run.cluster_id)}
+                              onClick={() => handleDeletePottsModel(run.cluster_id, run.model_id)}
                               disabled={isDeleting || isBusy}
                               className="text-xs px-3 py-2 rounded-md border border-red-500/40 text-red-200 hover:bg-red-500/10 disabled:opacity-50"
                             >

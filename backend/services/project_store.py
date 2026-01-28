@@ -267,20 +267,54 @@ class ProjectStore:
         structures_dir = system_dir / "structures"
         descriptors_dir = system_dir / "descriptors"
         trajectories_dir = system_dir / "trajectories"
-        potts_models_dir = system_dir / "potts_models"
+        clusters_dir = system_dir / "clusters"
         tmp_dir = system_dir / "tmp"
         structures_dir.mkdir(parents=True, exist_ok=True)
         descriptors_dir.mkdir(parents=True, exist_ok=True)
         trajectories_dir.mkdir(parents=True, exist_ok=True)
-        potts_models_dir.mkdir(parents=True, exist_ok=True)
+        clusters_dir.mkdir(parents=True, exist_ok=True)
         tmp_dir.mkdir(parents=True, exist_ok=True)
         return {
             "system_dir": system_dir,
             "structures_dir": structures_dir,
             "descriptors_dir": descriptors_dir,
             "trajectories_dir": trajectories_dir,
-            "potts_models_dir": potts_models_dir,
+            "clusters_dir": clusters_dir,
             "tmp_dir": tmp_dir,
+        }
+
+    def ensure_cluster_directories(
+        self,
+        project_id: str,
+        system_id: str,
+        cluster_id: str,
+    ) -> Dict[str, Path]:
+        dirs = self.ensure_directories(project_id, system_id)
+        clusters_dir = dirs["clusters_dir"]
+        cluster_dir = clusters_dir / cluster_id
+        potts_models_dir = cluster_dir / "potts_models"
+        samples_dir = cluster_dir / "samples"
+        cluster_dir.mkdir(parents=True, exist_ok=True)
+        potts_models_dir.mkdir(parents=True, exist_ok=True)
+        samples_dir.mkdir(parents=True, exist_ok=True)
+        return {
+            "system_dir": dirs["system_dir"],
+            "clusters_dir": clusters_dir,
+            "cluster_dir": cluster_dir,
+            "potts_models_dir": potts_models_dir,
+            "samples_dir": samples_dir,
+        }
+
+    def ensure_results_directories(self, project_id: str, system_id: str) -> Dict[str, Path]:
+        system_dir = self._system_dir(project_id, system_id)
+        results_dir = system_dir / "results"
+        jobs_dir = results_dir / "jobs"
+        results_dir.mkdir(parents=True, exist_ok=True)
+        jobs_dir.mkdir(parents=True, exist_ok=True)
+        return {
+            "system_dir": system_dir,
+            "results_dir": results_dir,
+            "jobs_dir": jobs_dir,
         }
 
     def resolve_path(self, project_id: str, system_id: str, relative_path: str) -> Path:

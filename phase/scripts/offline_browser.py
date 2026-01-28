@@ -136,14 +136,16 @@ def list_models(root: Path, project_id: str, system_id: str) -> None:
     rows = []
     for entry in sys_meta.metastable_clusters or []:
         cluster_id = entry.get("cluster_id") or ""
-        model_rel = entry.get("potts_model_path")
-        if not model_rel:
-            continue
-        name = entry.get("potts_model_name") or Path(model_rel).stem
-        abs_path = store.resolve_path(project_id, system_id, model_rel)
-        if not abs_path.exists():
-            continue
-        rows.append([cluster_id, name, str(abs_path)])
+        cluster_name = entry.get("name") or cluster_id
+        for model in entry.get("potts_models") or []:
+            model_rel = model.get("path")
+            if not model_rel:
+                continue
+            abs_path = store.resolve_path(project_id, system_id, model_rel)
+            if not abs_path.exists():
+                continue
+            model_name = model.get("name") or Path(model_rel).stem
+            rows.append([cluster_id, model.get("model_id") or "", f"{cluster_name} :: {model_name}", str(abs_path)])
     _print_rows(rows)
 
 
@@ -155,24 +157,24 @@ def prune_models(root: Path, project_id: str, system_id: str, *, dry_run: bool) 
     for entry in clusters:
         if not isinstance(entry, dict):
             continue
-        model_rel = entry.get("potts_model_path")
-        if not model_rel:
-            continue
-        abs_path = store.resolve_path(project_id, system_id, model_rel)
-        if abs_path.exists():
-            continue
-        removed.append([
-            entry.get("cluster_id") or "",
-            entry.get("potts_model_name") or Path(model_rel).stem,
-            str(abs_path),
-        ])
+        models = entry.get("potts_models") or []
+        keep = []
+        for model in models:
+            model_rel = model.get("path")
+            if not model_rel:
+                continue
+            abs_path = store.resolve_path(project_id, system_id, model_rel)
+            if abs_path.exists():
+                keep.append(model)
+                continue
+            removed.append([
+                entry.get("cluster_id") or "",
+                model.get("model_id") or "",
+                model.get("name") or Path(model_rel).stem,
+                str(abs_path),
+            ])
         if not dry_run:
-            entry.pop("potts_model_path", None)
-            entry.pop("potts_model_name", None)
-            entry.pop("potts_model_id", None)
-            entry.pop("potts_model_source", None)
-            entry.pop("potts_model_params", None)
-            entry.pop("potts_model_updated_at", None)
+            entry["potts_models"] = keep
     if not dry_run:
         sys_meta.metastable_clusters = clusters
         store.save_system(sys_meta)
@@ -216,32 +218,32 @@ def list_trajectories(root: Path, project_id: str, system_id: str) -> None:
 
 
 def list_sampling(root: Path, project_id: str, system_id: str) -> None:
-    system_dir = root / project_id / "systems" / system_id
-    results_dir = root.parent / "results"
+    store = ProjectStore(base_dir=root)
+    sys_meta = store.get_system(project_id, system_id)
     rows = []
-    if not results_dir.exists():
-        _print_rows(rows)
-        return
-    for meta_path in results_dir.rglob("run_metadata.json"):
-        try:
-            payload = json.loads(meta_path.read_text())
-        except Exception:
-            continue
-        data_npz = payload.get("data_npz") or payload.get("args", {}).get("npz")
-        if not data_npz:
-            continue
-        npz_path = Path(data_npz)
-        if not npz_path.is_absolute():
-            npz_path = (meta_path.parent / npz_path).resolve()
-        try:
-            matches_system = system_dir in npz_path.parents
-        except Exception:
-            matches_system = False
-        if not matches_system:
-            continue
-        run_dir = meta_path.parent
-        summary_path = run_dir / payload.get("summary_file", "run_summary.npz")
-        rows.append([run_dir.name, run_dir.name, str(summary_path), str(npz_path)])
+    for entry in sys_meta.metastable_clusters or []:
+        cluster_id = entry.get("cluster_id") or ""
+        cluster_name = entry.get("name") or cluster_id
+        for sample in entry.get("samples") or []:
+            sample_id = sample.get("sample_id") or ""
+            name = sample.get("name") or sample_id
+            sample_type = sample.get("type") or ""
+            paths = sample.get("paths") or {}
+            sample_path = sample.get("path")
+            if isinstance(paths, dict) and paths:
+                candidate = (
+                    paths.get("summary_npz")
+                    or paths.get("metadata_json")
+                    or paths.get("sampling_report")
+                    or paths.get("cross_likelihood_report")
+                    or paths.get("marginals_plot")
+                )
+                if candidate:
+                    sample_path = candidate
+            abs_path = ""
+            if sample_path:
+                abs_path = str(store.resolve_path(project_id, system_id, sample_path))
+            rows.append([cluster_id, f"{cluster_name} :: {name}", sample_type, abs_path])
     _print_rows(rows)
 
 

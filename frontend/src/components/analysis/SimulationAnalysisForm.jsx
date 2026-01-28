@@ -14,7 +14,7 @@ export default function SimulationAnalysisForm({ clusterRuns, onSubmit }) {
   const [saReads, setSaReads] = useState('');
   const [saSweeps, setSaSweeps] = useState('');
   const [saSchedules, setSaSchedules] = useState([]);
-  const [pottsModelPath, setPottsModelPath] = useState('');
+  const [pottsModelId, setPottsModelId] = useState('');
   const [contactMode, setContactMode] = useState('CA');
   const [contactCutoff, setContactCutoff] = useState('10');
   const [plmEpochs, setPlmEpochs] = useState('');
@@ -35,14 +35,14 @@ export default function SimulationAnalysisForm({ clusterRuns, onSubmit }) {
   );
   const modelOptions = useMemo(() => {
     if (!selectedCluster) return [];
-    const modelPath = selectedCluster.potts_model_path;
-    if (!modelPath) return [];
-    const rawLabel =
-      selectedCluster.potts_model_name ||
-      modelPath.split('/').pop() ||
-      'Potts model';
-    const label = rawLabel.replace(/\.npz$/i, '');
-    return [{ value: modelPath, label }];
+    const models = selectedCluster.potts_models || [];
+    return models.map((model) => {
+      const rawLabel = model.name || (model.path ? model.path.split('/').pop() : '') || 'Potts model';
+      return {
+        value: model.model_id,
+        label: rawLabel.replace(/\.npz$/i, ''),
+      };
+    });
   }, [selectedCluster]);
 
   useEffect(() => {
@@ -58,13 +58,13 @@ export default function SimulationAnalysisForm({ clusterRuns, onSubmit }) {
 
   useEffect(() => {
     if (!modelOptions.length) {
-      setPottsModelPath('');
+      setPottsModelId('');
       return;
     }
-    if (!pottsModelPath || !modelOptions.some((opt) => opt.value === pottsModelPath)) {
-      setPottsModelPath(modelOptions[0].value);
+    if (!pottsModelId || !modelOptions.some((opt) => opt.value === pottsModelId)) {
+      setPottsModelId(modelOptions[0].value);
     }
-  }, [modelOptions, pottsModelPath]);
+  }, [modelOptions, pottsModelId]);
 
   const parseBetaList = (raw) =>
     raw
@@ -87,12 +87,12 @@ export default function SimulationAnalysisForm({ clusterRuns, onSubmit }) {
       if (!clusterId) {
         throw new Error('Select a saved cluster NPZ to run Potts analysis.');
       }
-      if (!pottsModelPath) {
+      if (!pottsModelId) {
         throw new Error('Select a fitted Potts model before sampling.');
       }
       const payload = { cluster_id: clusterId };
       payload.use_potts_model = true;
-      payload.potts_model_path = pottsModelPath;
+      payload.potts_model_id = pottsModelId;
       if (contactMode) payload.contact_atom_mode = contactMode;
       if (contactCutoff !== '') {
         const cutoffVal = Number(contactCutoff);
@@ -192,8 +192,8 @@ export default function SimulationAnalysisForm({ clusterRuns, onSubmit }) {
       <div>
         <label className="block text-sm text-gray-300 mb-1">Potts model</label>
         <select
-          value={pottsModelPath}
-          onChange={(event) => setPottsModelPath(event.target.value)}
+          value={pottsModelId}
+          onChange={(event) => setPottsModelId(event.target.value)}
           disabled={!modelOptions.length}
           className="w-full bg-gray-900 border border-gray-700 rounded-md px-3 py-2 text-white focus:ring-cyan-500 disabled:opacity-60"
         >
@@ -516,7 +516,7 @@ export default function SimulationAnalysisForm({ clusterRuns, onSubmit }) {
       <ErrorMessage message={error} />
       <button
         type="submit"
-        disabled={isSubmitting || !clusterOptions.length || !pottsModelPath}
+        disabled={isSubmitting || !clusterOptions.length || !pottsModelId}
         className="w-full bg-cyan-600 hover:bg-cyan-500 text-white font-semibold py-2 rounded-md transition-colors disabled:opacity-50"
       >
         {isSubmitting ? 'Submitting…' : 'Run Potts Sampling'}

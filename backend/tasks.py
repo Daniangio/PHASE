@@ -32,12 +32,8 @@ from backend.services.metastable_clusters import (
 from backend.services.backmapping_npz import build_backmapping_npz
 from backend.services.project_store import ProjectStore
 
-# Define the persistent results directory (aligned with PHASE_DATA_ROOT).
+# Define the persistent data root (aligned with PHASE_DATA_ROOT).
 DATA_ROOT = Path(os.getenv("PHASE_DATA_ROOT", "/app/data"))
-RESULTS_DIR = DATA_ROOT / "results"
-RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-SIMULATION_RESULTS_DIR = RESULTS_DIR / "simulation"
-SIMULATION_RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 project_store = ProjectStore()
 
 # Helper to convert NaN to None for JSON serialization
@@ -142,6 +138,8 @@ def _persist_potts_model(
     params: Dict[str, Any],
     *,
     source: str,
+    model_id: str,
+    model_name: str | None = None,
 ) -> str:
     entry = None
     try:
@@ -151,60 +149,54 @@ def _persist_potts_model(
     except Exception:
         entry = None
 
-    dirs = project_store.ensure_directories(project_id, system_id)
+    dirs = project_store.ensure_cluster_directories(project_id, system_id, cluster_id)
     system_dir = dirs["system_dir"]
     model_dir = dirs["potts_models_dir"]
     model_dir.mkdir(parents=True, exist_ok=True)
-    existing_name = entry.get("potts_model_name") if isinstance(entry, dict) else None
-    existing_path = entry.get("potts_model_path") if isinstance(entry, dict) else None
     cluster_name = entry.get("name") if isinstance(entry, dict) else None
     display_name = (
-        existing_name
+        (model_name.strip() if isinstance(model_name, str) and model_name.strip() else None)
         or (f"{cluster_name} Potts Model" if isinstance(cluster_name, str) and cluster_name.strip() else None)
         or f"{cluster_id} Potts Model"
     )
 
     dest_path = None
-    model_id = entry.get("potts_model_id") if isinstance(entry, dict) else None
-    if not model_id:
-        model_id = str(uuid.uuid4())
-    if isinstance(existing_path, str) and existing_path:
-        try:
-            dest_path = project_store.resolve_path(project_id, system_id, existing_path)
-        except Exception:
-            dest_path = None
-    if dest_path is None:
-        base_name = _sanitize_model_filename(display_name)
-        filename = f"{base_name}.npz"
-        model_bucket = model_dir / model_id
-        model_bucket.mkdir(parents=True, exist_ok=True)
-        dest_path = model_bucket / filename
-        if dest_path.exists():
-            suffix = cluster_id[:8]
-            dest_path = model_bucket / f"{base_name}-{suffix}.npz"
-            counter = 2
-            while dest_path.exists():
-                dest_path = model_bucket / f"{base_name}-{suffix}-{counter}.npz"
-                counter += 1
+    base_name = _sanitize_model_filename(display_name)
+    filename = f"{base_name}.npz"
+    model_bucket = model_dir / model_id
+    model_bucket.mkdir(parents=True, exist_ok=True)
+    dest_path = model_bucket / filename
+    if dest_path.exists():
+        suffix = cluster_id[:8]
+        dest_path = model_bucket / f"{base_name}-{suffix}.npz"
+        counter = 2
+        while dest_path.exists():
+            dest_path = model_bucket / f"{base_name}-{suffix}-{counter}.npz"
+            counter += 1
     if model_path.resolve() != dest_path.resolve():
         shutil.copy2(model_path, dest_path)
     try:
         rel_path = str(dest_path.relative_to(system_dir))
     except Exception:
         rel_path = str(dest_path)
-    _update_cluster_entry(
-        project_id,
-        system_id,
-        cluster_id,
-        {
-            "potts_model_id": model_id,
-            "potts_model_path": rel_path,
-            "potts_model_name": display_name,
-            "potts_model_updated_at": datetime.utcnow().isoformat(),
-            "potts_model_source": source,
-            "potts_model_params": params,
-        },
-    )
+    if isinstance(entry, dict):
+        models = entry.get("potts_models")
+        if not isinstance(models, list):
+            models = []
+        existing = next((m for m in models if m.get("model_id") == model_id), None)
+        model_entry = {
+            "model_id": model_id,
+            "name": display_name,
+            "path": rel_path,
+            "created_at": datetime.utcnow().isoformat(),
+            "source": source,
+            "params": params,
+        }
+        if existing:
+            existing.update(model_entry)
+        else:
+            models.append(model_entry)
+        _update_cluster_entry(project_id, system_id, cluster_id, {"potts_models": models})
     return rel_path
 
 
@@ -248,7 +240,12 @@ def run_analysis_job(
         "completed_at": None, # Will be filled in 'finally'
     }
     
-    result_filepath = RESULTS_DIR / f"{job_uuid}.json"
+    project_id = dataset_ref.get("project_id")
+    system_id = dataset_ref.get("system_id")
+    if not project_id or not system_id:
+        raise ValueError("Dataset reference missing project_id/system_id.")
+    results_dirs = project_store.ensure_results_directories(project_id, system_id)
+    result_filepath = results_dirs["jobs_dir"] / f"{job_uuid}.json"
 
     def save_progress(status_msg: str, progress: int):
         if job:
@@ -274,11 +271,9 @@ def run_analysis_job(
         write_result_to_disk(result_payload)
 
         # Step 1: Resolve the dataset (stored descriptors + PDBs)
-        project_id = dataset_ref.get("project_id")
-        system_id = dataset_ref.get("system_id")
         state_a_id = dataset_ref.get("state_a_id")
         state_b_id = dataset_ref.get("state_b_id")
-        if not project_id or not system_id or not state_a_id or not state_b_id:
+        if not state_a_id or not state_b_id:
             raise ValueError("Dataset reference missing project_id/system_id/state pair.")
 
         system_meta = project_store.get_system(project_id, system_id)
@@ -402,7 +397,12 @@ def run_simulation_job(
         "completed_at": None,
     }
 
-    result_filepath = RESULTS_DIR / f"{job_uuid}.json"
+    project_id = dataset_ref.get("project_id")
+    system_id = dataset_ref.get("system_id")
+    if not project_id or not system_id:
+        raise ValueError("Simulation dataset reference missing project_id/system_id.")
+    results_dirs = project_store.ensure_results_directories(project_id, system_id)
+    result_filepath = results_dirs["jobs_dir"] / f"{job_uuid}.json"
 
     def force_single_thread():
         os.environ["OMP_NUM_THREADS"] = "1"
@@ -439,10 +439,8 @@ def run_simulation_job(
         save_progress("Initializing...", 0)
         write_result_to_disk(result_payload)
 
-        project_id = dataset_ref.get("project_id")
-        system_id = dataset_ref.get("system_id")
         cluster_id = dataset_ref.get("cluster_id")
-        if not project_id or not system_id or not cluster_id:
+        if not cluster_id:
             raise ValueError("Simulation dataset reference missing project_id/system_id/cluster_id.")
 
         system_meta = project_store.get_system(project_id, system_id)
@@ -459,13 +457,29 @@ def run_simulation_job(
         if not cluster_path.exists():
             raise FileNotFoundError(f"Cluster NPZ file is missing on disk: {cluster_path}")
 
-        results_dir = SIMULATION_RESULTS_DIR / job_uuid
-        results_dir.mkdir(parents=True, exist_ok=True)
+        sample_id = str(uuid.uuid4())
+        cluster_dirs = project_store.ensure_cluster_directories(project_id, system_id, cluster_id)
+        sample_dir = cluster_dirs["samples_dir"] / sample_id
+        sample_dir.mkdir(parents=True, exist_ok=True)
+        results_dir = sample_dir
 
         sim_params = dict(params or {})
         model_rel = None
+        model_id = None
         if sim_params.get("use_potts_model", True):
-            model_rel = sim_params.get("potts_model_path") or entry.get("potts_model_path")
+            model_rel = sim_params.get("potts_model_path")
+            model_id = sim_params.get("potts_model_id")
+            if not model_rel:
+                models = entry.get("potts_models") if isinstance(entry, dict) else None
+                if isinstance(models, list) and models:
+                    model_entry = None
+                    if model_id:
+                        model_entry = next((m for m in models if m.get("model_id") == model_id), None)
+                    if model_entry is None:
+                        model_entry = models[-1]
+                    if model_entry and not model_id:
+                        model_id = model_entry.get("model_id")
+                    model_rel = model_entry.get("path") if isinstance(model_entry, dict) else None
         rex_betas_raw = sim_params.get("rex_betas")
         rex_betas_list = []
         if isinstance(rex_betas_raw, (list, tuple)):
@@ -681,11 +695,49 @@ def run_simulation_job(
                     model_artifact,
                     params,
                     source="simulation",
+                    model_id=str(uuid.uuid4()),
+                    model_name=None,
                 )
 
         cluster_name = entry.get("name") if isinstance(entry, dict) else None
         if cluster_name:
             result_payload["system_reference"]["cluster_name"] = cluster_name
+
+        sample_paths: Dict[str, str] = {}
+        for key, path in {
+            "summary_npz": summary_path,
+            "metadata_json": meta_path,
+            "marginals_plot": plot_path,
+            "sampling_report": report_path,
+            "cross_likelihood_report": cross_likelihood_report_path,
+            "beta_scan_plot": beta_scan_path,
+        }.items():
+            if path and path.exists():
+                dest = path
+                if dest.parent.resolve() != sample_dir.resolve():
+                    dest = sample_dir / path.name
+                    if dest.resolve() != path.resolve():
+                        shutil.copy2(path, dest)
+                try:
+                    sample_paths[key] = str(dest.relative_to(cluster_dirs["system_dir"]))
+                except Exception:
+                    sample_paths[key] = str(dest)
+
+        sample_entry = {
+            "sample_id": sample_id,
+            "name": f"Sampling {datetime.utcnow().strftime('%Y%m%d %H:%M')}",
+            "type": "potts_sampling",
+            "method": gibbs_method,
+            "model_id": model_id,
+            "created_at": datetime.utcnow().isoformat(),
+            "paths": sample_paths,
+        }
+        if isinstance(entry, dict):
+            samples = entry.get("samples")
+            if not isinstance(samples, list):
+                samples = []
+            samples.append(sample_entry)
+            _update_cluster_entry(project_id, system_id, cluster_id, {"samples": samples})
 
         result_payload["status"] = "finished"
         result_payload["results"] = {
@@ -749,7 +801,12 @@ def run_potts_fit_job(
         "completed_at": None,
     }
 
-    result_filepath = RESULTS_DIR / f"{job_uuid}.json"
+    project_id = dataset_ref.get("project_id")
+    system_id = dataset_ref.get("system_id")
+    if not project_id or not system_id:
+        raise ValueError("Potts fit requires project_id/system_id.")
+    results_dirs = project_store.ensure_results_directories(project_id, system_id)
+    result_filepath = results_dirs["jobs_dir"] / f"{job_uuid}.json"
 
     def force_single_thread():
         os.environ["OMP_NUM_THREADS"] = "1"
@@ -785,10 +842,8 @@ def run_potts_fit_job(
         save_progress("Initializing...", 0)
         write_result_to_disk(result_payload)
 
-        project_id = dataset_ref.get("project_id")
-        system_id = dataset_ref.get("system_id")
         cluster_id = dataset_ref.get("cluster_id")
-        if not project_id or not system_id or not cluster_id:
+        if not cluster_id:
             raise ValueError("Potts fit requires project_id/system_id/cluster_id.")
 
         system_meta = project_store.get_system(project_id, system_id)
@@ -805,28 +860,20 @@ def run_potts_fit_job(
         if not cluster_path.exists():
             raise FileNotFoundError(f"Cluster NPZ file is missing on disk: {cluster_path}")
 
-        dirs = project_store.ensure_directories(project_id, system_id)
         fit_params = dict(params or {})
         model_name = fit_params.get("model_name")
-        if model_name and isinstance(entry, dict):
-            entry["potts_model_name"] = str(model_name).strip()
-            project_store.save_system(system_meta)
-
-        model_id = entry.get("potts_model_id") if isinstance(entry, dict) else None
-        if not model_id:
-            model_id = str(uuid.uuid4())
-            if isinstance(entry, dict):
-                entry["potts_model_id"] = model_id
-                project_store.save_system(system_meta)
+        model_id = str(uuid.uuid4())
         display_name = None
-        if isinstance(entry, dict):
-            display_name = entry.get("potts_model_name")
+        if isinstance(model_name, str) and model_name.strip():
+            display_name = model_name.strip()
+        elif isinstance(entry, dict):
             cluster_name = entry.get("name")
-            if not display_name and isinstance(cluster_name, str) and cluster_name.strip():
+            if isinstance(cluster_name, str) and cluster_name.strip():
                 display_name = f"{cluster_name} Potts Model"
         if not display_name:
             display_name = f"{cluster_id} Potts Model"
-        model_dir = dirs["potts_models_dir"] / model_id
+        cluster_dirs = project_store.ensure_cluster_directories(project_id, system_id, cluster_id)
+        model_dir = cluster_dirs["potts_models_dir"] / model_id
         model_dir.mkdir(parents=True, exist_ok=True)
         model_path = model_dir / f"{_sanitize_model_filename(display_name)}.npz"
 
@@ -834,7 +881,7 @@ def run_potts_fit_job(
             "--npz",
             str(cluster_path),
             "--results-dir",
-            str(SIMULATION_RESULTS_DIR / job_uuid),
+            str(model_dir),
             "--fit-only",
             "--model-out",
             str(model_path),
@@ -901,11 +948,13 @@ def run_potts_fit_job(
             Path(model_path),
             fit_params,
             source="potts_fit",
+            model_id=model_id,
+            model_name=display_name,
         )
 
         result_payload["status"] = "finished"
         result_payload["results"] = {
-            "results_dir": _relativize_path(SIMULATION_RESULTS_DIR / job_uuid),
+            "results_dir": _relativize_path(model_dir),
             "potts_model": potts_model_rel,
             "cluster_npz": _relativize_path(cluster_path),
             "metadata_json": _relativize_path(run_result.get("metadata_path")) if run_result.get("metadata_path") else None,
@@ -961,9 +1010,10 @@ def run_backmapping_job(job_uuid: str, project_id: str, system_id: str, cluster_
         raise FileNotFoundError(f"Cluster NPZ file is missing on disk: {cluster_path}")
 
     dirs = project_store.ensure_directories(project_id, system_id)
-    out_dir = dirs["system_dir"] / "metastable" / "clusters"
+    cluster_dirs = project_store.ensure_cluster_directories(project_id, system_id, cluster_id)
+    out_dir = cluster_dirs["cluster_dir"]
     out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / f"{cluster_id}_backmapping.npz"
+    out_path = out_dir / "backmapping.npz"
 
     def progress_callback(current: int, total: int):
         if not total:
@@ -1066,14 +1116,19 @@ def run_cluster_job(
         )
 
         save_progress("Saving cluster metadata...", 90)
-        dirs = project_store.ensure_directories(project_id, system_id)
+        dirs = project_store.ensure_cluster_directories(project_id, system_id, cluster_id)
         try:
             rel_path = str(npz_path.relative_to(dirs["system_dir"]))
         except Exception:
             rel_path = str(npz_path)
 
         save_progress("Assigning clusters to MD states...", 92)
-        assignments = assign_cluster_labels_to_states(npz_path, project_id, system_id)
+        assignments = assign_cluster_labels_to_states(
+            npz_path,
+            project_id,
+            system_id,
+            output_dir=dirs["samples_dir"],
+        )
         update_cluster_metadata_with_assignments(npz_path, assignments)
 
         _update_cluster_entry(
@@ -1086,6 +1141,7 @@ def run_cluster_job(
                 "path": rel_path,
                 "assigned_state_paths": assignments.get("assigned_state_paths", {}),
                 "assigned_metastable_paths": assignments.get("assigned_metastable_paths", {}),
+                "samples": assignments.get("samples", []),
                 "generated_at": meta.get("generated_at") if isinstance(meta, dict) else None,
                 "contact_edge_count": meta.get("contact_edge_count") if isinstance(meta, dict) else None,
                 "error": None,

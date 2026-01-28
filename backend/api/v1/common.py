@@ -28,8 +28,6 @@ from backend.services.project_store import (
 
 
 DATA_ROOT = Path(os.getenv("PHASE_DATA_ROOT", "/app/data"))
-RESULTS_DIR = DATA_ROOT / "results"
-RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 project_store = ProjectStore()
 
 

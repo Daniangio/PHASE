@@ -39,7 +39,7 @@ def _persist_model(
         (c for c in (system_meta.metastable_clusters or []) if c.get("cluster_id") == cluster_id),
         None,
     )
-    dirs = store.ensure_directories(project_id, system_id)
+    dirs = store.ensure_cluster_directories(project_id, system_id, cluster_id)
     system_dir = dirs["system_dir"]
     model_dir = dirs["potts_models_dir"]
     model_dir.mkdir(parents=True, exist_ok=True)
@@ -55,31 +55,19 @@ def _persist_model(
         if not display_name:
             display_name = f"{cluster_id} Potts Model"
 
-    dest_path = None
-    model_id = entry.get("potts_model_id") if isinstance(entry, dict) else None
-    if not model_id:
-        model_id = str(uuid.uuid4())
-    if isinstance(entry, dict):
-        existing_path = entry.get("potts_model_path")
-        if isinstance(existing_path, str) and existing_path:
-            try:
-                dest_path = store.resolve_path(project_id, system_id, existing_path)
-            except Exception:
-                dest_path = None
-
-    if dest_path is None:
-        base_name = _sanitize_model_filename(display_name)
-        filename = f"{base_name}.npz"
-        model_bucket = model_dir / model_id
-        model_bucket.mkdir(parents=True, exist_ok=True)
-        dest_path = model_bucket / filename
-        if dest_path.exists():
-            suffix = cluster_id[:8]
-            dest_path = model_bucket / f"{base_name}-{suffix}.npz"
-            counter = 2
-            while dest_path.exists():
-                dest_path = model_bucket / f"{base_name}-{suffix}-{counter}.npz"
-                counter += 1
+    model_id = str(uuid.uuid4())
+    base_name = _sanitize_model_filename(display_name)
+    filename = f"{base_name}.npz"
+    model_bucket = model_dir / model_id
+    model_bucket.mkdir(parents=True, exist_ok=True)
+    dest_path = model_bucket / filename
+    if dest_path.exists():
+        suffix = cluster_id[:8]
+        dest_path = model_bucket / f"{base_name}-{suffix}.npz"
+        counter = 2
+        while dest_path.exists():
+            dest_path = model_bucket / f"{base_name}-{suffix}-{counter}.npz"
+            counter += 1
 
     if model_path.resolve() != dest_path.resolve():
         shutil.copy2(model_path, dest_path)
@@ -89,16 +77,20 @@ def _persist_model(
         rel_path = str(dest_path)
 
     if isinstance(entry, dict):
-        entry.update(
+        models = entry.get("potts_models")
+        if not isinstance(models, list):
+            models = []
+        models.append(
             {
-                "potts_model_id": model_id,
-                "potts_model_path": rel_path,
-                "potts_model_name": display_name,
-                "potts_model_updated_at": datetime.utcnow().isoformat(),
-                "potts_model_source": source,
-                "potts_model_params": params,
+                "model_id": model_id,
+                "name": display_name,
+                "path": rel_path,
+                "created_at": datetime.utcnow().isoformat(),
+                "source": source,
+                "params": params,
             }
         )
+        entry["potts_models"] = models
         store.save_system(system_meta)
     else:
         print("[potts_fit] warning: cluster entry not found; model copied without metadata update.")
@@ -131,21 +123,15 @@ def main(argv: list[str] | None = None) -> int:
                 (c for c in (system_meta.metastable_clusters or []) if c.get("cluster_id") == cluster_id),
                 None,
             )
-        model_id = entry.get("potts_model_id") if isinstance(entry, dict) else None
-        if not model_id:
-            model_id = str(uuid.uuid4())
-            if isinstance(entry, dict):
-                entry["potts_model_id"] = model_id
-                store.save_system(system_meta)
         display_name = args.model_name or None
         if not display_name and isinstance(entry, dict):
-            display_name = entry.get("potts_model_name")
             cluster_name = entry.get("name")
             if not display_name and isinstance(cluster_name, str) and cluster_name.strip():
                 display_name = f"{cluster_name} Potts Model"
         if not display_name:
             display_name = f"{cluster_id} Potts Model"
-        model_dir = store.ensure_directories(project_id, system_id)["potts_models_dir"] / model_id
+        model_id = str(uuid.uuid4())
+        model_dir = store.ensure_cluster_directories(project_id, system_id, cluster_id)["potts_models_dir"] / model_id
         model_dir.mkdir(parents=True, exist_ok=True)
         args.model_out = str(model_dir / f"{_sanitize_model_filename(display_name)}.npz")
     try:

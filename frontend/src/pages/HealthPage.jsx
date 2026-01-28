@@ -58,7 +58,7 @@ export default function HealthPage() {
       {cleanupError && <ErrorMessage message={cleanupError} />}
       {cleanupInfo && (
         <div className="text-xs text-gray-400">
-          Removed {cleanupInfo.empty_simulation_dirs_removed} empty result folders and{' '}
+          Removed {cleanupInfo.empty_result_dirs_removed} empty result folders and{' '}
           {cleanupInfo.tmp_artifacts_removed} tmp artifacts.
         </div>
       )}

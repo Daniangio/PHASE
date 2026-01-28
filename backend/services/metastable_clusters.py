@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import re
+import uuid
+import pickle
 from datetime import datetime
 from pathlib import Path
 import inspect
@@ -32,11 +34,8 @@ def build_cluster_output_path(
     cluster_name: Optional[str] = None,
 ) -> Path:
     store = ProjectStore()
-    dirs = store.ensure_directories(project_id, system_id)
-    cluster_dir = dirs["system_dir"] / "metastable" / "clusters"
-    cluster_dir.mkdir(parents=True, exist_ok=True)
-    slug = _slug(cluster_name) if cluster_name else "cluster"
-    return cluster_dir / f"{slug}__{cluster_id}.npz"
+    dirs = store.ensure_cluster_directories(project_id, system_id, cluster_id)
+    return dirs["cluster_dir"] / "cluster.npz"
 
 
 def build_cluster_entry(
@@ -60,6 +59,8 @@ def build_cluster_entry(
         "path": None,
         "state_ids": state_ids,
         "metastable_ids": state_ids,
+        "potts_models": [],
+        "samples": [],
         "max_cluster_frames": max_cluster_frames,
         "random_state": random_state,
         "generated_at": None,
@@ -113,18 +114,18 @@ def _fit_density_peaks(
     """Fit ADP density-peak clustering on embedded samples."""
     if samples.size == 0:
         raise ValueError("No samples provided for density peaks.")
-    emb = _angles_to_embedding(samples)
+    emb, period = _angles_to_periodic(samples)
     n = emb.shape[0]
     if n == 1:
         labels = np.zeros(1, dtype=np.int32)
         diag = {"density_peaks_k": 1, "density_peaks_maxk": 1, "density_peaks_Z": density_z}
-        dp_data = Data(coordinates=emb, maxk=1, verbose=False, n_jobs=1)
+        dp_data = Data(coordinates=emb, maxk=1, verbose=False, n_jobs=1, period=period)
         dp_data.cluster_assignment = labels  # type: ignore[attr-defined]
         dp_data.N_clusters = 1  # type: ignore[attr-defined]
         return dp_data, labels, 1, diag
 
     dp_maxk = max(1, min(int(density_maxk), n - 1))
-    dp_data = Data(coordinates=emb, maxk=dp_maxk, verbose=False, n_jobs=1)
+    dp_data = Data(coordinates=emb, maxk=dp_maxk, verbose=False, n_jobs=1, period=period)
     dp_data.compute_distances()
     dp_data.compute_id_2NN()
     dp_data.compute_density_kstarNN()
@@ -158,7 +159,7 @@ def _predict_cluster_adp(
     """Predict ADP cluster labels for new samples using a fitted Data object."""
     if not hasattr(dp_data, "predict_cluster_ADP"):
         raise ValueError("DADApy predict_cluster_ADP is not available. Update the DADApy installation.")
-    emb = _angles_to_embedding(samples)
+    emb, _ = _angles_to_periodic(samples)
     labels, _ = dp_data.predict_cluster_ADP(
         emb,
         maxk=max(1, min(int(density_maxk), emb.shape[0] - 1)),
@@ -169,11 +170,14 @@ def _predict_cluster_adp(
     return np.asarray(labels, dtype=np.int32)
 
 
-def _angles_to_embedding(samples: np.ndarray) -> np.ndarray:
-    """Convert angle triplets to sin/cos embedding for periodic clustering."""
+def _angles_to_periodic(samples: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Center angle triplets into [0, 2pi) and return periodicity vector."""
     angles = samples[:, :3]
-    emb = np.concatenate([np.sin(angles), np.cos(angles)], axis=1)
-    return np.nan_to_num(emb, nan=0.0, posinf=0.0, neginf=0.0)
+    two_pi = 2.0 * np.pi
+    centered = np.mod(angles, two_pi)
+    centered = np.nan_to_num(centered, nan=0.0, posinf=0.0, neginf=0.0)
+    period = np.full(centered.shape[1], two_pi, dtype=np.float64)
+    return centered, period
 
 
 def _cluster_residue_samples(
@@ -459,7 +463,8 @@ def assign_cluster_labels_to_states(
     system_id: str,
     *,
     k_neighbors: int = 10,
-) -> Dict[str, Dict[str, str]]:
+    output_dir: Optional[Path] = None,
+) -> Dict[str, Any]:
     store = ProjectStore()
     system = store.get_system(project_id, system_id)
     data = np.load(cluster_path, allow_pickle=True)
@@ -478,9 +483,10 @@ def assign_cluster_labels_to_states(
 
     predictions = meta.get("predictions") or {}
 
-    assign_dir = cluster_path.parent / f"{cluster_path.stem}_assigned"
-    assign_dir.mkdir(parents=True, exist_ok=True)
+    assign_root = output_dir or (cluster_path.parent / "samples")
+    assign_root.mkdir(parents=True, exist_ok=True)
 
+    samples: List[Dict[str, Any]] = []
     assigned_state_paths: Dict[str, str] = {}
     for state_id, state in system.states.items():
         key = f"state:{state_id}"
@@ -522,9 +528,22 @@ def assign_cluster_labels_to_states(
         if labels_assigned is not None:
             payload["assigned__labels_assigned"] = labels_assigned
 
-        out_path = assign_dir / f"state_{state_id}.npz"
+        sample_id = str(uuid.uuid4())
+        sample_dir = assign_root / sample_id
+        sample_dir.mkdir(parents=True, exist_ok=True)
+        out_path = sample_dir / "md_eval.npz"
         np.savez_compressed(out_path, **payload)
         assigned_state_paths[state_id] = str(out_path.relative_to(cluster_path.parent))
+        samples.append(
+            {
+                "sample_id": sample_id,
+                "name": f"MD {getattr(state, 'name', state_id)}",
+                "type": "md_eval",
+                "state_id": state_id,
+                "path": str(out_path.relative_to(cluster_path.parent)),
+                "created_at": datetime.utcnow().isoformat(),
+            }
+        )
 
     assigned_meta_paths: Dict[str, str] = {}
     meta_lookup = {m.get("metastable_id") or m.get("id"): m for m in system.metastable_states or []}
@@ -576,13 +595,128 @@ def assign_cluster_labels_to_states(
         if labels_assigned is not None:
             payload["assigned__labels_assigned"] = labels_assigned
 
-        out_path = assign_dir / f"meta_{meta_id}.npz"
+        sample_id = str(uuid.uuid4())
+        sample_dir = assign_root / sample_id
+        sample_dir.mkdir(parents=True, exist_ok=True)
+        out_path = sample_dir / "md_eval.npz"
         np.savez_compressed(out_path, **payload)
         assigned_meta_paths[str(meta_id)] = str(out_path.relative_to(cluster_path.parent))
+        meta_label = meta_lookup.get(meta_id, {}).get("label") if isinstance(meta_id, str) else None
+        samples.append(
+            {
+                "sample_id": sample_id,
+                "name": f"MD {meta_label or meta_id}",
+                "type": "md_eval",
+                "metastable_id": str(meta_id),
+                "path": str(out_path.relative_to(cluster_path.parent)),
+                "created_at": datetime.utcnow().isoformat(),
+            }
+        )
 
     return {
         "assigned_state_paths": assigned_state_paths,
         "assigned_metastable_paths": assigned_meta_paths,
+        "samples": samples,
+    }
+
+
+def evaluate_state_with_models(
+    project_id: str,
+    system_id: str,
+    cluster_id: str,
+    state_id: str,
+    *,
+    store: ProjectStore | None = None,
+) -> Dict[str, Any]:
+    store = store or ProjectStore()
+    system = store.get_system(project_id, system_id)
+    state = system.states.get(state_id)
+    if not state or not state.descriptor_file:
+        raise ValueError(f"State '{state_id}' is missing descriptors.")
+
+    cluster_dirs = store.ensure_cluster_directories(project_id, system_id, cluster_id)
+    cluster_path = cluster_dirs["cluster_dir"] / "cluster.npz"
+    if not cluster_path.exists():
+        raise FileNotFoundError(f"Cluster NPZ not found for cluster_id='{cluster_id}'.")
+    data = np.load(cluster_path, allow_pickle=True)
+    meta_raw = data.get("metadata_json")
+    if meta_raw is None:
+        raise ValueError("Cluster NPZ missing metadata_json.")
+    try:
+        meta_val = meta_raw.item() if hasattr(meta_raw, "item") else meta_raw
+        meta = json.loads(str(meta_val))
+    except Exception as exc:
+        raise ValueError(f"Failed to parse cluster metadata_json: {exc}") from exc
+
+    residue_keys = [str(k) for k in meta.get("residue_keys", [])]
+    model_paths = meta.get("model_paths") or []
+    if not residue_keys or len(model_paths) != len(residue_keys):
+        raise ValueError("Cluster NPZ is missing model_paths for evaluation.")
+
+    descriptor_path = store.resolve_path(project_id, system_id, state.descriptor_file)
+    feature_dict = load_descriptor_npz(descriptor_path)
+
+    n_frames = None
+    labels_halo = np.full((feature_dict[residue_keys[0]].shape[0], len(residue_keys)), -1, dtype=np.int32)
+    labels_assigned = np.full_like(labels_halo, -1)
+    cluster_counts = np.zeros(len(residue_keys), dtype=np.int32)
+
+    for idx, key in enumerate(residue_keys):
+        if key not in feature_dict:
+            raise ValueError(f"Descriptor missing residue key '{key}'.")
+        arr = feature_dict[key]
+        if arr.ndim != 3 or arr.shape[2] < 3:
+            raise ValueError(f"Descriptor for '{key}' must be (n_frames, 1, >=3).")
+        samples = np.asarray(arr[:, 0, :], dtype=float)
+        if n_frames is None:
+            n_frames = samples.shape[0]
+        if samples.shape[0] != n_frames:
+            raise ValueError("Descriptor frame counts are inconsistent across residues.")
+        model_rel = model_paths[idx]
+        if not model_rel:
+            continue
+        model_path = store.resolve_path(project_id, system_id, model_rel)
+        with open(model_path, "rb") as inp:
+            dp_data = pickle.load(inp)
+        labels_halo[:, idx] = _predict_cluster_adp(samples, dp_data, halo=True)
+        labels_assigned[:, idx] = _predict_cluster_adp(samples, dp_data, halo=False)
+        if np.any(labels_assigned[:, idx] >= 0):
+            cluster_counts[idx] = int(labels_assigned[:, idx].max()) + 1
+
+    frame_indices = np.arange(labels_halo.shape[0], dtype=np.int64)
+    payload: Dict[str, Any] = {
+        "residue_keys": np.asarray(residue_keys),
+        "assigned__labels": labels_halo,
+        "assigned__labels_assigned": labels_assigned,
+        "assigned__cluster_counts": cluster_counts,
+        "assigned__frame_state_id": np.array([state_id]),
+        "assigned__frame_indices": frame_indices,
+        "metadata_json": np.array(
+            json.dumps(
+                {
+                    "source_cluster": cluster_path.name,
+                    "state_id": state_id,
+                    "generated_at": datetime.utcnow().isoformat(),
+                }
+            )
+        ),
+    }
+    sample_id = str(uuid.uuid4())
+    sample_dir = cluster_dirs["samples_dir"] / sample_id
+    sample_dir.mkdir(parents=True, exist_ok=True)
+    out_path = sample_dir / "md_eval.npz"
+    np.savez_compressed(out_path, **payload)
+    try:
+        rel = str(out_path.relative_to(cluster_dirs["system_dir"]))
+    except Exception:
+        rel = str(out_path)
+    return {
+        "sample_id": sample_id,
+        "name": f"MD {state.name or state_id}",
+        "type": "md_eval",
+        "state_id": state_id,
+        "path": rel,
+        "created_at": datetime.utcnow().isoformat(),
     }
 
 
@@ -1061,6 +1195,7 @@ def generate_metastable_cluster_npz(
     cluster_algorithm: str = "density_peaks",
     density_maxk: Optional[int] = 100,
     density_z: float | str | None = None,
+    persist_models: bool = True,
     progress_callback: Optional[Callable[[str, int, int], None]] = None,
     n_jobs: int | None = None,
 ) -> Tuple[Path, Dict[str, Any]]:
@@ -1179,7 +1314,7 @@ def generate_metastable_cluster_npz(
 
     # Persist NPZ
     dirs = store.ensure_directories(project_id, system_id)
-    cluster_dir = dirs["system_dir"] / "metastable" / "clusters"
+    cluster_dir = dirs["clusters_dir"]
     cluster_dir.mkdir(parents=True, exist_ok=True)
     if output_path is not None:
         out_path = Path(output_path)
@@ -1197,7 +1332,6 @@ def generate_metastable_cluster_npz(
         "selected_metastable_ids": unique_meta_ids,
         "analysis_mode": getattr(system_meta, "analysis_mode", None),
         "cluster_name": cluster_name,
-        "state_labels": state_labels,
         "metastable_labels": metastable_labels,
         "metastable_kinds": metastable_kinds,
         "cluster_algorithm": "density_peaks",
@@ -1212,7 +1346,6 @@ def generate_metastable_cluster_npz(
         "residue_mapping": residue_mapping,
         "random_state": random_state,
         "contact_sources": contact_sources,
-        "contact_edge_count": len(contact_edges),
         "merged": {
             "n_frames": merged_frame_count,
             "clustered_frames": int(merged_clustered_frames),
@@ -1231,7 +1364,6 @@ def generate_metastable_cluster_npz(
 
     payload: Dict[str, Any] = {
         "residue_keys": np.array(residue_keys),
-        "metadata_json": np.array(json.dumps(metadata)),
         "merged__labels": merged_labels_halo,
         "merged__labels_assigned": merged_labels_assigned,
         "merged__cluster_counts": merged_counts,
@@ -1239,13 +1371,25 @@ def generate_metastable_cluster_npz(
         "merged__frame_metastable_ids": np.array(merged_frame_meta_ids),
         "merged__frame_indices": np.array(merged_frame_indices, dtype=np.int64),
     }
-    if contact_edges:
-        edge_index = np.array(sorted(contact_edges), dtype=np.int64).T
-    else:
-        edge_index = np.zeros((2, 0), dtype=np.int64)
-    payload["contact_edge_index"] = edge_index
-    # contact_edge_index remains to keep downstream loaders happy
     payload.update(condition_payload)
+    if persist_models:
+        model_dir = out_path.parent / "models"
+        model_dir.mkdir(parents=True, exist_ok=True)
+        model_paths: List[str | None] = []
+        for idx, dp_data in enumerate(dp_models):
+            if dp_data is None:
+                model_paths.append(None)
+                continue
+            model_path = model_dir / f"res_{idx:04d}.pkl"
+            with open(model_path, "wb") as outp:
+                pickle.dump(dp_data, outp, pickle.HIGHEST_PROTOCOL)
+            try:
+                rel = str(model_path.relative_to(store.ensure_directories(project_id, system_id)["system_dir"]))
+            except Exception:
+                rel = str(model_path)
+            model_paths.append(rel)
+        metadata["model_paths"] = model_paths
+    payload["metadata_json"] = np.array(json.dumps(metadata))
 
     np.savez_compressed(out_path, **payload)
     return out_path, metadata
@@ -1498,7 +1642,6 @@ def generate_cluster_npz_from_descriptors(
         "analysis_mode": "macro",
         "selected_state_ids": state_ids,
         "selected_metastable_ids": state_ids,
-        "state_labels": state_labels,
         "metastable_labels": {},
         "cluster_algorithm": "density_peaks",
         "cluster_params": {
@@ -1512,7 +1655,6 @@ def generate_cluster_npz_from_descriptors(
         "residue_mapping": {},
         "random_state": random_state,
         "contact_sources": [],
-        "contact_edge_count": 0,
         "merged": {
             "n_frames": merged_frame_count,
             "clustered_frames": int(merged_clustered_frames),
@@ -1538,7 +1680,6 @@ def generate_cluster_npz_from_descriptors(
         "merged__frame_state_ids": np.array(merged_frame_state_ids),
         "merged__frame_metastable_ids": np.array(merged_frame_meta_ids),
         "merged__frame_indices": np.array(merged_frame_indices, dtype=np.int64),
-        "contact_edge_index": np.zeros((2, 0), dtype=np.int64),
     }
     payload.update(condition_payload)
 
@@ -1556,6 +1697,7 @@ def prepare_cluster_workspace(
     density_maxk: int,
     density_z: float | str | None,
     work_dir: Path,
+    cluster_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Precompute and persist clustering inputs for fan-out chunk jobs."""
     work_dir.mkdir(parents=True, exist_ok=True)
@@ -1594,6 +1736,7 @@ def prepare_cluster_workspace(
     manifest = {
         "project_id": project_id,
         "system_id": system_id,
+        "cluster_id": cluster_id,
         "selected_state_ids": unique_meta_ids,
         "selected_metastable_ids": unique_meta_ids,
         "residue_keys": residue_keys,
@@ -1708,20 +1851,22 @@ def reduce_cluster_workspace(work_dir: Path) -> Tuple[Path, Dict[str, Any]]:
         dp_models.append(dp_data)
 
     store = ProjectStore()
-    dirs = store.ensure_directories(project_id, system_id)
     system_meta = store.get_system(project_id, system_id)
     state_labels, metastable_labels = _build_state_name_maps(system_meta)
     metastable_kinds = _build_metastable_kind_map(system_meta)
-    cluster_dir = dirs["system_dir"] / "metastable" / "clusters"
-    cluster_dir.mkdir(parents=True, exist_ok=True)
-    timestamp = datetime.utcnow().strftime("%Y%m%dT%H%M%S")
-    suffix = "-".join(_slug(mid)[:24] for mid in selected_meta_ids) or "metastable"
-    out_path = cluster_dir / f"{suffix}_clusters_{timestamp}.npz"
+    cluster_id = manifest.get("cluster_id")
+    if cluster_id:
+        out_path = store.ensure_cluster_directories(project_id, system_id, cluster_id)["cluster_dir"] / "cluster.npz"
+    else:
+        dirs = store.ensure_directories(project_id, system_id)
+        cluster_dir = dirs["clusters_dir"]
+        timestamp = datetime.utcnow().strftime("%Y%m%dT%H%M%S")
+        suffix = "-".join(_slug(mid)[:24] for mid in selected_meta_ids) or "cluster"
+        out_path = cluster_dir / f"{suffix}_clusters_{timestamp}.npz"
 
     frame_state_ids = np.load(work_dir / manifest["frame_state_ids_path"], allow_pickle=True)
     frame_meta_ids = np.load(work_dir / manifest["frame_meta_ids_path"], allow_pickle=True)
     frame_indices = np.load(work_dir / manifest["frame_indices_path"], allow_pickle=True)
-    contact_edge_index = np.load(work_dir / manifest["contact_edge_index_path"], allow_pickle=True)
     contact_sources = manifest.get("contact_sources") or []
 
     condition_payload, predictions_meta, extra_meta = _build_condition_predictions(
@@ -1743,7 +1888,6 @@ def reduce_cluster_workspace(work_dir: Path) -> Tuple[Path, Dict[str, Any]]:
         "selected_state_ids": selected_meta_ids,
         "selected_metastable_ids": selected_meta_ids,
         "analysis_mode": getattr(system_meta, "analysis_mode", None),
-        "state_labels": state_labels,
         "metastable_labels": metastable_labels,
         "metastable_kinds": metastable_kinds,
         "cluster_algorithm": "density_peaks",
@@ -1753,7 +1897,6 @@ def reduce_cluster_workspace(work_dir: Path) -> Tuple[Path, Dict[str, Any]]:
         "residue_mapping": residue_mapping,
         "random_state": cluster_params.get("random_state"),
         "contact_sources": contact_sources,
-        "contact_edge_count": int(contact_edge_index.shape[1]) if contact_edge_index.ndim == 2 else 0,
         "merged": {
             "n_frames": n_frames,
             "clustered_frames": int(merged_clustered_frames),
@@ -1772,16 +1915,31 @@ def reduce_cluster_workspace(work_dir: Path) -> Tuple[Path, Dict[str, Any]]:
 
     payload = {
         "residue_keys": np.array(residue_keys),
-        "metadata_json": np.array(json.dumps(metadata)),
         "merged__labels": merged_labels_halo,
         "merged__labels_assigned": merged_labels_assigned,
         "merged__cluster_counts": merged_counts,
         "merged__frame_state_ids": frame_state_ids,
         "merged__frame_metastable_ids": frame_meta_ids,
         "merged__frame_indices": frame_indices,
-        "contact_edge_index": contact_edge_index,
     }
     payload.update(condition_payload)
+    model_dir = out_path.parent / "models"
+    model_dir.mkdir(parents=True, exist_ok=True)
+    model_paths: List[str | None] = []
+    for idx, dp_data in enumerate(dp_models):
+        if dp_data is None:
+            model_paths.append(None)
+            continue
+        model_path = model_dir / f"res_{idx:04d}.pkl"
+        with open(model_path, "wb") as outp:
+            pickle.dump(dp_data, outp, pickle.HIGHEST_PROTOCOL)
+        try:
+            rel = str(model_path.relative_to(store.ensure_directories(project_id, system_id)["system_dir"]))
+        except Exception:
+            rel = str(model_path)
+        model_paths.append(rel)
+    metadata["model_paths"] = model_paths
+    payload["metadata_json"] = np.array(json.dumps(metadata))
 
     np.savez_compressed(out_path, **payload)
     return out_path, metadata
