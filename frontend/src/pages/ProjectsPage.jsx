@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Plus, X } from 'lucide-react';
+import { Download, Plus, X } from 'lucide-react';
 import Loader from '../components/common/Loader';
 import ErrorMessage from '../components/common/ErrorMessage';
 import ProjectForm from '../components/projects/ProjectForm';
@@ -9,6 +9,7 @@ import SystemList from '../components/projects/SystemList';
 import EmptyState from '../components/common/EmptyState';
 import {
   fetchProjects,
+  downloadProjectsDump,
   createProject,
   listSystems,
   createSystem,
@@ -26,6 +27,8 @@ export default function ProjectsPage() {
   const [actionMessage, setActionMessage] = useState(null);
   const [showProjectForm, setShowProjectForm] = useState(false);
   const [showSystemForm, setShowSystemForm] = useState(false);
+  const [isDumping, setIsDumping] = useState(false);
+  const [dumpError, setDumpError] = useState(null);
 
   useEffect(() => {
     const loadProjects = async () => {
@@ -112,6 +115,29 @@ export default function ProjectsPage() {
     }
   };
 
+  const handleDownloadDump = async () => {
+    setIsDumping(true);
+    setDumpError(null);
+    try {
+      const blob = await downloadProjectsDump();
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+      link.href = url;
+      link.download = `projects_dump_${stamp}.zip`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(url);
+      setActionMessage('Projects dump downloaded.');
+      setTimeout(() => setActionMessage(null), 4000);
+    } catch (err) {
+      setDumpError(err.message || 'Failed to download projects dump.');
+    } finally {
+      setIsDumping(false);
+    }
+  };
+
   const selectedProject = projects.find((p) => p.project_id === selectedProjectId);
 
   return (
@@ -160,27 +186,39 @@ export default function ProjectsPage() {
               {selectedProject?.description || 'Descriptor systems are grouped per project.'}
             </p>
           </div>
-          {selectedProject && (
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={() => setShowSystemForm(true)}
-                className="inline-flex items-center justify-center rounded-md border border-cyan-500 text-cyan-300 hover:bg-cyan-500/10 p-2"
-                aria-label="Create system"
-              >
-                <Plus className="h-4 w-4" />
-              </button>
-              <button
-                onClick={handleDeleteProject}
-                className="text-sm px-3 py-1 rounded-md border border-red-500 text-red-300 hover:bg-red-500/10"
-              >
-                Delete Project
-              </button>
-            </div>
-          )}
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={handleDownloadDump}
+              disabled={isDumping}
+              className="inline-flex items-center gap-2 rounded-md border border-gray-600 text-gray-200 hover:bg-gray-700/60 px-3 py-1 text-sm disabled:opacity-60"
+            >
+              <Download className="h-4 w-4" />
+              {isDumping ? 'Preparing...' : 'Dump projects'}
+            </button>
+            {selectedProject && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => setShowSystemForm(true)}
+                  className="inline-flex items-center justify-center rounded-md border border-cyan-500 text-cyan-300 hover:bg-cyan-500/10 p-2"
+                  aria-label="Create system"
+                >
+                  <Plus className="h-4 w-4" />
+                </button>
+                <button
+                  onClick={handleDeleteProject}
+                  className="text-sm px-3 py-1 rounded-md border border-red-500 text-red-300 hover:bg-red-500/10"
+                >
+                  Delete Project
+                </button>
+              </>
+            )}
+          </div>
         </div>
 
         {error && <ErrorMessage message={error} />}
+        {dumpError && <ErrorMessage message={dumpError} />}
         {actionMessage && <p className="text-sm text-emerald-400">{actionMessage}</p>}
 
         <div>

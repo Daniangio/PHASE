@@ -1,4 +1,5 @@
 import json
+import re
 import uuid
 from typing import List, Optional
 
@@ -40,6 +41,7 @@ async def create_system_with_descriptors(
     state_names: Optional[str] = Form(None),
     residue_selections_text: Optional[str] = Form(None),
     residue_selections_json: Optional[str] = Form(None),
+    use_slug_ids: Optional[bool] = Form(False),
     pdb_files: List[UploadFile] = File(...),
 ):
     try:
@@ -63,8 +65,23 @@ async def create_system_with_descriptors(
         expect_json=bool(residue_selections_json and not residue_selections_text),
     )
     try:
+        system_id = None
+        if use_slug_ids and name:
+            slug = re.sub(r"[^A-Za-z0-9]+", "_", name.strip().lower()).strip("_")
+            if slug:
+                existing = set(project_store.get_project(project_id).systems or [])
+                system_id = slug
+                if system_id in existing:
+                    idx = 2
+                    while f"{slug}-{idx}" in existing:
+                        idx += 1
+                    system_id = f"{slug}-{idx}"
         system_meta = project_store.create_system(
-            project_id, name=name, description=description, residue_selections=residue_selections
+            project_id,
+            name=name,
+            description=description,
+            residue_selections=residue_selections,
+            system_id=system_id,
         )
     except Exception as exc:  # pragma: no cover
         raise HTTPException(status_code=500, detail=f"Failed to create system: {exc}") from exc

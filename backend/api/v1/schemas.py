@@ -23,6 +23,7 @@ class ProjectCreateRequest(BaseModel):
     """Request payload for creating a new project."""
     name: str
     description: Optional[str] = None
+    use_slug_ids: Optional[bool] = False
 
 
 class AnalysisJobBase(BaseModel):
@@ -72,6 +73,7 @@ class PottsFitJobRequest(BaseModel):
     project_id: str
     system_id: str
     cluster_id: str
+    model_name: Optional[str] = None
     fit_method: Optional[str] = None
     contact_cutoff: Optional[float] = None
     contact_atom_mode: Optional[str] = None

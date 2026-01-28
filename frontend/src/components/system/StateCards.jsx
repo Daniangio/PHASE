@@ -12,7 +12,7 @@ export function StateCard({
   processing,
 }) {
   const [file, setFile] = useState(null);
-  const [stride, setStride] = useState(state?.stride || 1);
+  const [sliceSpec, setSliceSpec] = useState(state?.slice_spec || '');
   const [residueSelection, setResidueSelection] = useState(state?.residue_selection || '');
 
   const descriptorLabel = state?.descriptor_file ? 'Ready' : 'Not built';
@@ -45,8 +45,8 @@ export function StateCard({
           <dd>{state?.n_frames ?? 0}</dd>
         </div>
         <div className="flex justify-between">
-          <dt>Stride</dt>
-          <dd>{state?.stride ?? 1}</dd>
+          <dt>Slice</dt>
+          <dd>{state?.slice_spec || `::${state?.stride ?? 1}`}</dd>
         </div>
         <div className="flex justify-between">
           <dt>Descriptors</dt>
@@ -79,14 +79,15 @@ export function StateCard({
           />
         </div>
         <div>
-          <label className="block text-sm text-gray-300 mb-1">Stride</label>
+          <label className="block text-sm text-gray-300 mb-1">Frame slice (start:stop:step)</label>
           <input
-            type="number"
-            min={1}
-            value={stride}
-            onChange={(e) => setStride(Number(e.target.value) || 1)}
+            type="text"
+            value={sliceSpec}
+            onChange={(e) => setSliceSpec(e.target.value)}
+            placeholder="e.g. 0:10000:10 or ::5"
             className="w-full bg-gray-800 border border-gray-700 rounded-md px-2 py-1 text-white"
           />
+          <p className="text-[11px] text-gray-500 mt-1">Leave blank for full trajectory. Single number = step.</p>
         </div>
         <div>
           <label className="block text-sm text-gray-300 mb-1">Residue filter (MDAnalysis)</label>
@@ -100,7 +101,7 @@ export function StateCard({
           <p className="text-[11px] text-gray-500 mt-1">Applied as: protein and (&lt;filter&gt;).</p>
         </div>
         <button
-          onClick={() => onUpload(state.state_id, file, stride, residueSelection)}
+          onClick={() => onUpload(state.state_id, file, sliceSpec, residueSelection)}
           disabled={uploading || !file}
           className="w-full bg-cyan-600 hover:bg-cyan-500 text-white font-semibold py-2 rounded-md transition-colors disabled:opacity-50"
         >

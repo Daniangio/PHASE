@@ -12,6 +12,7 @@ from backend.api.v1.common import (
     serialize_system,
 )
 from backend.services.metastable import recompute_metastable_states
+from backend.services.state_utils import build_analysis_states
 
 
 router = APIRouter()
@@ -133,6 +134,7 @@ async def clear_metastable_states(project_id: str, system_id: str):
     system_meta.metastable_model_dir = None
     system_meta.metastable_locked = False
     system_meta.analysis_mode = "macro"
+    system_meta.analysis_states = build_analysis_states(system_meta)
     project_store.save_system(system_meta)
     return serialize_system(system_meta)
 
@@ -238,5 +240,6 @@ async def rename_metastable_state(
         raise HTTPException(status_code=404, detail=f"Metastable state '{metastable_id}' not found.")
 
     system_meta.metastable_states = metas
+    system_meta.analysis_states = build_analysis_states(system_meta)
     project_store.save_system(system_meta)
     return {"metastable_states": metas}

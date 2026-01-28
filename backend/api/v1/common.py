@@ -16,6 +16,8 @@ from fastapi.concurrency import run_in_threadpool
 
 from backend.services.descriptors import save_descriptor_npz
 from backend.services.preprocessing import DescriptorPreprocessor
+from backend.services.selection_utils import build_residue_selection_config
+from backend.services.state_utils import build_analysis_states
 from backend.services.project_store import (
     DescriptorState,
     ProjectMetadata,
@@ -93,25 +95,6 @@ def parse_residue_selections(raw_value: Optional[str], expect_json: bool = False
     return lines or None
 
 
-def build_residue_selection_config(
-    *,
-    base_selections: Optional[SelectionInput],
-    residue_filter: Optional[str],
-) -> Optional[SelectionInput]:
-    """
-    If a residue_filter is provided, build a selection list that intersects
-    protein residues with the filter and expands to singles. Otherwise, fall
-    back to the base selections (or None for default protein selection).
-    """
-    if residue_filter is None:
-        return base_selections
-    selection = residue_filter.strip()
-    if not selection:
-        return base_selections
-    combined = f"protein and ({selection})"
-    return [f"{combined} [singles]"]
-
-
 def get_state_or_404(system_meta: SystemMetadata, state_id: str) -> DescriptorState:
     state = system_meta.states.get(state_id)
     if not state:
@@ -139,6 +122,7 @@ def refresh_system_metadata(system_meta: SystemMetadata) -> None:
     for state in system_meta.states.values():
         all_keys.update(state.residue_keys or [])
     system_meta.descriptor_keys = sorted(all_keys)
+    system_meta.analysis_states = build_analysis_states(system_meta)
     update_system_status(system_meta)
 
 

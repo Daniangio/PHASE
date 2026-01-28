@@ -4,14 +4,22 @@ import time
 import traceback
 import shutil
 import re
+import sys
+import uuid
 from pathlib import Path
 from datetime import datetime
 from rq import Queue, Worker, get_current_job
 from rq.job import Job
 from typing import Dict, Any, List
+# Ensure local repo modules shadow any installed package copies.
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 from phase.pipeline.runner import run_analysis
 from phase.simulation.main import parse_args as parse_simulation_args
 from phase.simulation.main import run_pipeline as run_simulation_pipeline
+from phase.simulation import main as sim_main
 from backend.services.metastable_clusters import (
     generate_metastable_cluster_npz,
     prepare_cluster_workspace,
@@ -19,6 +27,7 @@ from backend.services.metastable_clusters import (
     run_cluster_chunk,
     assign_cluster_labels_to_states,
     update_cluster_metadata_with_assignments,
+    build_cluster_output_path,
 )
 from backend.services.backmapping_npz import build_backmapping_npz
 from backend.services.project_store import ProjectStore
@@ -65,15 +74,21 @@ def _sanitize_model_filename(name: str) -> str:
     return safe or "potts_model"
 
 
+def _supports_sim_arg(option: str) -> bool:
+    try:
+        parser = sim_main._build_arg_parser()
+    except Exception:
+        return False
+    return option in parser._option_string_actions
+
+
 def _collect_contact_pdbs(system_meta, selected_ids: List[str], analysis_mode: str | None) -> List[str]:
     pdbs: List[str] = []
-    if (analysis_mode or "").lower() == "macro":
-        for state_id in selected_ids:
-            state = (system_meta.states or {}).get(state_id)
-            if state and state.pdb_file:
-                pdbs.append(state.pdb_file)
-        return pdbs
-
+    # Always allow macro-state IDs in the selection.
+    for state_id in selected_ids:
+        state = (system_meta.states or {}).get(state_id)
+        if state and state.pdb_file:
+            pdbs.append(state.pdb_file)
     meta_by_id = {}
     for meta in system_meta.metastable_states or []:
         meta_id = meta.get("metastable_id") or meta.get("id")
@@ -150,6 +165,9 @@ def _persist_potts_model(
     )
 
     dest_path = None
+    model_id = entry.get("potts_model_id") if isinstance(entry, dict) else None
+    if not model_id:
+        model_id = str(uuid.uuid4())
     if isinstance(existing_path, str) and existing_path:
         try:
             dest_path = project_store.resolve_path(project_id, system_id, existing_path)
@@ -158,13 +176,15 @@ def _persist_potts_model(
     if dest_path is None:
         base_name = _sanitize_model_filename(display_name)
         filename = f"{base_name}.npz"
-        dest_path = model_dir / filename
+        model_bucket = model_dir / model_id
+        model_bucket.mkdir(parents=True, exist_ok=True)
+        dest_path = model_bucket / filename
         if dest_path.exists():
             suffix = cluster_id[:8]
-            dest_path = model_dir / f"{base_name}-{suffix}.npz"
+            dest_path = model_bucket / f"{base_name}-{suffix}.npz"
             counter = 2
             while dest_path.exists():
-                dest_path = model_dir / f"{base_name}-{suffix}-{counter}.npz"
+                dest_path = model_bucket / f"{base_name}-{suffix}-{counter}.npz"
                 counter += 1
     if model_path.resolve() != dest_path.resolve():
         shutil.copy2(model_path, dest_path)
@@ -177,6 +197,7 @@ def _persist_potts_model(
         system_id,
         cluster_id,
         {
+            "potts_model_id": model_id,
             "potts_model_path": rel_path,
             "potts_model_name": display_name,
             "potts_model_updated_at": datetime.utcnow().isoformat(),
@@ -524,17 +545,29 @@ def run_simulation_job(
         contact_pdbs = _resolve_contact_pdbs(
             project_id,
             system_id,
-            _collect_contact_pdbs(system_meta, entry.get("metastable_ids") or [], system_meta.analysis_mode),
+            _collect_contact_pdbs(
+                system_meta,
+                entry.get("state_ids") or entry.get("metastable_ids") or [],
+                system_meta.analysis_mode,
+            ),
         )
         if contact_pdbs:
-            args_list += [
-                "--pdbs",
-                ",".join(str(p) for p in contact_pdbs),
-                "--contact-cutoff",
-                str(float(contact_cutoff)),
-                "--contact-atom-mode",
-                str(contact_mode),
-            ]
+            pdb_flag = None
+            if _supports_sim_arg("--pdbs"):
+                pdb_flag = "--pdbs"
+            elif _supports_sim_arg("--contact-pdb"):
+                pdb_flag = "--contact-pdb"
+            if pdb_flag:
+                args_list += [
+                    pdb_flag,
+                    ",".join(str(p) for p in contact_pdbs),
+                    "--contact-cutoff",
+                    str(float(contact_cutoff)),
+                    "--contact-atom-mode",
+                    str(contact_mode),
+                ]
+            else:
+                print("[potts-fit] warning: simulation args do not support contact PDBs; skipping edge build.")
 
         if gibbs_method == "rex":
             if isinstance(rex_betas, str) and rex_betas.strip():
@@ -773,9 +806,30 @@ def run_potts_fit_job(
             raise FileNotFoundError(f"Cluster NPZ file is missing on disk: {cluster_path}")
 
         dirs = project_store.ensure_directories(project_id, system_id)
-        model_path = dirs["potts_models_dir"] / f"{cluster_id}_potts_model.npz"
-
         fit_params = dict(params or {})
+        model_name = fit_params.get("model_name")
+        if model_name and isinstance(entry, dict):
+            entry["potts_model_name"] = str(model_name).strip()
+            project_store.save_system(system_meta)
+
+        model_id = entry.get("potts_model_id") if isinstance(entry, dict) else None
+        if not model_id:
+            model_id = str(uuid.uuid4())
+            if isinstance(entry, dict):
+                entry["potts_model_id"] = model_id
+                project_store.save_system(system_meta)
+        display_name = None
+        if isinstance(entry, dict):
+            display_name = entry.get("potts_model_name")
+            cluster_name = entry.get("name")
+            if not display_name and isinstance(cluster_name, str) and cluster_name.strip():
+                display_name = f"{cluster_name} Potts Model"
+        if not display_name:
+            display_name = f"{cluster_id} Potts Model"
+        model_dir = dirs["potts_models_dir"] / model_id
+        model_dir.mkdir(parents=True, exist_ok=True)
+        model_path = model_dir / f"{_sanitize_model_filename(display_name)}.npz"
+
         args_list = [
             "--npz",
             str(cluster_path),
@@ -795,17 +849,29 @@ def run_potts_fit_job(
         contact_pdbs = _resolve_contact_pdbs(
             project_id,
             system_id,
-            _collect_contact_pdbs(system_meta, entry.get("metastable_ids") or [], system_meta.analysis_mode),
+            _collect_contact_pdbs(
+                system_meta,
+                entry.get("state_ids") or entry.get("metastable_ids") or [],
+                system_meta.analysis_mode,
+            ),
         )
         if contact_pdbs:
-            args_list += [
-                "--pdbs",
-                ",".join(str(p) for p in contact_pdbs),
-                "--contact-cutoff",
-                str(float(contact_cutoff)),
-                "--contact-atom-mode",
-                str(contact_mode),
-            ]
+            pdb_flag = None
+            if _supports_sim_arg("--pdbs"):
+                pdb_flag = "--pdbs"
+            elif _supports_sim_arg("--contact-pdb"):
+                pdb_flag = "--contact-pdb"
+            if pdb_flag:
+                args_list += [
+                    pdb_flag,
+                    ",".join(str(p) for p in contact_pdbs),
+                    "--contact-cutoff",
+                    str(float(contact_cutoff)),
+                    "--contact-atom-mode",
+                    str(contact_mode),
+                ]
+            else:
+                print("[potts-sample] warning: simulation args do not support contact PDBs; skipping edge build.")
 
         for key, flag in (
             ("plm_epochs", "--plm-epochs"),
@@ -972,15 +1038,25 @@ def run_cluster_job(
             {"status": "running", "started_at": start_time.isoformat()},
         )
 
-        meta_ids = params.get("metastable_ids") or []
+        meta_ids = params.get("state_ids") or params.get("metastable_ids") or []
         if not meta_ids:
-            raise ValueError("Provide at least one metastable_id.")
+            raise ValueError("Provide at least one state_id.")
+
+        cluster_name = params.get("cluster_name")
+        output_path = build_cluster_output_path(
+            project_id,
+            system_id,
+            cluster_id=cluster_id,
+            cluster_name=cluster_name,
+        )
 
         save_progress("Clustering residues...", 10)
         npz_path, meta = generate_metastable_cluster_npz(
             project_id,
             system_id,
             meta_ids,
+            output_path=output_path,
+            cluster_name=cluster_name,
             max_cluster_frames=params.get("max_cluster_frames"),
             random_state=params.get("random_state", 0),
             cluster_algorithm="density_peaks",

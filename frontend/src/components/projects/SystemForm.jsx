@@ -11,6 +11,7 @@ const buildDefaultForm = () => ({
   name: '',
   description: '',
   residueSelections: '',
+  useSlugIds: false,
   states: [createEmptyState()],
 });
 
@@ -68,6 +69,7 @@ export default function SystemForm({ onCreate }) {
       const payload = new FormData();
       if (form.name) payload.append('name', form.name);
       if (form.description) payload.append('description', form.description);
+      payload.append('use_slug_ids', String(Boolean(form.useSlugIds)));
       const selectionsText = form.residueSelections.trim();
       if (selectionsText) {
         payload.append('residue_selections_text', selectionsText);
@@ -117,6 +119,15 @@ export default function SystemForm({ onCreate }) {
           />
         </div>
       </div>
+      <label className="flex items-center gap-2 text-sm text-gray-300">
+        <input
+          type="checkbox"
+          checked={form.useSlugIds}
+          onChange={(e) => handleChange('useSlugIds', e.target.checked)}
+          className="rounded border-gray-600 text-cyan-500 focus:ring-cyan-500"
+        />
+        Use system name as folder ID (slug)
+      </label>
 
       <div className="space-y-3">
         <div className="flex items-center justify-between">

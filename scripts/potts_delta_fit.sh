@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "${ROOT_DIR}/scripts/offline_select.sh"
 if [ -d "${ROOT_DIR}/.venv-potts-fit" ]; then
   DEFAULT_ENV="${ROOT_DIR}/.venv-potts-fit"
 elif [ -d "${ROOT_DIR}/.venv" ]; then
@@ -56,13 +57,12 @@ fi
 
 PYTHON_BIN="${VENV_DIR}/bin/python"
 
-BASE_MODEL="$(prompt "Base Potts model NPZ path (must exist)" "")"
-BASE_MODEL="$(trim "$BASE_MODEL")"
-if [ -z "$BASE_MODEL" ]; then
-  echo "Base model path is required."
-  exit 1
-fi
-if [ ! -f "$BASE_MODEL" ]; then
+offline_prompt_root "${ROOT_DIR}/data"
+offline_select_project
+offline_select_system
+MODEL_ROW="$(offline_select_model)"
+BASE_MODEL="$(printf "%s" "$MODEL_ROW" | awk -F'|' '{print $3}')"
+if [ -z "$BASE_MODEL" ] || [ ! -f "$BASE_MODEL" ]; then
   echo "Base model not found: $BASE_MODEL"
   exit 1
 fi
@@ -81,33 +81,33 @@ ACTIVE_NPZ=""
 INACTIVE_NPZ=""
 
 if [ "$USE_SPLIT" = "true" ]; then
-  ACTIVE_NPZ="$(prompt "Active NPZ path" "")"
-  ACTIVE_NPZ="$(trim "$ACTIVE_NPZ")"
+  ACTIVE_ROW="$(offline_select_descriptor_one)"
+  ACTIVE_NPZ="$(printf "%s" "$ACTIVE_ROW" | awk -F'|' '{print $3}')"
   if [ -z "$ACTIVE_NPZ" ] || [ ! -f "$ACTIVE_NPZ" ]; then
     echo "Active NPZ file is required."
     exit 1
   fi
-  INACTIVE_NPZ="$(prompt "Inactive NPZ path" "")"
-  INACTIVE_NPZ="$(trim "$INACTIVE_NPZ")"
+  INACTIVE_ROW="$(offline_select_descriptor_one)"
+  INACTIVE_NPZ="$(printf "%s" "$INACTIVE_ROW" | awk -F'|' '{print $3}')"
   if [ -z "$INACTIVE_NPZ" ] || [ ! -f "$INACTIVE_NPZ" ]; then
     echo "Inactive NPZ file is required."
     exit 1
   fi
 else
-  NPZ_PATH="$(prompt "Cluster NPZ path" "")"
-  NPZ_PATH="$(trim "$NPZ_PATH")"
+  CLUSTER_ROW="$(offline_select_cluster)"
+  NPZ_PATH="$(printf "%s" "$CLUSTER_ROW" | awk -F'|' '{print $3}')"
   if [ -z "$NPZ_PATH" ] || [ ! -f "$NPZ_PATH" ]; then
     echo "Cluster NPZ file is required."
     exit 1
   fi
-  ACTIVE_STATE="$(prompt "Active state ID (matches frame_state_ids)" "")"
-  ACTIVE_STATE="$(trim "$ACTIVE_STATE")"
+  ACTIVE_ROW="$(offline_select_state_one)"
+  ACTIVE_STATE="$(printf "%s" "$ACTIVE_ROW" | awk -F'|' '{print $1}')"
   if [ -z "$ACTIVE_STATE" ]; then
     echo "Active state ID is required."
     exit 1
   fi
-  INACTIVE_STATE="$(prompt "Inactive state ID (matches frame_state_ids)" "")"
-  INACTIVE_STATE="$(trim "$INACTIVE_STATE")"
+  INACTIVE_ROW="$(offline_select_state_one)"
+  INACTIVE_STATE="$(printf "%s" "$INACTIVE_ROW" | awk -F'|' '{print $1}')"
   if [ -z "$INACTIVE_STATE" ]; then
     echo "Inactive state ID is required."
     exit 1

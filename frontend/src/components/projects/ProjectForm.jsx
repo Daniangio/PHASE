@@ -4,6 +4,7 @@ import ErrorMessage from '../common/ErrorMessage';
 export default function ProjectForm({ onCreate }) {
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
+  const [useSlugIds, setUseSlugIds] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState(null);
 
@@ -12,7 +13,7 @@ export default function ProjectForm({ onCreate }) {
     setIsSubmitting(true);
     setError(null);
     try {
-      await onCreate({ name, description });
+      await onCreate({ name, description, use_slug_ids: useSlugIds });
       setName('');
       setDescription('');
     } catch (err) {
@@ -43,6 +44,15 @@ export default function ProjectForm({ onCreate }) {
           className="w-full bg-gray-900 border border-gray-700 rounded-md px-3 py-2 text-white focus:ring-2 focus:ring-cyan-500"
         />
       </div>
+      <label className="flex items-center gap-2 text-sm text-gray-300">
+        <input
+          type="checkbox"
+          checked={useSlugIds}
+          onChange={(e) => setUseSlugIds(e.target.checked)}
+          className="rounded border-gray-600 text-cyan-500 focus:ring-cyan-500"
+        />
+        Use project name as folder ID (slug)
+      </label>
       <ErrorMessage message={error} />
       <button
         type="submit"

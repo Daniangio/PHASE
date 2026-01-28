@@ -337,8 +337,10 @@ export function ClusterBuildOverlay({
 
               <div className="flex flex-wrap gap-2 text-xs">
                 {metastableStates.map((meta) => {
-                  const key = meta.metastable_id || `${meta.macro_state}-${meta.metastable_index}`;
+                  const key = meta.state_id || meta.metastable_id || `${meta.macro_state}-${meta.metastable_index}`;
                   const active = selectedMetastableIds.includes(key);
+                  const label = meta.name || meta.default_name || meta.macro_state || key;
+                  const kind = meta.kind || (meta.metastable_id ? 'metastable' : 'macro');
                   return (
                     <button
                       key={key}
@@ -350,11 +352,12 @@ export function ClusterBuildOverlay({
                           : 'border-gray-700 text-gray-400 hover:border-gray-500'
                       }`}
                     >
-                      {meta.name || meta.default_name || meta.macro_state || `Meta ${meta.metastable_index}`}
+                      {kind === 'metastable' ? '[Meta] ' : '[Macro] '}
+                      {label}
                     </button>
                   );
                 })}
-                {!hasMetastable && <p className="text-xs text-gray-400">No metastable states available.</p>}
+                {!hasMetastable && <p className="text-xs text-gray-400">No states available.</p>}
               </div>
 
               <div className="grid md:grid-cols-3 gap-3">
@@ -595,7 +598,9 @@ export function ClusterDetailOverlay({
             </p>
             <p>
               <span className="text-gray-300 font-semibold">{stateLabel}:</span>{' '}
-              {Array.isArray(cluster.metastable_ids) ? cluster.metastable_ids.join(', ') : '—'}
+              {Array.isArray(cluster.state_ids || cluster.metastable_ids)
+                ? (cluster.state_ids || cluster.metastable_ids).join(', ')
+                : '—'}
             </p>
             <p>
               <span className="text-gray-300 font-semibold">Max frames:</span> {cluster.max_cluster_frames ?? 'all'}

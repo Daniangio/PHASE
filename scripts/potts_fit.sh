@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "${ROOT_DIR}/scripts/offline_select.sh"
 if [ -d "${ROOT_DIR}/.venv-potts-fit" ]; then
   DEFAULT_ENV="${ROOT_DIR}/.venv-potts-fit"
 elif [ -d "${ROOT_DIR}/.venv" ]; then
@@ -10,7 +11,6 @@ else
   DEFAULT_ENV="${ROOT_DIR}/.venv-potts-fit"
 fi
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
-DEFAULT_RESULTS="${ROOT_DIR}/results/potts_fit_${TIMESTAMP}"
 
 prompt() {
   local label="$1"
@@ -37,6 +37,30 @@ prompt_bool() {
   esac
 }
 
+OFFLINE_ROOT=""
+OFFLINE_PROJECT_ID=""
+OFFLINE_SYSTEM_ID=""
+CLUSTER_ID=""
+NPZ_PATH=""
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --root)
+      OFFLINE_ROOT="$2"; shift 2 ;;
+    --project-id)
+      OFFLINE_PROJECT_ID="$2"; shift 2 ;;
+    --system-id)
+      OFFLINE_SYSTEM_ID="$2"; shift 2 ;;
+    --cluster-id)
+      CLUSTER_ID="$2"; shift 2 ;;
+    --npz)
+      NPZ_PATH="$2"; shift 2 ;;
+    *)
+      echo "Unknown argument: $1" >&2
+      exit 1 ;;
+  esac
+done
+
 if [ -n "${VIRTUAL_ENV:-}" ] && [ -x "${VIRTUAL_ENV}/bin/python" ]; then
   VENV_DIR="${VIRTUAL_ENV}"
   echo "Using active virtual environment at: ${VENV_DIR}"
@@ -52,23 +76,37 @@ fi
 
 PYTHON_BIN="${VENV_DIR}/bin/python"
 
-NPZ_PATH="$(prompt "Cluster NPZ input path (must exist)" "")"
-NPZ_PATH="$(printf "%s" "$NPZ_PATH" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
-if [ -z "$NPZ_PATH" ]; then
-  echo "Cluster NPZ path is required."
-  exit 1
+if [ -z "$OFFLINE_ROOT" ]; then
+  offline_prompt_root "${ROOT_DIR}/data"
+else
+  OFFLINE_ROOT="$(trim "$OFFLINE_ROOT")"
+  export PHASE_DATA_ROOT="$OFFLINE_ROOT"
 fi
-NPZ_DIR="$(dirname "$NPZ_PATH")"
-if [ ! -d "$NPZ_DIR" ]; then
-  mkdir -p "$NPZ_DIR"
+
+if [ -z "$OFFLINE_PROJECT_ID" ]; then
+  offline_select_project
 fi
-if [ ! -f "$NPZ_PATH" ]; then
+
+if [ -z "$OFFLINE_SYSTEM_ID" ]; then
+  offline_select_system
+fi
+
+if [ -z "$NPZ_PATH" ] || [ -z "$CLUSTER_ID" ]; then
+  CLUSTER_ROW="$(offline_select_cluster)"
+  CLUSTER_ID="$(printf "%s" "$CLUSTER_ROW" | awk -F'|' '{print $1}')"
+  NPZ_PATH="$(printf "%s" "$CLUSTER_ROW" | awk -F'|' '{print $3}')"
+fi
+
+if [ -z "$NPZ_PATH" ] || [ ! -f "$NPZ_PATH" ]; then
   echo "Cluster NPZ not found: $NPZ_PATH"
   exit 1
 fi
 
-RESULTS_DIR="$(prompt "Results directory" "${DEFAULT_RESULTS}")"
+SYSTEM_DIR="${OFFLINE_ROOT}/projects/${OFFLINE_PROJECT_ID}/systems/${OFFLINE_SYSTEM_ID}"
+RESULTS_DIR="${SYSTEM_DIR}/tmp/potts_fit_${TIMESTAMP}"
+
 FIT_METHOD="$(prompt "Fit method (pmi/plm/pmi+plm)" "pmi+plm")"
+MODEL_NAME="$(prompt "Model name" "")"
 
 CONTACT_ALL="false"
 CONTACT_PDBS=""
@@ -77,12 +115,12 @@ CONTACT_CUTOFF="10.0"
 if prompt_bool "Use all-vs-all edges? (y/N)" "N"; then
   CONTACT_ALL="true"
 else
-  CONTACT_PDBS="$(prompt "Contact PDB paths (comma separated)" "")"
-  CONTACT_PDBS="$(printf "%s" "$CONTACT_PDBS" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
-  if [ -z "$CONTACT_PDBS" ]; then
-    echo "Contact PDB paths are required unless using all-vs-all."
+  PDB_ROWS="$(offline_select_pdbs)"
+  if [ -z "$PDB_ROWS" ]; then
+    echo "Select at least one PDB unless using all-vs-all."
     exit 1
   fi
+  CONTACT_PDBS="$(printf "%s\n" "$PDB_ROWS" | awk -F'|' '{print $3}' | paste -sd, -)"
   CONTACT_MODE="$(prompt "Contact mode (CA/CM)" "CA")"
   CONTACT_MODE="$(printf "%s" "$CONTACT_MODE" | tr '[:lower:]' '[:upper:]')"
   CONTACT_CUTOFF="$(prompt "Contact cutoff (A)" "10.0")"
@@ -112,12 +150,18 @@ if [ "$FIT_METHOD" != "pmi" ]; then
 fi
 
 CMD=(
-  "$PYTHON_BIN" -m phase.simulation.main
+  "$PYTHON_BIN" -m phase.scripts.potts_fit
   --npz "$NPZ_PATH"
   --results-dir "$RESULTS_DIR"
   --fit-only
   --fit "$FIT_METHOD"
+  --project-id "$OFFLINE_PROJECT_ID"
+  --system-id "$OFFLINE_SYSTEM_ID"
+  --cluster-id "$CLUSTER_ID"
 )
+if [ -n "$MODEL_NAME" ]; then
+  CMD+=(--model-name "$MODEL_NAME")
+fi
 
 if [ "$CONTACT_ALL" = "true" ]; then
   CMD+=(--contact-all-vs-all)
@@ -145,4 +189,5 @@ fi
 echo "Running Potts fit..."
 PYTHONPATH="${ROOT_DIR}:${PYTHONPATH:-}" "${CMD[@]}"
 
-echo "Done. Potts model saved in: ${RESULTS_DIR}/potts_model.npz"
+echo "Done. Results in: ${RESULTS_DIR}"
+echo "Potts model saved under system potts_models (system metadata updated)."

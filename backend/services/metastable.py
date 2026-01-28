@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional
 
 from phase.analysis.vamp_pipeline import run_metastable_pipeline_for_system
 from backend.services.project_store import ProjectStore, SystemMetadata, DescriptorState
+from backend.services.state_utils import build_analysis_states
 
 
 def _rel_or_none(path: Optional[Path], root: Path) -> Optional[str]:
@@ -106,6 +107,7 @@ def recompute_metastable_states(
 
     system.metastable_states = metastable_states
     system.metastable_model_dir = _rel_or_none(output_dir, system_dir)
+    system.analysis_states = build_analysis_states(system)
     store.save_system(system)
 
     return {

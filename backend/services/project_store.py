@@ -82,6 +82,7 @@ class SystemMetadata:
     metastable_model_dir: Optional[str] = None
     metastable_states: List[Dict[str, Any]] = field(default_factory=list)
     metastable_clusters: List[Dict[str, Any]] = field(default_factory=list)
+    analysis_states: List[Dict[str, Any]] = field(default_factory=list)
     states: Dict[str, DescriptorState] = field(default_factory=dict)
 
 
@@ -113,8 +114,13 @@ class ProjectStore:
     def _project_meta_path(self, project_id: str) -> Path:
         return self._project_dir(project_id) / "project.json"
 
-    def create_project(self, name: str, description: Optional[str] = None) -> ProjectMetadata:
-        project_id = str(uuid.uuid4())
+    def create_project(
+        self,
+        name: str,
+        description: Optional[str] = None,
+        project_id: Optional[str] = None,
+    ) -> ProjectMetadata:
+        project_id = project_id or str(uuid.uuid4())
         project_dir = self._project_dir(project_id)
         project_dir.mkdir(parents=True, exist_ok=False)
 
@@ -214,9 +220,10 @@ class ProjectStore:
         name: Optional[str] = None,
         description: Optional[str] = None,
         residue_selections: Optional[SelectionInput] = None,
+        system_id: Optional[str] = None,
     ) -> SystemMetadata:
         project_meta = self.get_project(project_id)
-        system_id = str(uuid.uuid4())
+        system_id = system_id or str(uuid.uuid4())
         system_dir = self._system_dir(project_id, system_id)
         system_dir.mkdir(parents=True, exist_ok=False)
         (system_dir / "structures").mkdir(parents=True, exist_ok=True)

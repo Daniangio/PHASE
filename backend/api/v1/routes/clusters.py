@@ -17,6 +17,8 @@ from backend.services.metastable_clusters import (
     generate_metastable_cluster_npz,
     assign_cluster_labels_to_states,
     update_cluster_metadata_with_assignments,
+    build_cluster_entry,
+    build_cluster_output_path,
     _slug,
 )
 from backend.services.backmapping_npz import build_backmapping_npz
@@ -64,13 +66,15 @@ def _decode_metadata_json(meta_raw: Any) -> Dict[str, Any]:
 
 
 def _parse_cluster_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
-    metastable_ids_raw = (payload or {}).get("metastable_ids") or []
+    metastable_ids_raw = (payload or {}).get("state_ids")
+    if metastable_ids_raw is None:
+        metastable_ids_raw = (payload or {}).get("metastable_ids") or []
     cluster_name = (payload or {}).get("cluster_name")
     if not isinstance(metastable_ids_raw, list):
-        raise HTTPException(status_code=400, detail="metastable_ids must be a list.")
+        raise HTTPException(status_code=400, detail="state_ids must be a list.")
     metastable_ids = [str(mid).strip() for mid in metastable_ids_raw if str(mid).strip()]
     if not metastable_ids:
-        raise HTTPException(status_code=400, detail="Provide at least one metastable_id.")
+        raise HTTPException(status_code=400, detail="Provide at least one state_id.")
 
     max_cluster_frames = None
     if (payload or {}).get("max_cluster_frames") is not None:
@@ -109,6 +113,7 @@ def _parse_cluster_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
             raise HTTPException(status_code=400, detail="density_peaks Z must be a number or 'auto'.")
 
     return {
+        "state_ids": metastable_ids,
         "metastable_ids": metastable_ids,
         "cluster_name": cluster_name,
         "max_cluster_frames": max_cluster_frames,
@@ -128,25 +133,19 @@ def _build_algorithm_params(parsed: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _build_cluster_entry(parsed: Dict[str, Any], cluster_id: str, status: str, progress: int, status_message: str):
-    return {
-        "cluster_id": cluster_id,
-        "name": parsed["cluster_name"].strip()
-        if isinstance(parsed["cluster_name"], str) and parsed["cluster_name"].strip()
+    entry = build_cluster_entry(
+        cluster_id=cluster_id,
+        cluster_name=parsed.get("cluster_name").strip()
+        if isinstance(parsed.get("cluster_name"), str) and parsed.get("cluster_name").strip()
         else None,
-        "status": status,
-        "progress": progress,
-        "status_message": status_message,
-        "job_id": None,
-        "created_at": datetime.utcnow().isoformat(),
-        "path": None,
-        "metastable_ids": parsed["metastable_ids"],
-        "max_cluster_frames": parsed["max_cluster_frames"],
-        "random_state": parsed["random_state"],
-        "generated_at": None,
-        "contact_edge_count": None,
-        "cluster_algorithm": parsed["cluster_algorithm"],
-        "algorithm_params": _build_algorithm_params(parsed),
-    }
+        state_ids=parsed.get("state_ids") or parsed.get("metastable_ids") or [],
+        max_cluster_frames=parsed.get("max_cluster_frames"),
+        random_state=parsed.get("random_state", 0),
+        density_maxk=parsed.get("density_maxk"),
+        density_z=parsed.get("density_z"),
+    )
+    entry.update({"status": status, "progress": progress, "status_message": status_message})
+    return entry
 
 
 @router.post(
@@ -174,6 +173,14 @@ async def build_metastable_cluster_vectors(
         )
 
     parsed = _parse_cluster_payload(payload)
+    cluster_id = str(uuid.uuid4())
+    cluster_name = parsed.get("cluster_name")
+    output_path = build_cluster_output_path(
+        project_id,
+        system_id,
+        cluster_id=cluster_id,
+        cluster_name=cluster_name,
+    )
 
     try:
         if logger:
@@ -181,7 +188,7 @@ async def build_metastable_cluster_vectors(
                 "[cluster_build] project=%s system=%s meta_ids=%s algo=%s params=%s",
                 project_id,
                 system_id,
-                parsed["metastable_ids"],
+                parsed["state_ids"],
                 parsed["cluster_algorithm"],
                 {
                     "random_state": parsed["random_state"],
@@ -193,7 +200,9 @@ async def build_metastable_cluster_vectors(
             generate_metastable_cluster_npz,
             project_id,
             system_id,
-            parsed["metastable_ids"],
+            parsed["state_ids"],
+            output_path=output_path,
+            cluster_name=cluster_name,
             max_cluster_frames=parsed["max_cluster_frames"],
             random_state=parsed["random_state"],
             cluster_algorithm=parsed["cluster_algorithm"],
@@ -218,7 +227,6 @@ async def build_metastable_cluster_vectors(
     assignments = assign_cluster_labels_to_states(npz_path, project_id, system_id)
     update_cluster_metadata_with_assignments(npz_path, assignments)
 
-    cluster_id = str(uuid.uuid4())
     cluster_entry = _build_cluster_entry(parsed, cluster_id, "finished", 100, "Complete")
     cluster_entry.update(
         {
@@ -574,6 +582,7 @@ async def upload_metastable_cluster_npz(
             "frame_count": entry.get("frame_count", None),
         }
 
+    meta["selected_state_ids"] = parsed_state_ids
     meta["selected_metastable_ids"] = parsed_state_ids
     meta["analysis_mode"] = "macro"
     meta["state_labels"] = {
@@ -611,7 +620,8 @@ async def upload_metastable_cluster_npz(
 
     cluster_id = str(uuid.uuid4())
     final_name = name.strip() if isinstance(name, str) and name.strip() else None
-    out_path = cluster_dir / f"{cluster_id}_uploaded.npz"
+    name_slug = _slug(final_name) if final_name else "cluster"
+    out_path = cluster_dir / f"{name_slug}__{cluster_id}.npz"
     np.savez_compressed(out_path, **payload)
 
     assignments = assign_cluster_labels_to_states(out_path, project_id, system_id)
@@ -626,6 +636,7 @@ async def upload_metastable_cluster_npz(
         "job_id": None,
         "created_at": datetime.utcnow().isoformat(),
         "path": str(out_path.relative_to(dirs["system_dir"])),
+        "state_ids": parsed_state_ids,
         "metastable_ids": parsed_state_ids,
         "max_cluster_frames": meta.get("cluster_params", {}).get("max_cluster_frames"),
         "random_state": meta.get("cluster_params", {}).get("random_state"),
@@ -732,10 +743,14 @@ async def upload_potts_model_npz(
     dirs = project_store.ensure_directories(project_id, system_id)
     system_dir = dirs["system_dir"]
     filename = model.filename or f"{cluster_id}_potts_model.npz"
-    dest_path = dirs["potts_models_dir"] / filename
+    model_id = entry.get("potts_model_id") or str(uuid.uuid4())
+    model_dir = dirs["potts_models_dir"] / model_id
+    model_dir.mkdir(parents=True, exist_ok=True)
+    dest_path = model_dir / filename
     await stream_upload(model, dest_path)
     rel_path = str(dest_path.relative_to(system_dir))
     display_name = Path(filename).stem
+    entry["potts_model_id"] = model_id
     entry["potts_model_path"] = rel_path
     entry["potts_model_updated_at"] = datetime.utcnow().isoformat()
     entry["potts_model_source"] = "upload"

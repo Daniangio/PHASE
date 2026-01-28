@@ -4,6 +4,10 @@ export function fetchProjects() {
   return requestJSON('/projects');
 }
 
+export function downloadProjectsDump() {
+  return requestBlob('/projects/dump');
+}
+
 export function fetchProject(projectId) {
   return requestJSON(`/projects/${projectId}`);
 }
@@ -279,9 +283,9 @@ export function metastablePdbUrl(projectId, systemId, metastableId) {
   )}/pdb`;
 }
 
-export function downloadMetastableClusters(projectId, systemId, metastableIds, params = {}) {
+export function downloadMetastableClusters(projectId, systemId, stateIds, params = {}) {
   const payload = {
-    metastable_ids: metastableIds,
+    state_ids: stateIds,
   };
   if (params.cluster_name) payload.cluster_name = params.cluster_name;
   if (params.max_cluster_frames) payload.max_cluster_frames = params.max_cluster_frames;
@@ -297,9 +301,9 @@ export function downloadMetastableClusters(projectId, systemId, metastableIds, p
   );
 }
 
-export function submitMetastableClusterJob(projectId, systemId, metastableIds, params = {}) {
+export function submitMetastableClusterJob(projectId, systemId, stateIds, params = {}) {
   const payload = {
-    metastable_ids: metastableIds,
+    state_ids: stateIds,
   };
   if (params.cluster_name) payload.cluster_name = params.cluster_name;
   if (params.max_cluster_frames) payload.max_cluster_frames = params.max_cluster_frames;

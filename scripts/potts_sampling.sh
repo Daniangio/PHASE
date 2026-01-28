@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "${ROOT_DIR}/scripts/offline_select.sh"
 if [ -d "${ROOT_DIR}/.venv-potts-fit" ]; then
   DEFAULT_ENV="${ROOT_DIR}/.venv-potts-fit"
 elif [ -d "${ROOT_DIR}/.venv" ]; then
@@ -56,24 +57,19 @@ fi
 
 PYTHON_BIN="${VENV_DIR}/bin/python"
 
-NPZ_PATH="$(prompt "Cluster NPZ input path (must exist)" "")"
-NPZ_PATH="$(trim "$NPZ_PATH")"
-if [ -z "$NPZ_PATH" ]; then
-  echo "Cluster NPZ path is required."
-  exit 1
-fi
-if [ ! -f "$NPZ_PATH" ]; then
+offline_prompt_root "${ROOT_DIR}/data"
+offline_select_project
+offline_select_system
+CLUSTER_ROW="$(offline_select_cluster)"
+NPZ_PATH="$(printf "%s" "$CLUSTER_ROW" | awk -F'|' '{print $3}')"
+if [ -z "$NPZ_PATH" ] || [ ! -f "$NPZ_PATH" ]; then
   echo "Cluster NPZ not found: $NPZ_PATH"
   exit 1
 fi
 
-MODEL_PATH="$(prompt "Potts model NPZ path (must exist)" "")"
-MODEL_PATH="$(trim "$MODEL_PATH")"
-if [ -z "$MODEL_PATH" ]; then
-  echo "Potts model path is required."
-  exit 1
-fi
-if [ ! -f "$MODEL_PATH" ]; then
+MODEL_ROW="$(offline_select_model)"
+MODEL_PATH="$(printf "%s" "$MODEL_ROW" | awk -F'|' '{print $3}')"
+if [ -z "$MODEL_PATH" ] || [ ! -f "$MODEL_PATH" ]; then
   echo "Potts model not found: $MODEL_PATH"
   exit 1
 fi
@@ -85,12 +81,12 @@ CONTACT_CUTOFF="10.0"
 if prompt_bool "Use all-vs-all edges? (y/N)" "N"; then
   CONTACT_ALL="true"
 else
-  CONTACT_PDBS="$(prompt "Contact PDB paths (comma separated)" "")"
-  CONTACT_PDBS="$(trim "$CONTACT_PDBS")"
-  if [ -z "$CONTACT_PDBS" ]; then
-    echo "Contact PDB paths are required unless using all-vs-all."
+  PDB_ROWS="$(offline_select_pdbs)"
+  if [ -z "$PDB_ROWS" ]; then
+    echo "Select at least one PDB unless using all-vs-all."
     exit 1
   fi
+  CONTACT_PDBS="$(printf "%s\n" "$PDB_ROWS" | awk -F'|' '{print $3}' | paste -sd, -)"
   CONTACT_MODE="$(prompt "Contact mode (CA/CM)" "CA")"
   CONTACT_MODE="$(printf "%s" "$CONTACT_MODE" | tr '[:lower:]' '[:upper:]')"
   CONTACT_CUTOFF="$(prompt "Contact cutoff (A)" "10.0")"
@@ -158,7 +154,7 @@ if prompt_bool "Show progress bars? (Y/n)" "Y"; then
 fi
 
 CMD=(
-  "$PYTHON_BIN" -m phase.simulation.main
+  "$PYTHON_BIN" -m phase.scripts.potts_sample
   --npz "$NPZ_PATH"
   --model-npz "$MODEL_PATH"
   --results-dir "$RESULTS_DIR"

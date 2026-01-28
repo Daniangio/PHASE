@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "${ROOT_DIR}/scripts/offline_select.sh"
 if [ -d "${ROOT_DIR}/.venv-potts-fit" ]; then
   DEFAULT_ENV="${ROOT_DIR}/.venv-potts-fit"
 elif [ -d "${ROOT_DIR}/.venv" ]; then
@@ -37,25 +38,57 @@ fi
 
 PYTHON_BIN="${VENV_DIR}/bin/python"
 
-DESCRIPTORS="$(prompt "Descriptor NPZ paths (comma separated)" "")"
-if [ -z "$DESCRIPTORS" ]; then
-  echo "At least one descriptor NPZ path is required."
+OFFLINE_ROOT=""
+OFFLINE_PROJECT_ID=""
+OFFLINE_SYSTEM_ID=""
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --root)
+      OFFLINE_ROOT="$2"; shift 2 ;;
+    --project-id)
+      OFFLINE_PROJECT_ID="$2"; shift 2 ;;
+    --system-id)
+      OFFLINE_SYSTEM_ID="$2"; shift 2 ;;
+    *)
+      echo "Unknown argument: $1" >&2
+      exit 1 ;;
+  esac
+done
+
+if [ -z "$OFFLINE_ROOT" ]; then
+  offline_prompt_root "${ROOT_DIR}/data"
+else
+  OFFLINE_ROOT="$(trim "$OFFLINE_ROOT")"
+  export PHASE_DATA_ROOT="$OFFLINE_ROOT"
+fi
+
+if [ -z "$OFFLINE_PROJECT_ID" ]; then
+  offline_select_project
+fi
+
+if [ -z "$OFFLINE_SYSTEM_ID" ]; then
+  offline_select_system
+fi
+STATE_ROWS="$(offline_select_analysis_states)"
+if [ -z "$STATE_ROWS" ]; then
+  echo "Select at least one state to cluster."
   exit 1
 fi
-EVAL_DESCRIPTORS="$(prompt "Eval-only NPZ paths (comma separated, optional)" "")"
+STATE_IDS="$(printf "%s\n" "$STATE_ROWS" | awk -F'|' '{print $1}' | paste -sd, -)"
+CLUSTER_NAME="$(prompt "Cluster name" "cluster_${OFFLINE_SYSTEM_ID}")"
 N_JOBS="$(prompt "Worker processes (0 = all cpus)" "1")"
 DENSITY_Z="$(prompt "Density z (auto or float)" "auto")"
 
 CMD=(
   "$PYTHON_BIN" -m phase.scripts.cluster_npz
-  --descriptors "$DESCRIPTORS"
+  --project-id "$OFFLINE_PROJECT_ID"
+  --system-id "$OFFLINE_SYSTEM_ID"
+  --state-ids "$STATE_IDS"
+  --cluster-name "$CLUSTER_NAME"
   --n-jobs "$N_JOBS"
   --density-z "$DENSITY_Z"
 )
-
-if [ -n "$EVAL_DESCRIPTORS" ]; then
-  CMD+=(--eval-descriptors "$EVAL_DESCRIPTORS")
-fi
 
 echo "Running clustering..."
 PYTHONPATH="${ROOT_DIR}:${PYTHONPATH:-}" "${CMD[@]}"

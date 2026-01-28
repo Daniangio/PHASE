@@ -17,6 +17,7 @@ from backend.api.v1.common import (
     stream_upload,
     stride_to_slice,
 )
+from backend.services.slice_utils import parse_slice_spec
 from backend.services.project_store import DescriptorState
 
 
@@ -141,6 +142,7 @@ async def upload_state_trajectory(
     state_id: str,
     trajectory: UploadFile = File(...),
     stride: int = Form(1),
+    slice_spec: str = Form(None),
     residue_selection: str = Form(None),
 ):
     try:
@@ -150,8 +152,14 @@ async def upload_state_trajectory(
     ensure_not_macro_locked(system_meta)
 
     state_meta = get_state_or_404(system_meta, state_id)
-    stride_val = normalize_stride(state_meta.name, stride)
-    slice_spec = stride_to_slice(stride_val)
+    if slice_spec:
+        try:
+            slice_spec, stride_val = parse_slice_spec(slice_spec)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid slice spec: {exc}") from exc
+    else:
+        stride_val = normalize_stride(state_meta.name, stride)
+        slice_spec = stride_to_slice(stride_val)
 
     dirs = project_store.ensure_directories(project_id, system_id)
     traj_dir = dirs["trajectories_dir"]

@@ -180,7 +180,11 @@ export default function SimulationAnalysisForm({ clusterRuns, onSubmit }) {
         </select>
         {selectedCluster && (
           <p className="text-xs text-gray-500 mt-1">
-            Metastable: {Array.isArray(selectedCluster.metastable_ids) ? selectedCluster.metastable_ids.join(', ') : '—'} ·
+            States:{' '}
+            {Array.isArray(selectedCluster.state_ids || selectedCluster.metastable_ids)
+              ? (selectedCluster.state_ids || selectedCluster.metastable_ids).join(', ')
+              : '—'}{' '}
+            ·
           </p>
         )}
       </div>

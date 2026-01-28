@@ -24,6 +24,55 @@ def _slug(value: str) -> str:
     return re.sub(r"[^a-zA-Z0-9]+", "_", value).strip("_") or "metastable"
 
 
+def build_cluster_output_path(
+    project_id: str,
+    system_id: str,
+    *,
+    cluster_id: str,
+    cluster_name: Optional[str] = None,
+) -> Path:
+    store = ProjectStore()
+    dirs = store.ensure_directories(project_id, system_id)
+    cluster_dir = dirs["system_dir"] / "metastable" / "clusters"
+    cluster_dir.mkdir(parents=True, exist_ok=True)
+    slug = _slug(cluster_name) if cluster_name else "cluster"
+    return cluster_dir / f"{slug}__{cluster_id}.npz"
+
+
+def build_cluster_entry(
+    *,
+    cluster_id: str,
+    cluster_name: Optional[str],
+    state_ids: List[str],
+    max_cluster_frames: Optional[int],
+    random_state: int,
+    density_maxk: int,
+    density_z: float | str,
+) -> Dict[str, Any]:
+    return {
+        "cluster_id": cluster_id,
+        "name": cluster_name if cluster_name else None,
+        "status": "finished",
+        "progress": 100,
+        "status_message": "Complete",
+        "job_id": None,
+        "created_at": datetime.utcnow().isoformat(),
+        "path": None,
+        "state_ids": state_ids,
+        "metastable_ids": state_ids,
+        "max_cluster_frames": max_cluster_frames,
+        "random_state": random_state,
+        "generated_at": None,
+        "contact_edge_count": None,
+        "cluster_algorithm": "density_peaks",
+        "algorithm_params": {
+            "density_maxk": density_maxk,
+            "density_z": density_z,
+            "max_cluster_frames": max_cluster_frames,
+        },
+    }
+
+
 def _build_state_name_maps(system_meta: SystemMetadata) -> tuple[Dict[str, str], Dict[str, str]]:
     state_labels = {}
     for state_id, state in (system_meta.states or {}).items():
@@ -567,25 +616,23 @@ def _collect_cluster_inputs(
 
     store = ProjectStore()
     system = store.get_system(project_id, system_id)
-    macro_only = getattr(system, "analysis_mode", None) == "macro"
     metastable_lookup = {
         m.get("metastable_id"): {**m, "meta_kind": "metastable"} for m in system.metastable_states or []
     }
-    if macro_only:
-        for st in system.states.values():
-            metastable_lookup.setdefault(
-                st.state_id,
-                {
-                    "metastable_id": st.state_id,
-                    "metastable_index": 0,
-                    "macro_state_id": st.state_id,
-                    "macro_state": st.name,
-                    "name": st.name,
-                    "default_name": st.name,
-                    "representative_pdb": st.pdb_file,
-                    "meta_kind": "macro",
-                },
-            )
+    for st in system.states.values():
+        metastable_lookup.setdefault(
+            st.state_id,
+            {
+                "metastable_id": st.state_id,
+                "metastable_index": 0,
+                "macro_state_id": st.state_id,
+                "macro_state": st.name,
+                "name": st.name,
+                "default_name": st.name,
+                "representative_pdb": st.pdb_file,
+                "meta_kind": "macro",
+            },
+        )
 
     residue_keys: List[str] = []
     residue_mapping: Dict[str, str] = {}
@@ -599,11 +646,11 @@ def _collect_cluster_inputs(
     for meta_id in unique_meta_ids:
         meta = metastable_lookup.get(meta_id)
         if not meta:
-            raise ValueError(f"Metastable state '{meta_id}' not found on this system.")
+            raise ValueError(f"State '{meta_id}' not found on this system.")
         is_macro = meta.get("meta_kind") == "macro"
         meta_index = meta.get("metastable_index")
         if meta_index is None:
-            raise ValueError(f"Metastable state '{meta_id}' is missing its index.")
+            raise ValueError(f"State '{meta_id}' is missing its index.")
 
         candidate_states = _resolve_states_for_meta(meta, system)
         if not candidate_states:
@@ -1007,6 +1054,8 @@ def generate_metastable_cluster_npz(
     system_id: str,
     metastable_ids: List[str],
     *,
+    output_path: Optional[Path] = None,
+    cluster_name: Optional[str] = None,
     max_cluster_frames: Optional[int] = None,
     random_state: int = 0,
     cluster_algorithm: str = "density_peaks",
@@ -1132,16 +1181,22 @@ def generate_metastable_cluster_npz(
     dirs = store.ensure_directories(project_id, system_id)
     cluster_dir = dirs["system_dir"] / "metastable" / "clusters"
     cluster_dir.mkdir(parents=True, exist_ok=True)
-    timestamp = datetime.utcnow().strftime("%Y%m%dT%H%M%S")
-    suffix = "-".join(_slug(mid)[:24] for mid in unique_meta_ids) or "metastable"
-    out_path = cluster_dir / f"{suffix}_clusters_{timestamp}.npz"
+    if output_path is not None:
+        out_path = Path(output_path)
+    else:
+        timestamp = datetime.utcnow().strftime("%Y%m%dT%H%M%S")
+        suffix = _slug(cluster_name) if cluster_name else "-".join(_slug(mid)[:24] for mid in unique_meta_ids)
+        suffix = suffix or "cluster"
+        out_path = cluster_dir / f"{suffix}_clusters_{timestamp}.npz"
 
     metadata = {
         "project_id": project_id,
         "system_id": system_id,
         "generated_at": datetime.utcnow().isoformat(),
+        "selected_state_ids": unique_meta_ids,
         "selected_metastable_ids": unique_meta_ids,
         "analysis_mode": getattr(system_meta, "analysis_mode", None),
+        "cluster_name": cluster_name,
         "state_labels": state_labels,
         "metastable_labels": metastable_labels,
         "metastable_kinds": metastable_kinds,
@@ -1441,6 +1496,7 @@ def generate_cluster_npz_from_descriptors(
     metadata = {
         "generated_at": datetime.utcnow().isoformat(),
         "analysis_mode": "macro",
+        "selected_state_ids": state_ids,
         "selected_metastable_ids": state_ids,
         "state_labels": state_labels,
         "metastable_labels": {},
@@ -1538,6 +1594,7 @@ def prepare_cluster_workspace(
     manifest = {
         "project_id": project_id,
         "system_id": system_id,
+        "selected_state_ids": unique_meta_ids,
         "selected_metastable_ids": unique_meta_ids,
         "residue_keys": residue_keys,
         "residue_mapping": residue_mapping,
@@ -1605,7 +1662,7 @@ def reduce_cluster_workspace(work_dir: Path) -> Tuple[Path, Dict[str, Any]]:
     residue_mapping = manifest.get("residue_mapping") or {}
     n_frames = int(manifest.get("n_frames", 0))
     n_residues = int(manifest.get("n_residues", len(residue_keys)))
-    selected_meta_ids = manifest.get("selected_metastable_ids") or []
+    selected_meta_ids = manifest.get("selected_state_ids") or manifest.get("selected_metastable_ids") or []
     cluster_params = manifest.get("cluster_params") or {}
 
     density_maxk_val = int(cluster_params.get("density_maxk", 100))
@@ -1683,6 +1740,7 @@ def reduce_cluster_workspace(work_dir: Path) -> Tuple[Path, Dict[str, Any]]:
         "project_id": project_id,
         "system_id": system_id,
         "generated_at": datetime.utcnow().isoformat(),
+        "selected_state_ids": selected_meta_ids,
         "selected_metastable_ids": selected_meta_ids,
         "analysis_mode": getattr(system_meta, "analysis_mode", None),
         "state_labels": state_labels,
