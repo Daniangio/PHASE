@@ -46,7 +46,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def _load_labels_from_npz(path: Path, *, state_id: Optional[str], unassigned_policy: str) -> np.ndarray:
-    ds = load_npz(str(path), unassigned_policy=unassigned_policy)
+    ds = load_npz(str(path), unassigned_policy=unassigned_policy, allow_missing_edges=True)
     labels = ds.labels
     if state_id is None:
         return labels

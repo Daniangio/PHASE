@@ -4,7 +4,7 @@ import argparse
 from pathlib import Path
 
 from backend.services.metastable_clusters import evaluate_state_with_models
-from backend.services.project_store import ProjectStore
+from phase.services.project_store import ProjectStore
 
 
 def main(argv: list[str] | None = None) -> int:

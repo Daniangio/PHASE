@@ -10,7 +10,7 @@ from pathlib import Path
 from backend.services.selection_utils import build_residue_selection_config
 from backend.services.descriptors import save_descriptor_npz
 from backend.services.preprocessing import DescriptorPreprocessor
-from backend.services.project_store import DescriptorState, ProjectStore, SystemMetadata
+from phase.services.project_store import DescriptorState, ProjectStore, SystemMetadata
 from backend.services.state_utils import build_analysis_states
 
 

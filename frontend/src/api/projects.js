@@ -358,6 +358,42 @@ export function submitBackmappingClusterJob(projectId, systemId, clusterId) {
   );
 }
 
+export function uploadBackmappingTrajectories(projectId, systemId, clusterId, payload, options = {}) {
+  const { onProgress } = options;
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open(
+      'POST',
+      `${API_BASE}/projects/${projectId}/systems/${systemId}/metastable/clusters/${clusterId}/backmapping_npz/upload`
+    );
+    xhr.responseType = 'blob';
+
+    if (xhr.upload && typeof onProgress === 'function') {
+      xhr.upload.addEventListener('loadstart', () => onProgress(0));
+      xhr.upload.addEventListener('progress', (event) => {
+        if (!event.lengthComputable) return;
+        const percent = Math.round((event.loaded / event.total) * 100);
+        onProgress(Math.min(100, percent));
+      });
+      xhr.upload.addEventListener('loadend', () => onProgress(100));
+    }
+
+    xhr.addEventListener('load', () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve(xhr.response);
+        return;
+      }
+      reject(new Error(xhr.statusText || 'Failed to build backmapping NPZ.'));
+    });
+
+    xhr.addEventListener('error', () => {
+      reject(new Error('Failed to build backmapping NPZ.'));
+    });
+
+    xhr.send(payload);
+  });
+}
+
 export function uploadMetastableClusterNp(projectId, systemId, payload, options = {}) {
   const { onUploadProgress } = options;
   return new Promise((resolve, reject) => {

@@ -185,6 +185,7 @@ def build_backmapping_npz(
     cluster_path: Path,
     output_path: Path,
     progress_callback: Callable[[int, int], None] | None = None,
+    trajectory_overrides: Dict[str, Path] | None = None,
 ) -> Path:
     store = ProjectStore()
     system = store.get_system(project_id, system_id)
@@ -233,12 +234,17 @@ def build_backmapping_npz(
         state = system.states.get(state_id)
         if not state:
             continue
-        if not state.trajectory_file:
+        override_path = None
+        if trajectory_overrides:
+            override_path = trajectory_overrides.get(str(state_id))
+        if not state.trajectory_file and override_path is None:
             raise ValueError(f"State '{state_id}' is missing trajectory; please upload trajectory first.")
         if not state.pdb_file:
             raise ValueError(f"State '{state_id}' is missing PDB; please upload PDB first.")
 
-        traj_path = store.resolve_path(project_id, system_id, state.trajectory_file)
+        traj_path = override_path
+        if traj_path is None:
+            traj_path = store.resolve_path(project_id, system_id, state.trajectory_file)
         pdb_path = store.resolve_path(project_id, system_id, state.pdb_file)
         if not traj_path.exists():
             raise ValueError(f"Trajectory file missing on disk: {traj_path}")

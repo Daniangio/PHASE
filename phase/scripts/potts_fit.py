@@ -7,7 +7,7 @@ import re
 import shutil
 import uuid
 
-from backend.services.project_store import ProjectStore
+from phase.services.project_store import ProjectStore
 from phase.simulation import main as sim_main
 
 

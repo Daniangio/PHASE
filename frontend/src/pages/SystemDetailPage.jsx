@@ -1,21 +1,18 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import Loader from '../components/common/Loader';
 import ErrorMessage from '../components/common/ErrorMessage';
-import { StateCard, MetastableCard } from '../components/system/StateCards';
+import SystemDetailSidebar from '../components/system/SystemDetailSidebar';
+import SystemDetailMacroPanel from '../components/system/SystemDetailMacroPanel';
+import SystemDetailMetastablePanel from '../components/system/SystemDetailMetastablePanel';
+import SystemDetailPottsSection from '../components/system/SystemDetailPottsSection';
+import { ClusterBuildOverlay, DocOverlay, InfoOverlay } from '../components/system/SystemDetailOverlays';
 import {
-  ClusterBuildOverlay,
-  ClusterDetailOverlay,
-  DocOverlay,
-  InfoOverlay,
-} from '../components/system/SystemDetailOverlays';
-import {
-  AddStateForm,
   AnalysisResultsList,
   InfoTooltip,
   StatePairSelector,
 } from '../components/system/SystemDetailWidgets';
-import { getClusterDisplayName } from '../components/system/systemDetailUtils';
+import { formatPottsModelName } from './SystemDetailPage.utils';
 import {
   fetchSystem,
   downloadStructure,
@@ -30,13 +27,13 @@ import {
   renameMetastableState,
   submitMetastableClusterJob,
   uploadMetastableClusterNp,
-  renameMetastableCluster,
   confirmMacroStates,
   confirmMetastableStates,
   clearMetastableStates,
   downloadSavedCluster,
   downloadBackmappingCluster,
   submitBackmappingClusterJob,
+  uploadBackmappingTrajectories,
   downloadPottsModel,
   uploadPottsModel,
   renamePottsModel,
@@ -53,9 +50,6 @@ import {
 } from '../api/jobs';
 import { confirmAndDeleteResult } from '../utils/results';
 import StaticAnalysisForm from '../components/analysis/StaticAnalysisForm';
-import SimulationAnalysisForm from '../components/analysis/SimulationAnalysisForm';
-import SimulationUploadForm from '../components/analysis/SimulationUploadForm';
-import { Eye, Info, Plus, SlidersHorizontal } from 'lucide-react';
 
 export default function SystemDetailPage() {
   const { projectId, systemId } = useParams();
@@ -95,7 +89,6 @@ export default function SystemDetailPage() {
   const [uploadClusterStateIds, setUploadClusterStateIds] = useState([]);
   const [uploadClusterError, setUploadClusterError] = useState(null);
   const [uploadClusterLoading, setUploadClusterLoading] = useState(false);
-  const [clusterDetailState, setClusterDetailState] = useState(null);
   const [clusterJobStatus, setClusterJobStatus] = useState({});
   const [backmappingDownloadProgress, setBackmappingDownloadProgress] = useState({});
   const [backmappingJobStatus, setBackmappingJobStatus] = useState({});
@@ -237,6 +230,53 @@ export default function SystemDetailPage() {
   const descriptorsReady = useMemo(
     () => states.length > 0 && states.every((state) => state.descriptor_file),
     [states]
+  );
+  const metastableById = useMemo(() => {
+    const mapping = new Map();
+    (system?.metastable_states || []).forEach((m) => {
+      if (m.metastable_id) {
+        mapping.set(m.metastable_id, m);
+      }
+    });
+    return mapping;
+  }, [system]);
+  const sampleEntries = useMemo(() => selectedCluster?.samples || [], [selectedCluster]);
+  const mdSamples = useMemo(
+    () => sampleEntries.filter((s) => s.type === 'md_eval'),
+    [sampleEntries]
+  );
+  const clusterSimulationResults = useMemo(
+    () => simulationResults.filter((result) => result.cluster_id === pottsFitClusterId),
+    [simulationResults, pottsFitClusterId]
+  );
+  const gibbsSamples = useMemo(
+    () =>
+      clusterSimulationResults.filter((result) => {
+        const params = result.params || {};
+        return (
+          params.gibbs_samples ||
+          params.rex_samples ||
+          params.gibbs_method ||
+          params.rex_betas ||
+          params.rex_beta_min ||
+          params.rex_beta_max
+        );
+      }),
+    [clusterSimulationResults]
+  );
+  const saSamples = useMemo(
+    () =>
+      clusterSimulationResults.filter((result) => {
+        const params = result.params || {};
+        return (
+          params.sa_reads ||
+          params.sa_sweeps ||
+          params.sa_beta_hot ||
+          params.sa_beta_cold ||
+          (Array.isArray(params.sa_beta_schedules) && params.sa_beta_schedules.length > 0)
+        );
+      }),
+    [clusterSimulationResults]
   );
   const macroReady = Boolean(macroLocked && descriptorsReady);
   const showSidebar = macroReady;
@@ -611,11 +651,6 @@ export default function SystemDetailPage() {
     }
   };
 
-  const formatPottsModelName = (run) => {
-    const raw = run.name || (run.path ? run.path.split('/').pop() : '') || 'Potts model';
-    return raw.replace(/\.npz$/i, '');
-  };
-
   const handleRenamePottsModel = async (clusterId, modelId) => {
     const name = (pottsRenameValues[modelId] || '').trim();
     if (!name) {
@@ -933,23 +968,23 @@ export default function SystemDetailPage() {
     }
   };
 
+  const openDescriptorExplorer = useCallback(
+    ({ clusterId, stateId, metastableId }) => {
+      const params = new URLSearchParams();
+      if (clusterId) params.set('cluster_id', clusterId);
+      if (stateId) params.append('state_id', stateId);
+      if (metastableId) params.set('metastable_ids', metastableId);
+      if (clusterId && clusterId !== pottsFitClusterId) {
+        setPottsFitClusterId(clusterId);
+      }
+      navigate(`/projects/${projectId}/systems/${systemId}/descriptors/visualize?${params.toString()}`);
+    },
+    [navigate, projectId, systemId, pottsFitClusterId, setPottsFitClusterId]
+  );
+
   if (isLoading) return <Loader message="Loading system..." />;
   if (pageError) return <ErrorMessage message={pageError} />;
   if (!system) return null;
-
-  const handleRenameCluster = async (clusterId, name) => {
-    if (!name.trim()) return;
-    setClusterError(null);
-    try {
-      await renameMetastableCluster(projectId, systemId, clusterId, name.trim());
-      setClusterDetailState((prev) =>
-        prev && prev.cluster_id === clusterId ? { ...prev, name: name.trim() } : prev
-      );
-      await refreshSystem();
-    } catch (err) {
-      setClusterError(err.message);
-    }
-  };
 
   const handleDownloadSavedCluster = async (clusterId, filename) => {
     setClusterError(null);
@@ -1012,6 +1047,25 @@ export default function SystemDetailPage() {
     }
   };
 
+  const handleUploadBackmappingTrajectories = async (clusterId, filesByState) => {
+    const stateIds = Object.keys(filesByState || {}).filter((key) => filesByState[key]);
+    if (!stateIds.length) {
+      throw new Error('Select at least one trajectory to upload.');
+    }
+    const payload = new FormData();
+    payload.append('state_ids', stateIds.join(','));
+    stateIds.forEach((stateId) => payload.append('trajectories', filesByState[stateId]));
+    const blob = await uploadBackmappingTrajectories(projectId, systemId, clusterId, payload);
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `backmapping_${clusterId}.npz`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  };
+
   const handleDownloadPottsModel = async (clusterId, modelId, filename) => {
     setPottsRenameError(null);
     try {
@@ -1035,7 +1089,6 @@ export default function SystemDetailPage() {
     try {
       await deleteSavedCluster(projectId, systemId, clusterId);
       await refreshSystem();
-      setClusterDetailState((prev) => (prev && prev.cluster_id === clusterId ? null : prev));
     } catch (err) {
       setClusterError(err.message);
     }
@@ -1065,267 +1118,34 @@ export default function SystemDetailPage() {
 
       <div className={showSidebar ? 'lg:grid lg:grid-cols-[260px_1fr] gap-6' : ''}>
         {showSidebar && (
-          <aside className="bg-gray-800 border border-gray-700 rounded-lg p-4 space-y-4 lg:sticky lg:top-6 h-fit">
-            <div>
-              <p className="text-xs uppercase tracking-[0.2em] text-gray-500">System state</p>
-              <h2 className="text-base font-semibold text-white mt-2">Macro-states</h2>
-              <p className="text-xs text-gray-400">
-                {metastableLocked ? 'Metastable locked' : 'Metastable pending'}
-              </p>
-            </div>
-            <button
-              type="button"
-              onClick={() => navigate(`/projects/${projectId}/systems/${systemId}/descriptors/visualize`)}
-              className="w-full text-xs px-3 py-2 rounded-md border border-cyan-500 text-cyan-300 hover:bg-cyan-500/10 inline-flex items-center justify-center gap-2"
-            >
-              <Eye className="h-4 w-4" />
-              Visualize descriptors
-            </button>
-            <div className="space-y-2">
-              {states.map((state) => {
-                const metaForState = metastableStates.filter((m) => m.macro_state_id === state.state_id);
-                return (
-                  <div key={state.state_id} className="rounded-md border border-gray-700 bg-gray-900/60 px-3 py-2">
-                    {metastableLocked && metaForState.length > 0 ? (
-                      <details className="group">
-                        <summary className="flex items-center justify-between cursor-pointer text-sm text-gray-200">
-                          <span className="flex items-center gap-2">
-                            {state.name}
-                            <button
-                              type="button"
-                              onClick={(event) => {
-                                event.preventDefault();
-                                event.stopPropagation();
-                                setInfoOverlayState({ type: 'macro', data: state });
-                              }}
-                              className="text-gray-400 hover:text-cyan-300"
-                              aria-label={`Show info for ${state.name}`}
-                            >
-                              <Info className="h-4 w-4" />
-                            </button>
-                          </span>
-                          <span className="text-xs text-gray-400">{metaForState.length} meta</span>
-                        </summary>
-                        <div className="mt-2 space-y-1 text-xs text-gray-300">
-                          {metaForState.map((m) => (
-                            <div key={m.metastable_id} className="flex justify-between items-center">
-                              <span>{m.name || m.default_name || m.metastable_id}</span>
-                              <div className="flex items-center gap-2">
-                                <span className="text-gray-500">#{m.metastable_index}</span>
-                                <button
-                                  type="button"
-                                  onClick={(event) => {
-                                    event.preventDefault();
-                                    event.stopPropagation();
-                                    setInfoOverlayState({ type: 'meta', data: m });
-                                  }}
-                                  className="text-gray-400 hover:text-cyan-300"
-                                  aria-label={`Show info for ${m.name || m.default_name || m.metastable_id}`}
-                                >
-                                  <Info className="h-4 w-4" />
-                                </button>
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-                      </details>
-                    ) : (
-                      <div className="flex items-center justify-between text-sm text-gray-200">
-                        <span className="flex items-center gap-2">
-                          {state.name}
-                        </span>
-                        <span className="text-xs text-gray-500">
-                          {state.descriptor_file ? 'Descriptors ready' : 'Descriptors missing'}
-                        </span>
-                        <button
-                          type="button"
-                          onClick={() => setInfoOverlayState({ type: 'macro', data: state })}
-                          className="text-gray-400 hover:text-cyan-300"
-                          aria-label={`Show info for ${state.name}`}
-                        >
-                          <Info className="h-4 w-4" />
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-            {!clustersUnlocked && (
-              <p className="text-xs text-gray-500">Confirm how to proceed to unlock clustering and analysis.</p>
-            )}
-            {clustersUnlocked && (
-              <div className="border-t border-gray-700 pt-3 space-y-2">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <div className="flex items-center gap-2">
-                      <h3 className="text-sm font-semibold text-white">Cluster NPZ</h3>
-                      <InfoTooltip
-                        ariaLabel="Storage layout info"
-                        text="See how projects, systems, clusters, models, and samples are stored on disk."
-                        onClick={() => openDoc('storage_layout')}
-                      />
-                    </div>
-                    <p className="text-xs text-gray-400">Residue cluster runs for Potts sampling.</p>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setClusterError(null);
-                      setClusterPanelOpen(true);
-                    }}
-                    className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-gray-700 text-gray-200 hover:border-cyan-500 hover:text-cyan-300 disabled:opacity-50"
-                    disabled={clusterLoading}
-                    aria-label="Create new cluster run"
-                  >
-                    <Plus className="h-4 w-4" />
-                  </button>
-                </div>
-                {analysisMode === 'macro' && (
-                  <p className="text-[11px] text-cyan-300">
-                    Macro and metastable states can both be selected when clustering.
-                  </p>
-                )}
-                {clusterError && <ErrorMessage message={clusterError} />}
-                {clusterRuns.length === 0 && <p className="text-xs text-gray-400">No cluster runs yet.</p>}
-                {clusterRuns.length > 0 && (
-                  <div className="space-y-2">
-                    {clusterRuns
-                      .slice()
-                      .reverse()
-                      .map((run) => {
-                        const name = getClusterDisplayName(run);
-                        const jobSnapshot = clusterJobStatus[run.cluster_id];
-                        const jobMeta = jobSnapshot?.meta || {};
-                        const jobStatus = jobSnapshot?.status || run.status;
-                        const statusLabel = jobMeta.status || run.status_message || run.status || 'queued';
-                        const progress = jobMeta.progress ?? run.progress;
-                        const isReady = Boolean(run.path) && (run.status === 'finished' || !run.status);
-                        const isFailed = jobStatus === 'failed' || run.status === 'failed';
-                        const isRunning = !isReady && !isFailed;
-                        if (isReady) {
-                          return (
-                            <button
-                              key={run.cluster_id}
-                              type="button"
-                            onClick={() => {
-                              setClusterDetailState(run);
-                              if (run?.cluster_id) {
-                                setPottsFitClusterId(run.cluster_id);
-                                setAnalysisFocus('potts');
-                              }
-                            }}
-                              className="w-full text-left rounded-md border px-3 py-2 border-gray-700 bg-gray-900/60 hover:border-cyan-500"
-                            >
-                              <div className="flex items-center justify-between text-xs">
-                                <span className="text-gray-200">{name}</span>
-                                <span className="text-[10px] text-gray-500">
-                                  {run.cluster_algorithm ? run.cluster_algorithm.toUpperCase() : 'CLUSTER'}
-                                </span>
-                              </div>
-                              <p className="text-[11px] text-gray-400 mt-1">
-                                {analysisMode === 'macro' ? 'States' : 'Metastable'}:{' '}
-                                {Array.isArray(run.state_ids || run.metastable_ids)
-                                  ? (run.state_ids || run.metastable_ids).length
-                                  : '—'}{' '}
-                                |{' '}
-                                Max frames: {run.max_cluster_frames ?? 'all'}
-                              </p>
-                            </button>
-                          );
-                        }
-
-                        return (
-                          <div
-                            key={run.cluster_id}
-                            className="w-full text-left rounded-md border px-3 py-2 border-gray-800 bg-gray-900/40"
-                          >
-                            <div className="flex items-center justify-between text-xs">
-                              <span className="text-gray-200">{name}</span>
-                              <span className="text-[10px] text-gray-500">
-                                {run.cluster_algorithm ? run.cluster_algorithm.toUpperCase() : 'CLUSTER'}
-                              </span>
-                            </div>
-                            <p className="text-[11px] text-gray-400 mt-1">
-                              {analysisMode === 'macro' ? 'States' : 'Metastable'}:{' '}
-                              {Array.isArray(run.state_ids || run.metastable_ids)
-                                ? (run.state_ids || run.metastable_ids).length
-                                : '—'}{' '}
-                              |{' '}
-                              Max frames: {run.max_cluster_frames ?? 'all'}
-                            </p>
-                            {isRunning && (
-                              <div className="mt-2 space-y-1 text-[11px] text-gray-400">
-                                <div className="flex items-center justify-between">
-                                  <span>{statusLabel}</span>
-                                  <span>{Number.isFinite(progress) ? `${progress}%` : '—'}</span>
-                                </div>
-                                <div className="h-2 bg-gray-800 rounded-full overflow-hidden">
-                                  <div
-                                    className="h-full bg-cyan-500 animate-pulse"
-                                    style={{ width: Number.isFinite(progress) ? `${progress}%` : '40%' }}
-                                  />
-                                </div>
-                              </div>
-                            )}
-                            {isFailed && (
-                              <div className="mt-2 flex items-center justify-between text-[11px] text-red-300">
-                                <span>{run.error || jobSnapshot?.result?.error || 'Clustering failed.'}</span>
-                                <button
-                                  type="button"
-                                  onClick={(event) => {
-                                    event.preventDefault();
-                                    event.stopPropagation();
-                                    handleDeleteSavedCluster(run.cluster_id);
-                                  }}
-                                  className="text-[11px] text-red-200 hover:text-red-100"
-                                >
-                                  Delete
-                                </button>
-                              </div>
-                            )}
-                          </div>
-                        );
-                      })}
-                  </div>
-                )}
-                <div className="border-t border-gray-800 pt-3">
-                  <h4 className="text-xs font-semibold text-gray-300">Potts models</h4>
-                  {!selectedCluster && (
-                    <p className="text-xs text-gray-500 mt-1">Select a cluster to view its Potts models.</p>
-                  )}
-                  {selectedCluster && pottsModels.length === 0 && (
-                    <p className="text-xs text-gray-500 mt-1">No Potts models yet.</p>
-                  )}
-                  {pottsModels.length > 0 && (
-                    <div className="space-y-2 mt-2">
-                      {pottsModels.map((run) => (
-                        <div
-                          key={run.model_id}
-                          className="rounded-md border border-gray-800 bg-gray-900/50 px-3 py-2 text-xs"
-                        >
-                          <div className="flex items-center justify-between">
-                            <span className="text-gray-200">{formatPottsModelName(run)}</span>
-                            <span className="text-[10px] text-gray-500">
-                              {run.model_id?.slice(0, 8)}
-                            </span>
-                          </div>
-                          <p className="text-[11px] text-gray-500 mt-1">
-                            Cluster: {selectedCluster?.name || selectedCluster?.cluster_id}
-                          </p>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              </div>
-            )}
-          </aside>
+          <SystemDetailSidebar
+            states={states}
+            metastableStates={metastableStates}
+            metastableLocked={metastableLocked}
+            clustersUnlocked={clustersUnlocked}
+            clusterError={clusterError}
+            clusterLoading={clusterLoading}
+            clusterRuns={clusterRuns}
+            analysisMode={analysisMode}
+            clusterJobStatus={clusterJobStatus}
+            setInfoOverlayState={setInfoOverlayState}
+            setPottsFitClusterId={setPottsFitClusterId}
+            setAnalysisFocus={setAnalysisFocus}
+            setClusterPanelOpen={setClusterPanelOpen}
+            setClusterError={setClusterError}
+            handleDeleteSavedCluster={handleDeleteSavedCluster}
+            selectedClusterId={pottsFitClusterId}
+            openDescriptorExplorer={openDescriptorExplorer}
+            openDoc={openDoc}
+            navigate={navigate}
+            projectId={projectId}
+            systemId={systemId}
+          />
         )}
 
         <div className="space-y-8">
-      {macroLocked && !showSidebar && (
-        <section className="bg-gray-800 border border-gray-700 rounded-lg p-4 space-y-3">
+          {macroLocked && !showSidebar && (
+            <section className="bg-gray-800 border border-gray-700 rounded-lg p-4 space-y-3">
           <div className="flex items-center justify-between">
             <h2 className="text-lg font-semibold text-white">System Snapshot</h2>
             {descriptorStates.length > 0 && (
@@ -1376,55 +1196,31 @@ export default function SystemDetailPage() {
             </div>
           </div>
         </section>
-      )}
-
-      {!macroLocked && (
-        <section className="bg-gray-800 border border-gray-700 rounded-lg p-4 space-y-4">
-          <div className="flex items-center justify-between">
-            <h2 className="text-lg font-semibold text-white">States</h2>
-            <div className="flex items-center space-x-3">
-              <p className="text-xs text-gray-400">Status: {system.status}</p>
-              <button
-                onClick={handleConfirmMacro}
-                disabled={states.length === 0 || !descriptorsReady}
-                className="text-xs px-3 py-1 rounded-md border border-emerald-500 text-emerald-300 hover:bg-emerald-500/10 disabled:opacity-50"
-              >
-                Confirm states
-              </button>
-            </div>
-          </div>
-          {downloadError && <ErrorMessage message={downloadError} />}
-          {actionError && <ErrorMessage message={actionError} />}
-          {actionMessage && <p className="text-sm text-emerald-400">{actionMessage}</p>}
-          {!descriptorsReady && states.length > 0 && (
-            <p className="text-xs text-amber-300">
-              Upload trajectories and build descriptors for every state before confirming.
-            </p>
           )}
-          <div className="grid md:grid-cols-3 gap-4">
-            <div className="md:col-span-2 grid sm:grid-cols-2 gap-3">
-              {states.length === 0 && <p className="text-sm text-gray-400">No states yet.</p>}
-              {states.map((state) => (
-                <StateCard
-                  key={state.state_id}
-                  state={state}
-                  onDownload={() => handleDownloadStructure(state.state_id, state.name)}
-                  onUpload={handleUploadTrajectory}
-                  onDeleteTrajectory={() => handleDeleteTrajectory(state.state_id)}
-                  onDeleteState={() => handleDeleteState(state.state_id, state.name)}
-                  uploading={uploadingState === state.state_id}
-                  progress={uploadProgress[state.state_id]}
-                  processing={processingState === state.state_id}
-                />
-              ))}
-            </div>
-            <AddStateForm states={states} onAdd={handleAddState} isAdding={addingState} />
-          </div>
-        </section>
-      )}
 
-      {showMacroChoicePanel && (
-        <section className="bg-gray-800 border border-gray-700 rounded-lg p-4 space-y-4">
+          {!macroLocked && (
+            <SystemDetailMacroPanel
+              states={states}
+              systemStatus={system.status}
+              descriptorsReady={descriptorsReady}
+              handleConfirmMacro={handleConfirmMacro}
+              downloadError={downloadError}
+              actionError={actionError}
+              actionMessage={actionMessage}
+              handleDownloadStructure={handleDownloadStructure}
+              handleUploadTrajectory={handleUploadTrajectory}
+              handleDeleteTrajectory={handleDeleteTrajectory}
+              handleDeleteState={handleDeleteState}
+              uploadingState={uploadingState}
+              uploadProgress={uploadProgress}
+              processingState={processingState}
+              handleAddState={handleAddState}
+              addingState={addingState}
+            />
+          )}
+
+          {showMacroChoicePanel && (
+            <section className="bg-gray-800 border border-gray-700 rounded-lg p-4 space-y-4">
           <div className="flex items-start justify-between gap-3">
             <div>
               <h2 className="text-lg font-semibold text-white">Use macro-states only (optional)</h2>
@@ -1459,135 +1255,31 @@ export default function SystemDetailPage() {
             {metaActionError && <ErrorMessage message={metaActionError} />}
           </div>
         </section>
-      )}
+          )}
 
-      {showMetastablePanel && (
-        <section className="bg-gray-800 border border-gray-700 rounded-lg p-4 space-y-4">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <h2 className="text-lg font-semibold text-white">Metastable States (TICA)</h2>
-              <InfoTooltip
-                ariaLabel="Metastable states info"
-                text="Open detailed documentation for the metastable pipeline and related methods."
-                onClick={() => openDoc('metastable_states')}
-              />
-            </div>
-            <div className="flex items-center space-x-2">
-              {!metastableLocked && (
-                <button
-                  onClick={() => setMetaParamsOpen((prev) => !prev)}
-                  className="text-xs px-3 py-1 rounded-md border border-gray-600 text-gray-200 hover:bg-gray-700/60"
-                >
-                  Hyperparams
-                </button>
-              )}
-              <button
-                onClick={handleRunMetastable}
-                disabled={metaLoading || metastableLocked}
-                className="text-xs px-3 py-1 rounded-md border border-cyan-500 text-cyan-300 hover:bg-cyan-500/10 disabled:opacity-50"
-              >
-                {metastableLocked ? 'Locked' : metaLoading ? 'Running…' : 'Recompute'}
-              </button>
-              <button
-                onClick={() => navigate(`/projects/${projectId}/systems/${systemId}/metastable/visualize`)}
-                className="text-xs px-3 py-1 rounded-md border border-emerald-500 text-emerald-300 hover:bg-emerald-500/10"
-              >
-                Visualize
-              </button>
-              {!metastableLocked && (
-                <button
-                  onClick={handleConfirmMetastable}
-                  disabled={metaLoading || metastableStates.length === 0}
-                  className="text-xs px-3 py-1 rounded-md border border-emerald-500 text-emerald-300 hover:bg-emerald-500/10 disabled:opacity-50"
-                >
-                  Confirm metastable
-                </button>
-              )}
-            </div>
-          </div>
-          {metaParamsOpen && !metastableLocked && (
-            <div className="bg-gray-900 border border-gray-700 rounded-md p-3 space-y-3 text-sm">
-              <div className="grid md:grid-cols-3 gap-3">
-                {[
-                  {
-                    key: 'n_microstates',
-                    label: 'Microstates (k-means)',
-                    min: 2,
-                    info: 'Number of k-means clusters in TICA space before coarse-graining.',
-                  },
-                  {
-                    key: 'k_meta_min',
-                    label: 'Metastable min k',
-                    min: 1,
-                    info: 'Minimum metastable state count to test via spectral gap.',
-                  },
-                  {
-                    key: 'k_meta_max',
-                    label: 'Metastable max k',
-                    min: 1,
-                    info: 'Maximum metastable state count to test via spectral gap.',
-                  },
-                  {
-                    key: 'tica_lag_frames',
-                    label: 'TICA lag (frames)',
-                    min: 1,
-                    info: 'Lag time in frames for TICA projection.',
-                  },
-                  {
-                    key: 'tica_dim',
-                    label: 'TICA dims',
-                    min: 1,
-                    info: 'Number of TICA components retained for clustering.',
-                  },
-                  {
-                    key: 'random_state',
-                    label: 'Random seed',
-                    min: 0,
-                    info: 'Seed for k-means and MSM initialization.',
-                  },
-                ].map((field) => (
-                  <label key={field.key} className="space-y-1">
-                    <span className="flex items-center gap-2 text-xs text-gray-400">
-                      {field.label}
-                      <InfoTooltip ariaLabel={`${field.label} info`} text={field.info} />
-                    </span>
-                    <input
-                      type="number"
-                      min={field.min}
-                      value={metaParams[field.key]}
-                      onChange={(e) =>
-                        setMetaParams((prev) => ({
-                          ...prev,
-                          [field.key]: Number(e.target.value),
-                        }))
-                      }
-                      className="w-full bg-gray-800 border border-gray-700 rounded-md px-2 py-1 text-white"
-                    />
-                  </label>
-                ))}
-              </div>
-            </div>
+          {showMetastablePanel && (
+            <SystemDetailMetastablePanel
+              metastableLocked={metastableLocked}
+              metaLoading={metaLoading}
+              metaParamsOpen={metaParamsOpen}
+              setMetaParamsOpen={setMetaParamsOpen}
+              metaParams={metaParams}
+              setMetaParams={setMetaParams}
+              metaError={metaError}
+              metaActionError={metaActionError}
+              metastableStates={metastableStates}
+              handleRunMetastable={handleRunMetastable}
+              handleConfirmMetastable={handleConfirmMetastable}
+              handleRenameMetastable={handleRenameMetastable}
+              openDoc={openDoc}
+              navigate={navigate}
+              projectId={projectId}
+              systemId={systemId}
+            />
           )}
-          {metaError && <ErrorMessage message={`Failed to load metastable states: ${metaError}`} />}
-          {metaActionError && <ErrorMessage message={metaActionError} />}
-          {metaLoading && <Loader message="Computing metastable states..." />}
-          {!metaLoading && metastable.states.length === 0 && (
-            <p className="text-sm text-gray-400">
-              Metastable analysis is manual. Click Recompute after uploading trajectories and building descriptors.
-            </p>
-          )}
-          {!metaLoading && metastableStates.length > 0 && (
-            <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-3">
-              {metastableStates.map((m) => (
-                <MetastableCard key={m.metastable_id || `${m.macro_state}-${m.metastable_index}`} meta={m} onRename={handleRenameMetastable} />
-              ))}
-            </div>
-          )}
-        </section>
-      )}
 
-      {analysisUnlocked && (
-        <section className="bg-gray-800 border border-gray-700 rounded-lg p-4 space-y-4">
+          {analysisUnlocked && (
+            <section className="bg-gray-800 border border-gray-700 rounded-lg p-4 space-y-4">
           <div className="flex items-center justify-between gap-4">
             <div>
               <h2 className="text-lg font-semibold text-white">Run Analysis</h2>
@@ -1668,386 +1360,80 @@ export default function SystemDetailPage() {
             </div>
           )}
           {analysisFocus === 'potts' && (
-            <div className="space-y-4">
-              <div className="grid lg:grid-cols-2 gap-6">
-                <div className="bg-gray-900 border border-gray-700 rounded-lg p-4 space-y-4">
-                  <div className="flex items-start justify-between gap-3">
-                    <div>
-                      <h3 className="text-md font-semibold text-white">Potts Model Fitting</h3>
-                      <p className="text-xs text-gray-500 mt-1">
-                        Fit on the webserver or download the cluster NPZ for offline fitting.
-                      </p>
-                    </div>
-                    <InfoTooltip
-                      ariaLabel="Potts model fitting documentation"
-                      text="Fit a Potts model once and reuse it for sampling."
-                      onClick={() => openDoc('potts_model')}
-                    />
-                  </div>
-                  <div className="flex items-center gap-2 text-xs">
-                    <button
-                      type="button"
-                      onClick={() => setPottsFitMode('run')}
-                      className={`px-3 py-1 rounded-full border ${
-                        pottsFitMode === 'run'
-                          ? 'border-cyan-400 text-cyan-200 bg-cyan-500/10'
-                          : 'border-gray-700 text-gray-400 hover:border-gray-500'
-                      }`}
-                    >
-                      Run on server
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setPottsFitMode('upload')}
-                      className={`px-3 py-1 rounded-full border ${
-                        pottsFitMode === 'upload'
-                          ? 'border-cyan-400 text-cyan-200 bg-cyan-500/10'
-                          : 'border-gray-700 text-gray-400 hover:border-gray-500'
-                      }`}
-                    >
-                      Upload results
-                    </button>
-                  </div>
-                  {pottsFitMode === 'run' && (
-                    <>
-                      <div>
-                        <label className="block text-sm text-gray-300 mb-1">Cluster NPZ</label>
-                        <select
-                          value={pottsFitClusterId}
-                          onChange={(event) => setPottsFitClusterId(event.target.value)}
-                          disabled={!readyClusterRuns.length}
-                          className="w-full bg-gray-800 border border-gray-700 rounded-md px-3 py-2 text-white focus:ring-cyan-500 disabled:opacity-60"
-                        >
-                          {!readyClusterRuns.length && <option value="">No saved clusters</option>}
-                          {readyClusterRuns.map((run) => {
-                            const name = run.name || run.path?.split('/').pop() || run.cluster_id;
-                            return (
-                              <option key={run.cluster_id} value={run.cluster_id}>
-                                {name}
-                              </option>
-                            );
-                          })}
-                        </select>
-                      </div>
-                      <div>
-                        <label className="block text-sm text-gray-300 mb-1">Potts model name</label>
-                        <input
-                          type="text"
-                          value={pottsModelName}
-                          onChange={(event) => setPottsModelName(event.target.value)}
-                          placeholder="e.g. Active+Inactive Potts"
-                          className="w-full bg-gray-800 border border-gray-700 rounded-md px-3 py-2 text-white focus:ring-cyan-500"
-                        />
-                      </div>
-                      <div className="flex flex-wrap gap-2">
-                        <button
-                          type="button"
-                          onClick={() => {
-                            if (!pottsFitClusterId) return;
-                            const entry = readyClusterRuns.find((run) => run.cluster_id === pottsFitClusterId);
-                            const filename = entry?.path?.split('/').pop();
-                            handleDownloadSavedCluster(pottsFitClusterId, filename);
-                          }}
-                          disabled={!pottsFitClusterId}
-                          className="text-xs px-3 py-2 rounded-md border border-gray-600 text-gray-200 hover:bg-gray-700/60 disabled:opacity-50"
-                        >
-                          Download cluster NPZ
-                        </button>
-                      </div>
-                      <div>
-                        <label className="block text-sm text-gray-300 mb-1">Fit method</label>
-                        <select
-                          value={pottsFitMethod}
-                          onChange={(event) => setPottsFitMethod(event.target.value)}
-                          className="w-full bg-gray-800 border border-gray-700 rounded-md px-3 py-2 text-white focus:ring-cyan-500"
-                        >
-                          <option value="pmi+plm">PMI + PLM</option>
-                          <option value="plm">PLM only</option>
-                          <option value="pmi">PMI only</option>
-                        </select>
-                      </div>
-                      <div className="grid md:grid-cols-2 gap-3 text-sm">
-                        <label className="space-y-1">
-                          <span className="text-xs text-gray-400">Contact mode</span>
-                          <select
-                            value={pottsFitContactMode}
-                            onChange={(event) => setPottsFitContactMode(event.target.value)}
-                            className="w-full bg-gray-800 border border-gray-700 rounded-md px-3 py-2 text-white focus:ring-cyan-500"
-                          >
-                            <option value="CA">CA</option>
-                            <option value="CM">Residue CM</option>
-                          </select>
-                        </label>
-                        <label className="space-y-1">
-                          <span className="text-xs text-gray-400">Contact cutoff (A)</span>
-                          <input
-                            type="number"
-                            min={1}
-                            step="0.5"
-                            value={pottsFitContactCutoff}
-                            onChange={(event) =>
-                              setPottsFitContactCutoff(Math.max(0.1, Number(event.target.value) || 0))
-                            }
-                            className="w-full bg-gray-800 border border-gray-700 rounded-md px-3 py-2 text-white focus:ring-cyan-500"
-                          />
-                        </label>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => setPottsFitAdvanced((prev) => !prev)}
-                        className="flex items-center gap-2 text-xs text-cyan-300 hover:text-cyan-200"
-                      >
-                        <SlidersHorizontal className="h-4 w-4" />
-                        {pottsFitAdvanced ? 'Hide' : 'Show'} fit hyperparams
-                      </button>
-                      {pottsFitAdvanced && (
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
-                          {[
-                            { key: 'plm_epochs', label: 'PLM epochs', placeholder: '200' },
-                            { key: 'plm_lr', label: 'PLM lr', placeholder: '1e-2' },
-                            { key: 'plm_lr_min', label: 'PLM lr min', placeholder: '1e-3' },
-                            { key: 'plm_l2', label: 'PLM L2', placeholder: '1e-5' },
-                            { key: 'plm_batch_size', label: 'Batch size', placeholder: '512' },
-                            { key: 'plm_progress_every', label: 'Progress every', placeholder: '10' },
-                          ].map((field) => (
-                            <label key={field.key} className="space-y-1">
-                              <span className="text-xs text-gray-400">{field.label}</span>
-                              <input
-                                type="text"
-                                placeholder={field.placeholder}
-                                value={pottsFitParams[field.key]}
-                                onChange={(event) =>
-                                  setPottsFitParams((prev) => ({
-                                    ...prev,
-                                    [field.key]: event.target.value,
-                                  }))
-                                }
-                                className="w-full bg-gray-800 border border-gray-700 rounded-md px-3 py-2 text-white focus:ring-cyan-500"
-                              />
-                            </label>
-                          ))}
-                          <label className="space-y-1">
-                            <span className="text-xs text-gray-400">LR schedule</span>
-                            <select
-                              value={pottsFitParams.plm_lr_schedule}
-                              onChange={(event) =>
-                                setPottsFitParams((prev) => ({
-                                  ...prev,
-                                  plm_lr_schedule: event.target.value,
-                                }))
-                              }
-                              className="w-full bg-gray-800 border border-gray-700 rounded-md px-3 py-2 text-white focus:ring-cyan-500"
-                            >
-                              <option value="cosine">Cosine</option>
-                              <option value="none">None</option>
-                            </select>
-                          </label>
-                        </div>
-                      )}
-                      {pottsFitError && <ErrorMessage message={pottsFitError} />}
-                      <button
-                        type="button"
-                        onClick={enqueuePottsFitJob}
-                        disabled={pottsFitSubmitting || !pottsFitClusterId}
-                        className="w-full bg-cyan-600 hover:bg-cyan-500 text-white font-semibold py-2 rounded-md transition-colors disabled:opacity-50"
-                      >
-                        {pottsFitSubmitting ? 'Submitting…' : 'Run Potts fit'}
-                      </button>
-                    </>
-                  )}
-                  {pottsFitMode === 'upload' && (
-                    <div className="border border-gray-700 rounded-md p-3 space-y-2">
-                      <p className="text-xs text-gray-400">
-                        Upload a fitted model for the selected cluster.
-                      </p>
-                      {selectedClusterName && (
-                        <p className="text-[11px] text-gray-500">Selected cluster: {selectedClusterName}</p>
-                      )}
-                      <div>
-                        <label className="block text-xs text-gray-400 mb-1">Model name</label>
-                        <input
-                          type="text"
-                          value={pottsUploadName}
-                          onChange={(event) => setPottsUploadName(event.target.value)}
-                          className="w-full bg-gray-800 border border-gray-700 rounded-md px-3 py-2 text-white focus:ring-cyan-500"
-                          placeholder="e.g. Active+Inactive Potts"
-                        />
-                      </div>
-                      <input
-                        type="file"
-                        accept=".npz"
-                        onChange={(event) => setPottsUploadFile(event.target.files?.[0] || null)}
-                        className="w-full text-xs text-gray-200"
-                      />
-                      {pottsUploadProgress !== null && (
-                        <div>
-                          <div className="flex items-center justify-between text-xs text-gray-500 mb-1">
-                            <span>Uploading model</span>
-                            <span>{pottsUploadProgress}%</span>
-                          </div>
-                          <div className="h-2 bg-gray-700 rounded-full overflow-hidden">
-                            <div
-                              className="h-full bg-cyan-500 transition-all duration-200"
-                              style={{ width: `${pottsUploadProgress}%` }}
-                            />
-                          </div>
-                        </div>
-                      )}
-                      {pottsUploadError && <ErrorMessage message={pottsUploadError} />}
-                      <button
-                        type="button"
-                        onClick={handleUploadPottsModel}
-                        disabled={!pottsUploadFile || !pottsFitClusterId || pottsUploadBusy}
-                        className="text-xs px-3 py-2 rounded-md border border-gray-600 text-gray-200 hover:bg-gray-700/60 disabled:opacity-50"
-                      >
-                        {pottsUploadBusy ? 'Uploading…' : 'Upload model'}
-                      </button>
-                    </div>
-                  )}
-                  {pottsModels.length > 0 && (
-                    <div className="border border-gray-700 rounded-md p-3 space-y-3">
-                      <p className="text-xs text-gray-400">Uploaded models</p>
-                      {pottsModels.map((run) => {
-                        const displayName = formatPottsModelName(run);
-                        const value = pottsRenameValues[run.model_id] ?? displayName;
-                        const isBusy = pottsRenameBusy[run.model_id];
-                        const isDeleting = pottsDeleteBusy[run.model_id];
-                        return (
-                          <div key={run.model_id} className="flex items-center gap-2">
-                            <div className="flex-1">
-                              <p className="text-[11px] text-gray-500">
-                                {selectedCluster?.name || selectedCluster?.cluster_id}
-                              </p>
-                              <input
-                                type="text"
-                                value={value}
-                                onChange={(event) =>
-                                  setPottsRenameValues((prev) => ({
-                                    ...prev,
-                                    [run.model_id]: event.target.value,
-                                  }))
-                                }
-                                className="w-full bg-gray-800 border border-gray-700 rounded-md px-2 py-1 text-xs text-white focus:ring-cyan-500"
-                              />
-                            </div>
-                            <button
-                              type="button"
-                              onClick={() =>
-                                handleDownloadPottsModel(
-                                  run.cluster_id,
-                                  run.model_id,
-                                  run.path?.split('/').pop()
-                                )
-                              }
-                              disabled={isBusy || isDeleting}
-                              className="text-xs px-3 py-2 rounded-md border border-gray-600 text-gray-200 hover:bg-gray-700/60 disabled:opacity-50"
-                            >
-                              Download
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => handleRenamePottsModel(run.cluster_id, run.model_id)}
-                              disabled={isBusy || isDeleting}
-                              className="text-xs px-3 py-2 rounded-md border border-gray-600 text-gray-200 hover:bg-gray-700/60 disabled:opacity-50"
-                            >
-                              {isBusy ? 'Saving…' : 'Rename'}
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => handleDeletePottsModel(run.cluster_id, run.model_id)}
-                              disabled={isDeleting || isBusy}
-                              className="text-xs px-3 py-2 rounded-md border border-red-500/40 text-red-200 hover:bg-red-500/10 disabled:opacity-50"
-                            >
-                              {isDeleting ? 'Deleting…' : 'Delete'}
-                            </button>
-                          </div>
-                        );
-                      })}
-                      {pottsRenameError && <ErrorMessage message={pottsRenameError} />}
-                      {pottsDeleteError && <ErrorMessage message={pottsDeleteError} />}
-                    </div>
-                  )}
-                  {pottsFitResults.length > 0 && (
-                    <div className="border-t border-gray-800 pt-3 space-y-2">
-                      <h4 className="text-xs font-semibold text-gray-300">Recent fit jobs</h4>
-                      <AnalysisResultsList
-                        results={pottsFitResultsWithClusters}
-                        emptyLabel="No fit results yet."
-                        onOpen={(result) => navigate(`/results/${result.job_id}`)}
-                        onDelete={handleDeleteResult}
-                      />
-                    </div>
-                  )}
-                </div>
-                <div className="bg-gray-900 border border-gray-700 rounded-lg p-4">
-                  <div className="flex flex-wrap items-center justify-between gap-3 mb-2">
-                    <div className="flex items-center gap-2">
-                      <h3 className="text-md font-semibold text-white">Potts Sampling</h3>
-                      <InfoTooltip
-                        ariaLabel="Potts analysis documentation"
-                        text="Run sampling with a selected fitted model."
-                        onClick={() => openDoc('potts_overview')}
-                      />
-                    </div>
-                    <div className="flex items-center gap-2 text-xs">
-                      <button
-                        type="button"
-                        onClick={() => setSamplingMode('run')}
-                        className={`px-2 py-1 rounded-md border ${
-                          samplingMode === 'run'
-                            ? 'border-cyan-400 text-cyan-200'
-                            : 'border-gray-700 text-gray-400 hover:text-gray-200'
-                        }`}
-                      >
-                        Run on server
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setSamplingMode('upload')}
-                        className={`px-2 py-1 rounded-md border ${
-                          samplingMode === 'upload'
-                            ? 'border-cyan-400 text-cyan-200'
-                            : 'border-gray-700 text-gray-400 hover:text-gray-200'
-                        }`}
-                      >
-                        Upload results
-                      </button>
-                    </div>
-                  </div>
-                  {samplingMode === 'run' ? (
-                    <SimulationAnalysisForm clusterRuns={readyClusterRuns} onSubmit={enqueueSimulationJob} />
-                  ) : (
-                    <div className="space-y-3">
-                      {samplingUploadProgress !== null && (
-                        <p className="text-xs text-gray-500">Uploading... {samplingUploadProgress}%</p>
-                      )}
-                      <SimulationUploadForm
-                        clusterRuns={readyClusterRuns}
-                        onSubmit={handleUploadSimulationResults}
-                        isBusy={samplingUploadBusy}
-                      />
-                    </div>
-                  )}
-                </div>
-              </div>
-              <div className="bg-gray-900 border border-gray-700 rounded-lg p-4 space-y-2">
-                <h4 className="text-sm font-semibold text-white">Sampling results</h4>
-                {resultsLoading && <p className="text-xs text-gray-500">Loading results…</p>}
-                {resultsError && <ErrorMessage message={resultsError} />}
-                {!resultsLoading && !resultsError && (
-                  <AnalysisResultsList
-                    results={simulationResults}
-                    emptyLabel="No Potts sampling results for this system yet."
-                    onOpen={(result) => navigate(`/results/${result.job_id}`)}
-                    onOpenSimulation={(result) => navigate(`/simulation/${result.job_id}`)}
-                    onDelete={handleDeleteResult}
-                  />
-                )}
-              </div>
-            </div>
+            <SystemDetailPottsSection
+              mdSamples={mdSamples}
+              gibbsSamples={gibbsSamples}
+              saSamples={saSamples}
+              metastableById={metastableById}
+              states={states}
+              openDescriptorExplorer={openDescriptorExplorer}
+              pottsFitClusterId={pottsFitClusterId}
+              pottsFitMode={pottsFitMode}
+              setPottsFitMode={setPottsFitMode}
+              setPottsFitClusterId={setPottsFitClusterId}
+              readyClusterRuns={readyClusterRuns}
+              pottsModelName={pottsModelName}
+              setPottsModelName={setPottsModelName}
+              handleDownloadSavedCluster={handleDownloadSavedCluster}
+              handleBackmappingAction={handleBackmappingAction}
+              backmappingJobStatus={backmappingJobStatus}
+              backmappingProgressById={backmappingDownloadProgress}
+              handleDeleteSavedCluster={handleDeleteSavedCluster}
+              handleUploadBackmappingTrajectories={handleUploadBackmappingTrajectories}
+              pottsFitMethod={pottsFitMethod}
+              setPottsFitMethod={setPottsFitMethod}
+              pottsFitContactMode={pottsFitContactMode}
+              setPottsFitContactMode={setPottsFitContactMode}
+              pottsFitContactCutoff={pottsFitContactCutoff}
+              setPottsFitContactCutoff={setPottsFitContactCutoff}
+              pottsFitAdvanced={pottsFitAdvanced}
+              setPottsFitAdvanced={setPottsFitAdvanced}
+              pottsFitParams={pottsFitParams}
+              setPottsFitParams={setPottsFitParams}
+              pottsFitError={pottsFitError}
+              enqueuePottsFitJob={enqueuePottsFitJob}
+              pottsFitSubmitting={pottsFitSubmitting}
+              pottsFitResults={pottsFitResults}
+              pottsFitResultsWithClusters={pottsFitResultsWithClusters}
+              handleDeleteResult={handleDeleteResult}
+              openDoc={openDoc}
+              selectedCluster={selectedCluster}
+              selectedClusterName={selectedClusterName}
+              pottsUploadName={pottsUploadName}
+              setPottsUploadName={setPottsUploadName}
+              setPottsUploadFile={setPottsUploadFile}
+              pottsUploadFile={pottsUploadFile}
+              pottsUploadProgress={pottsUploadProgress}
+              pottsUploadError={pottsUploadError}
+              pottsUploadBusy={pottsUploadBusy}
+              handleUploadPottsModel={handleUploadPottsModel}
+              pottsModels={pottsModels}
+              formatPottsModelName={formatPottsModelName}
+              pottsRenameValues={pottsRenameValues}
+              setPottsRenameValues={setPottsRenameValues}
+              pottsRenameBusy={pottsRenameBusy}
+              pottsDeleteBusy={pottsDeleteBusy}
+              handleDownloadPottsModel={handleDownloadPottsModel}
+              handleRenamePottsModel={handleRenamePottsModel}
+              handleDeletePottsModel={handleDeletePottsModel}
+              pottsRenameError={pottsRenameError}
+              pottsDeleteError={pottsDeleteError}
+              samplingMode={samplingMode}
+              setSamplingMode={setSamplingMode}
+              samplingUploadProgress={samplingUploadProgress}
+              handleUploadSimulationResults={handleUploadSimulationResults}
+              samplingUploadBusy={samplingUploadBusy}
+              enqueueSimulationJob={enqueueSimulationJob}
+              simulationResults={simulationResults}
+              resultsLoading={resultsLoading}
+              resultsError={resultsError}
+              navigate={navigate}
+            />
           )}
         </section>
-      )}
+          )}
+        </div>
+      </div>
       {clusterPanelOpen && (
         <ClusterBuildOverlay
           metastableStates={clusterSelectableStates}
@@ -2081,26 +1467,6 @@ export default function SystemDetailPage() {
           onUpload={handleUploadClusterNp}
         />
       )}
-      {clusterDetailState && (
-        <ClusterDetailOverlay
-          cluster={clusterDetailState}
-          analysisMode={analysisMode}
-          onClose={() => setClusterDetailState(null)}
-          onRename={handleRenameCluster}
-          onDownload={handleDownloadSavedCluster}
-          onDownloadBackmapping={handleBackmappingAction}
-          backmappingProgress={backmappingDownloadProgress[clusterDetailState.cluster_id] ?? null}
-          backmappingJob={backmappingJobStatus[clusterDetailState.cluster_id] ?? null}
-          onDelete={handleDeleteSavedCluster}
-          onVisualize={(clusterId) =>
-            navigate(
-              `/projects/${projectId}/systems/${systemId}/descriptors/visualize?cluster_id=${encodeURIComponent(
-                clusterId
-              )}`
-            )
-          }
-        />
-      )}
       {showMetastableInfo && (
         <DocOverlay docId={docId} onClose={() => setShowMetastableInfo(false)} onNavigate={setDocId} />
       )}
@@ -2114,8 +1480,6 @@ export default function SystemDetailPage() {
           onDownloadMacroNpz={handleDownloadMacroStateNpz}
         />
       )}
-        </div>
-      </div>
     </div>
   );
 }

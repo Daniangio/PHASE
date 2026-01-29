@@ -166,8 +166,9 @@ async def build_state_descriptors(
     state_meta: DescriptorState,
     *,
     residue_filter: Optional[str] = None,
+    traj_path_override: Optional[Path] = None,
 ) -> SystemMetadata:
-    if not state_meta.trajectory_file:
+    if not state_meta.trajectory_file and traj_path_override is None:
         raise HTTPException(status_code=400, detail="No trajectory uploaded for this state.")
     if not state_meta.pdb_file:
         raise HTTPException(status_code=400, detail="No PDB stored for this state.")
@@ -176,7 +177,10 @@ async def build_state_descriptors(
     system_dir = dirs["system_dir"]
     descriptors_dir = dirs["descriptors_dir"]
 
-    traj_path = project_store.resolve_path(project_id, system_meta.system_id, state_meta.trajectory_file)
+    if traj_path_override is not None:
+        traj_path = traj_path_override
+    else:
+        traj_path = project_store.resolve_path(project_id, system_meta.system_id, state_meta.trajectory_file)
     pdb_path = project_store.resolve_path(project_id, system_meta.system_id, state_meta.pdb_file)
 
     if not traj_path.exists():

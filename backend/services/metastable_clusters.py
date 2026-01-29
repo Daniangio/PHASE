@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 import inspect
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 from scipy.spatial import KDTree
@@ -109,21 +109,12 @@ def _fit_density_peaks(
     density_maxk: int,
     density_z: float | str,
     halo: bool,
-    n_jobs: int | None = None,
 ) -> tuple[Data, np.ndarray, int, Dict[str, Any]]:
     """Fit ADP density-peak clustering on embedded samples."""
     if samples.size == 0:
         raise ValueError("No samples provided for density peaks.")
     emb, period = _angles_to_periodic(samples)
     n = emb.shape[0]
-    if n == 1:
-        labels = np.zeros(1, dtype=np.int32)
-        diag = {"density_peaks_k": 1, "density_peaks_maxk": 1, "density_peaks_Z": density_z}
-        dp_data = Data(coordinates=emb, maxk=1, verbose=False, n_jobs=1, period=period)
-        dp_data.cluster_assignment = labels  # type: ignore[attr-defined]
-        dp_data.N_clusters = 1  # type: ignore[attr-defined]
-        return dp_data, labels, 1, diag
-
     dp_maxk = max(1, min(int(density_maxk), n - 1))
     dp_data = Data(coordinates=emb, maxk=dp_maxk, verbose=False, n_jobs=1, period=period)
     dp_data.compute_distances()
@@ -154,7 +145,6 @@ def _predict_cluster_adp(
     *,
     density_maxk: int,
     halo: bool,
-    n_jobs: int | None = None,
 ) -> np.ndarray:
     """Predict ADP cluster labels for new samples using a fitted Data object."""
     if not hasattr(dp_data, "predict_cluster_ADP"):
@@ -186,7 +176,6 @@ def _cluster_residue_samples(
     density_maxk: int,
     density_z: float | str,
     halo: bool,
-    n_jobs: int | None = None,
 ) -> Tuple[np.ndarray, int, Dict[str, Any], Data]:
     """Cluster angles with ADP density peaks."""
     if samples.size == 0:
@@ -201,7 +190,6 @@ def _cluster_residue_samples(
         density_maxk=density_maxk,
         density_z=density_z,
         halo=halo,
-        n_jobs=n_jobs,
     )
     return labels, int(k_final), diagnostics, dp_data
 
@@ -220,30 +208,28 @@ def _cluster_with_subsample(
     density_maxk: int,
     density_z: float | str,
     max_cluster_frames: Optional[int],
-    n_jobs: int | None = None,
     subsample_indices: Optional[np.ndarray] = None,
-) -> Tuple[np.ndarray, np.ndarray, int, Dict[str, Any], int, Data]:
+) -> Tuple[np.ndarray, np.ndarray, int, Dict[str, Any], int, Data, Data]:
     """Fit ADP on a subsample if requested, then predict labels on all frames."""
     n_frames = samples.shape[0]
     if not max_cluster_frames or max_cluster_frames <= 0 or n_frames <= max_cluster_frames:
-        labels_halo, k, diag, dp_data = _cluster_residue_samples(
+        labels_halo, k_halo, diag, dp_data_halo = _cluster_residue_samples(
             samples,
             density_maxk=density_maxk,
             density_z=density_z,
             halo=True,
-            n_jobs=n_jobs,
         )
-        labels_assigned = _predict_cluster_adp(
-            dp_data,
+        labels_assigned, k_assigned, _, dp_data_assigned = _cluster_residue_samples(
             samples,
             density_maxk=density_maxk,
+            density_z=density_z,
             halo=False,
-            n_jobs=n_jobs,
         )
+        k = max(k_halo, k_assigned)
         diag["subsampled"] = False
         diag["subsample_size"] = int(n_frames)
         diag["total_frames"] = int(n_frames)
-        return labels_halo, labels_assigned, k, diag, int(n_frames), dp_data
+        return labels_halo, labels_assigned, k, diag, int(n_frames), dp_data_halo, dp_data_assigned
 
     subsample_indices = (
         _uniform_subsample_indices(n_frames, int(max_cluster_frames))
@@ -252,31 +238,35 @@ def _cluster_with_subsample(
     )
     subsample_indices = np.asarray(subsample_indices, dtype=int)
     sub_samples = samples[subsample_indices]
-    _, k, diag, dp_data = _cluster_residue_samples(
+    _, k_halo, diag, dp_data_halo = _cluster_residue_samples(
         sub_samples,
         density_maxk=density_maxk,
         density_z=density_z,
         halo=True,
-        n_jobs=n_jobs,
+    )
+    _, k_assigned, _, dp_data_assigned = _cluster_residue_samples(
+        sub_samples,
+        density_maxk=density_maxk,
+        density_z=density_z,
+        halo=False,
     )
     labels_halo = _predict_cluster_adp(
-        dp_data,
+        dp_data_halo,
         samples,
         density_maxk=density_maxk,
         halo=True,
-        n_jobs=n_jobs,
     )
     labels_assigned = _predict_cluster_adp(
-        dp_data,
+        dp_data_assigned,
         samples,
         density_maxk=density_maxk,
         halo=False,
-        n_jobs=n_jobs,
     )
+    k = max(k_halo, k_assigned)
     diag["subsampled"] = True
     diag["subsample_size"] = int(subsample_indices.size)
     diag["total_frames"] = int(n_frames)
-    return labels_halo, labels_assigned, k, diag, int(subsample_indices.size), dp_data
+    return labels_halo, labels_assigned, k, diag, int(subsample_indices.size), dp_data_halo, dp_data_assigned
 
 
 def _cluster_residue_worker(
@@ -287,13 +277,12 @@ def _cluster_residue_worker(
     max_cluster_frames: Optional[int],
     subsample_indices: Optional[np.ndarray],
 ) -> Tuple[int, np.ndarray, np.ndarray, int]:
-    labels_halo, labels_assigned, k, _, _, _ = _cluster_with_subsample(
+    labels_halo, labels_assigned, k, _, _, _, _ = _cluster_with_subsample(
         samples,
         density_maxk=density_maxk,
         density_z=density_z,
         max_cluster_frames=max_cluster_frames,
         subsample_indices=subsample_indices,
-        n_jobs=1,
     )
     return col, labels_halo, labels_assigned, k
 
@@ -649,8 +638,18 @@ def evaluate_state_with_models(
         raise ValueError(f"Failed to parse cluster metadata_json: {exc}") from exc
 
     residue_keys = [str(k) for k in meta.get("residue_keys", [])]
-    model_paths = meta.get("model_paths") or []
-    if not residue_keys or len(model_paths) != len(residue_keys):
+    model_paths_halo = meta.get("model_paths_halo") or []
+    model_paths_assigned = meta.get("model_paths_assigned") or []
+    legacy_paths = meta.get("model_paths") or []
+    if not model_paths_halo and legacy_paths:
+        model_paths_halo = legacy_paths
+    if not model_paths_assigned and legacy_paths:
+        model_paths_assigned = legacy_paths
+    if (
+        not residue_keys
+        or len(model_paths_halo) != len(residue_keys)
+        or len(model_paths_assigned) != len(residue_keys)
+    ):
         raise ValueError("Cluster NPZ is missing model_paths for evaluation.")
 
     descriptor_path = store.resolve_path(project_id, system_id, state.descriptor_file)
@@ -672,14 +671,18 @@ def evaluate_state_with_models(
             n_frames = samples.shape[0]
         if samples.shape[0] != n_frames:
             raise ValueError("Descriptor frame counts are inconsistent across residues.")
-        model_rel = model_paths[idx]
-        if not model_rel:
+        model_rel_halo = model_paths_halo[idx]
+        model_rel_assigned = model_paths_assigned[idx]
+        if not model_rel_halo or not model_rel_assigned:
             continue
-        model_path = store.resolve_path(project_id, system_id, model_rel)
-        with open(model_path, "rb") as inp:
-            dp_data = pickle.load(inp)
-        labels_halo[:, idx] = _predict_cluster_adp(samples, dp_data, halo=True)
-        labels_assigned[:, idx] = _predict_cluster_adp(samples, dp_data, halo=False)
+        model_path_halo = store.resolve_path(project_id, system_id, model_rel_halo)
+        model_path_assigned = store.resolve_path(project_id, system_id, model_rel_assigned)
+        with open(model_path_halo, "rb") as inp:
+            dp_data_halo = pickle.load(inp)
+        with open(model_path_assigned, "rb") as inp:
+            dp_data_assigned = pickle.load(inp)
+        labels_halo[:, idx] = _predict_cluster_adp(samples, dp_data_halo, halo=True)
+        labels_assigned[:, idx] = _predict_cluster_adp(samples, dp_data_assigned, halo=False)
         if np.any(labels_assigned[:, idx] >= 0):
             cluster_counts[idx] = int(labels_assigned[:, idx].max()) + 1
 
@@ -895,13 +898,13 @@ def _build_condition_predictions(
     project_id: str,
     system_id: str,
     residue_keys: List[str],
-    dp_models: List[Data],
+    dp_models_halo: List[Data],
+    dp_models_assigned: List[Data],
     density_maxk: int,
     density_z: float | str,
     state_labels: Dict[str, str],
     metastable_labels: Dict[str, str],
     analysis_mode: Optional[str],
-    n_jobs: int | None = None,
 ) -> tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
     store = ProjectStore()
     system_meta = store.get_system(project_id, system_id)
@@ -935,18 +938,16 @@ def _build_condition_predictions(
             if angles is None or angles.shape[0] != frame_count:
                 continue
             labels_halo[:, res_idx] = _predict_cluster_adp(
-                dp_models[res_idx],
+                dp_models_halo[res_idx],
                 angles,
                 density_maxk=density_maxk,
                 halo=True,
-                n_jobs=n_jobs,
             )
             labels_assigned[:, res_idx] = _predict_cluster_adp(
-                dp_models[res_idx],
+                dp_models_assigned[res_idx],
                 angles,
                 density_maxk=density_maxk,
                 halo=False,
-                n_jobs=n_jobs,
             )
 
         key_slug = _slug(str(state_id))
@@ -1042,77 +1043,6 @@ def _build_condition_predictions(
     payload.update(halo_payload)
     return payload, predictions_meta, {"halo_summary": halo_meta}
 
-
-def _build_state_predictions_from_features(
-    *,
-    residue_keys: List[str],
-    features_by_state: Dict[str, Dict[str, np.ndarray]],
-    dp_models: List[Data],
-    density_maxk: int,
-    density_z: float | str,
-    state_labels: Dict[str, str],
-    n_jobs: int | None = None,
-) -> tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
-    n_residues = len(residue_keys)
-    payload: Dict[str, Any] = {}
-    predictions_meta: Dict[str, Any] = {}
-    halo_condition_ids: List[str] = []
-    halo_condition_labels: List[str] = []
-    halo_condition_types: List[str] = []
-    halo_matrix: List[np.ndarray] = []
-
-    for state_id, features in features_by_state.items():
-        frame_count = _infer_frame_count(features)
-        if frame_count <= 0:
-            continue
-        labels_halo = np.full((frame_count, n_residues), -1, dtype=np.int32)
-        labels_assigned = np.full((frame_count, n_residues), -1, dtype=np.int32)
-
-        for res_idx, key in enumerate(residue_keys):
-            angles = _extract_angles_array(features, key)
-            if angles is None or angles.shape[0] != frame_count:
-                continue
-            labels_halo[:, res_idx] = _predict_cluster_adp(
-                dp_models[res_idx],
-                angles,
-                density_maxk=density_maxk,
-                halo=True,
-                n_jobs=n_jobs,
-            )
-            labels_assigned[:, res_idx] = _predict_cluster_adp(
-                dp_models[res_idx],
-                angles,
-                density_maxk=density_maxk,
-                halo=False,
-                n_jobs=n_jobs,
-            )
-
-        key_slug = _slug(str(state_id))
-        payload[f"state__{key_slug}__labels_halo"] = labels_halo
-        payload[f"state__{key_slug}__labels_assigned"] = labels_assigned
-        payload[f"state__{key_slug}__frame_indices"] = np.arange(frame_count, dtype=np.int64)
-        predictions_meta[f"state:{state_id}"] = {
-            "type": "macro",
-            "labels_halo": f"state__{key_slug}__labels_halo",
-            "labels_assigned": f"state__{key_slug}__labels_assigned",
-            "frame_indices": f"state__{key_slug}__frame_indices",
-            "frame_count": int(frame_count),
-        }
-        halo_condition_ids.append(f"state:{state_id}")
-        halo_condition_labels.append(state_labels.get(str(state_id), str(state_id)))
-        halo_condition_types.append("macro")
-        halo_matrix.append(np.mean(labels_halo == -1, axis=0))
-
-    halo_payload, halo_meta = _build_halo_summary(
-        condition_ids=halo_condition_ids,
-        condition_labels=halo_condition_labels,
-        condition_types=halo_condition_types,
-        halo_matrix=halo_matrix,
-    )
-    payload.update(halo_payload)
-    return payload, predictions_meta, {"halo_summary": halo_meta}
-
-
 def _build_state_predictions_from_merged(
     *,
     merged_labels_halo: np.ndarray,
@@ -1197,7 +1127,6 @@ def generate_metastable_cluster_npz(
     density_z: float | str | None = None,
     persist_models: bool = True,
     progress_callback: Optional[Callable[[str, int, int], None]] = None,
-    n_jobs: int | None = None,
 ) -> Tuple[Path, Dict[str, Any]]:
     """
     Build per-residue cluster labels for selected metastable states and save NPZ.
@@ -1266,19 +1195,19 @@ def generate_metastable_cluster_npz(
         merged_subsample_indices.size if merged_subsample_indices is not None else merged_frame_count
     )
 
-    dp_models: List[Data] = []
+    dp_models_halo: List[Data] = []
+    dp_models_assigned: List[Data] = []
 
     for col, samples in enumerate(merged_angles_per_residue):
         sample_arr = np.asarray(samples, dtype=float)
         if sample_arr.shape[0] != merged_frame_count:
             raise ValueError("Merged residue samples have inconsistent frame counts.")
-        labels_halo, labels_assigned, k, diag, _, dp_data = _cluster_with_subsample(
+        labels_halo, labels_assigned, k, diag, _, dp_data_halo, dp_data_assigned = _cluster_with_subsample(
             sample_arr,
             density_maxk=density_maxk_val,
             density_z=density_z_val,
             max_cluster_frames=max_cluster_frames_val,
             subsample_indices=merged_subsample_indices,
-            n_jobs=n_jobs,
         )
         if labels_halo.size == 0:
             merged_labels_halo[:, col] = -1
@@ -1290,7 +1219,8 @@ def generate_metastable_cluster_npz(
             if np.any(labels_assigned >= 0):
                 k = max(k, int(labels_assigned.max()) + 1)
             merged_counts[col] = k
-        dp_models.append(dp_data)
+        dp_models_halo.append(dp_data_halo)
+        dp_models_assigned.append(dp_data_assigned)
         if progress_callback and total_residue_jobs:
             completed_residue_jobs += 1
             progress_callback(
@@ -1303,13 +1233,13 @@ def generate_metastable_cluster_npz(
         project_id=project_id,
         system_id=system_id,
         residue_keys=residue_keys,
-        dp_models=dp_models,
+        dp_models_halo=dp_models_halo,
+        dp_models_assigned=dp_models_assigned,
         density_maxk=density_maxk_val,
         density_z=density_z_val,
         state_labels=state_labels,
         metastable_labels=metastable_labels,
         analysis_mode=getattr(system_meta, "analysis_mode", None),
-        n_jobs=n_jobs,
     )
 
     # Persist NPZ
@@ -1375,20 +1305,30 @@ def generate_metastable_cluster_npz(
     if persist_models:
         model_dir = out_path.parent / "models"
         model_dir.mkdir(parents=True, exist_ok=True)
-        model_paths: List[str | None] = []
-        for idx, dp_data in enumerate(dp_models):
-            if dp_data is None:
-                model_paths.append(None)
+        model_paths_halo: List[str | None] = []
+        model_paths_assigned: List[str | None] = []
+        for idx, (dp_halo, dp_assigned) in enumerate(zip(dp_models_halo, dp_models_assigned)):
+            if dp_halo is None or dp_assigned is None:
+                model_paths_halo.append(None)
+                model_paths_assigned.append(None)
                 continue
-            model_path = model_dir / f"res_{idx:04d}.pkl"
-            with open(model_path, "wb") as outp:
-                pickle.dump(dp_data, outp, pickle.HIGHEST_PROTOCOL)
+            model_path_halo = model_dir / f"res_{idx:04d}_halo.pkl"
+            model_path_assigned = model_dir / f"res_{idx:04d}_assigned.pkl"
+            with open(model_path_halo, "wb") as outp:
+                pickle.dump(dp_halo, outp, pickle.HIGHEST_PROTOCOL)
+            with open(model_path_assigned, "wb") as outp:
+                pickle.dump(dp_assigned, outp, pickle.HIGHEST_PROTOCOL)
             try:
-                rel = str(model_path.relative_to(store.ensure_directories(project_id, system_id)["system_dir"]))
+                system_root = store.ensure_directories(project_id, system_id)["system_dir"]
+                rel_halo = str(model_path_halo.relative_to(system_root))
+                rel_assigned = str(model_path_assigned.relative_to(system_root))
             except Exception:
-                rel = str(model_path)
-            model_paths.append(rel)
-        metadata["model_paths"] = model_paths
+                rel_halo = str(model_path_halo)
+                rel_assigned = str(model_path_assigned)
+            model_paths_halo.append(rel_halo)
+            model_paths_assigned.append(rel_assigned)
+        metadata["model_paths_halo"] = model_paths_halo
+        metadata["model_paths_assigned"] = model_paths_assigned
     payload["metadata_json"] = np.array(json.dumps(metadata))
 
     np.savez_compressed(out_path, **payload)
@@ -1596,13 +1536,12 @@ def generate_cluster_npz_from_descriptors(
     else:
         for col, samples in enumerate(merged_angles_per_residue):
             sample_arr = np.asarray(samples, dtype=float)
-            labels_halo, labels_assigned, k, _, _, _ = _cluster_with_subsample(
+            labels_halo, labels_assigned, k, _, _, _, _ = _cluster_with_subsample(
                 sample_arr,
                 density_maxk=density_maxk_val,
                 density_z=density_z_val,
                 max_cluster_frames=max_cluster_frames_val,
                 subsample_indices=merged_subsample_indices,
-                n_jobs=1,
             )
             if labels_halo.size == 0:
                 merged_labels_halo[:, col] = -1
@@ -1778,7 +1717,7 @@ def run_cluster_chunk(
 
     params = manifest.get("cluster_params", {})
     sample_arr = np.asarray(angles[:, residue_index, :], dtype=float)
-    labels_halo, labels_assigned, k, diag, _, _ = _cluster_with_subsample(
+    labels_halo, labels_assigned, k, diag, _, _, _ = _cluster_with_subsample(
         sample_arr,
         density_maxk=int(params.get("density_maxk", 100)),
         density_z=params.get("density_z", "auto"),
@@ -1827,11 +1766,12 @@ def reduce_cluster_workspace(work_dir: Path) -> Tuple[Path, Dict[str, Any]]:
         merged_subsample_indices.size if merged_subsample_indices is not None else n_frames
     )
 
-    dp_models: List[Data] = []
+    dp_models_halo: List[Data] = []
+    dp_models_assigned: List[Data] = []
 
     for idx in range(n_residues):
         sample_arr = np.asarray(angles[:, idx, :], dtype=float)
-        labels_halo, labels_assigned, k, diag, _, dp_data = _cluster_with_subsample(
+        labels_halo, labels_assigned, k, diag, _, dp_data_halo, dp_data_assigned = _cluster_with_subsample(
             sample_arr,
             density_maxk=density_maxk_val,
             density_z=density_z_val,
@@ -1848,7 +1788,8 @@ def reduce_cluster_workspace(work_dir: Path) -> Tuple[Path, Dict[str, Any]]:
             if np.any(labels_assigned >= 0):
                 k = max(k, int(labels_assigned.max()) + 1)
             merged_counts[idx] = k
-        dp_models.append(dp_data)
+        dp_models_halo.append(dp_data_halo)
+        dp_models_assigned.append(dp_data_assigned)
 
     store = ProjectStore()
     system_meta = store.get_system(project_id, system_id)
@@ -1873,7 +1814,8 @@ def reduce_cluster_workspace(work_dir: Path) -> Tuple[Path, Dict[str, Any]]:
         project_id=project_id,
         system_id=system_id,
         residue_keys=residue_keys,
-        dp_models=dp_models,
+        dp_models_halo=dp_models_halo,
+        dp_models_assigned=dp_models_assigned,
         density_maxk=density_maxk_val,
         density_z=density_z_val,
         state_labels=state_labels,
@@ -1925,20 +1867,30 @@ def reduce_cluster_workspace(work_dir: Path) -> Tuple[Path, Dict[str, Any]]:
     payload.update(condition_payload)
     model_dir = out_path.parent / "models"
     model_dir.mkdir(parents=True, exist_ok=True)
-    model_paths: List[str | None] = []
-    for idx, dp_data in enumerate(dp_models):
-        if dp_data is None:
-            model_paths.append(None)
+    model_paths_halo: List[str | None] = []
+    model_paths_assigned: List[str | None] = []
+    for idx, (dp_halo, dp_assigned) in enumerate(zip(dp_models_halo, dp_models_assigned)):
+        if dp_halo is None or dp_assigned is None:
+            model_paths_halo.append(None)
+            model_paths_assigned.append(None)
             continue
-        model_path = model_dir / f"res_{idx:04d}.pkl"
-        with open(model_path, "wb") as outp:
-            pickle.dump(dp_data, outp, pickle.HIGHEST_PROTOCOL)
+        model_path_halo = model_dir / f"res_{idx:04d}_halo.pkl"
+        model_path_assigned = model_dir / f"res_{idx:04d}_assigned.pkl"
+        with open(model_path_halo, "wb") as outp:
+            pickle.dump(dp_halo, outp, pickle.HIGHEST_PROTOCOL)
+        with open(model_path_assigned, "wb") as outp:
+            pickle.dump(dp_assigned, outp, pickle.HIGHEST_PROTOCOL)
         try:
-            rel = str(model_path.relative_to(store.ensure_directories(project_id, system_id)["system_dir"]))
+            system_root = store.ensure_directories(project_id, system_id)["system_dir"]
+            rel_halo = str(model_path_halo.relative_to(system_root))
+            rel_assigned = str(model_path_assigned.relative_to(system_root))
         except Exception:
-            rel = str(model_path)
-        model_paths.append(rel)
-    metadata["model_paths"] = model_paths
+            rel_halo = str(model_path_halo)
+            rel_assigned = str(model_path_assigned)
+        model_paths_halo.append(rel_halo)
+        model_paths_assigned.append(rel_assigned)
+    metadata["model_paths_halo"] = model_paths_halo
+    metadata["model_paths_assigned"] = model_paths_assigned
     payload["metadata_json"] = np.array(json.dumps(metadata))
 
     np.savez_compressed(out_path, **payload)

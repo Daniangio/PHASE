@@ -900,8 +900,9 @@ async def delete_result(job_uuid: str):
     """
     Deletes a job's persisted JSON file.
     """
-    results_dirs = project_store.ensure_results_directories(project_id, system_id)
-    result_file = results_dirs["jobs_dir"] / f"{job_uuid}.json"
+    result_file = _find_result_file(job_uuid)
+    if not result_file or not result_file.exists():
+        raise HTTPException(status_code=404, detail=f"No data found for job UUID '{job_uuid}'.")
 
     try:
         results_dir_value = None

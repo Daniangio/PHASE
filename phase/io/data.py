@@ -42,6 +42,7 @@ def load_npz(
     path: str,
     *,
     unassigned_policy: UnassignedPolicy = "drop_frames",
+    allow_missing_edges: bool = False,
 ) -> TorsionDataset:
     """
     Expects keys similar to your clustering output:
@@ -59,9 +60,12 @@ def load_npz(
         labels = np.asarray(data["merged__labels"], dtype=int)
     cluster_counts = np.asarray(data["merged__cluster_counts"], dtype=int)
 
+    edges: List[Tuple[int, int]] = []
     if "contact_edge_index" not in data:
-        raise KeyError("contact_edge_index not found in npz.")
-    edges = _dedup_edges(np.asarray(data["contact_edge_index"]), n_res=labels.shape[1])
+        if not allow_missing_edges:
+            raise KeyError("contact_edge_index not found in npz.")
+    else:
+        edges = _dedup_edges(np.asarray(data["contact_edge_index"]), n_res=labels.shape[1])
 
     frame_state_ids = None
     if "merged__frame_state_ids" in data:

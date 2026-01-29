@@ -398,6 +398,80 @@ async def queue_backmapping_npz_job(
 
 
 @router.post(
+    "/projects/{project_id}/systems/{system_id}/metastable/clusters/{cluster_id}/backmapping_npz/upload",
+    summary="Upload trajectories on-demand to build a backmapping NPZ",
+)
+async def upload_backmapping_npz(
+    project_id: str,
+    system_id: str,
+    cluster_id: str,
+    trajectories: List[UploadFile] = File(...),
+    state_ids: str = Form(...),
+):
+    try:
+        system_meta = project_store.get_system(project_id, system_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"System '{system_id}' not found.")
+
+    clusters = system_meta.metastable_clusters or []
+    entry = next((c for c in clusters if c.get("cluster_id") == cluster_id), None)
+    if not entry:
+        raise HTTPException(status_code=404, detail="Cluster NPZ not found.")
+
+    parsed_state_ids = _parse_state_ids(state_ids)
+    if not parsed_state_ids:
+        raise HTTPException(status_code=400, detail="Provide state_ids for uploaded trajectories.")
+    if len(parsed_state_ids) != len(trajectories):
+        raise HTTPException(
+            status_code=400,
+            detail="State selection count must match the number of uploaded trajectories.",
+        )
+
+    rel_path = entry.get("path")
+    if not rel_path:
+        raise HTTPException(status_code=404, detail="Cluster NPZ path missing.")
+    cluster_path = Path(rel_path)
+    if not cluster_path.is_absolute():
+        cluster_path = project_store.resolve_path(project_id, system_id, rel_path)
+    if not cluster_path.exists():
+        raise HTTPException(status_code=404, detail="Cluster NPZ file is missing on disk.")
+
+    cluster_dirs = project_store.ensure_cluster_directories(project_id, system_id, cluster_id)
+    upload_root = cluster_dirs["cluster_dir"] / "backmapping_uploads" / str(uuid.uuid4())
+    upload_root.mkdir(parents=True, exist_ok=True)
+    out_path = upload_root / "backmapping.npz"
+
+    overrides: Dict[str, Path] = {}
+    try:
+        for state_id, upload in zip(parsed_state_ids, trajectories):
+            filename = upload.filename or "traj"
+            dest = upload_root / f"{state_id}_{filename}"
+            await stream_upload(upload, dest)
+            overrides[str(state_id)] = dest
+
+        await run_in_threadpool(
+            build_backmapping_npz,
+            project_id,
+            system_id,
+            cluster_path,
+            out_path,
+            trajectory_overrides=overrides,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to build backmapping NPZ: {exc}") from exc
+    finally:
+        for path in overrides.values():
+            try:
+                path.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+    return FileResponse(out_path, filename=out_path.name, media_type="application/octet-stream")
+
+
+@router.post(
     "/projects/{project_id}/systems/{system_id}/metastable/clusters/upload",
     summary="Upload a locally generated cluster NPZ and map it to macro-states",
 )

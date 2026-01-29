@@ -1,12 +1,44 @@
 """
-Compatibility shim for backend imports.
+Persistent storage helpers for project and descriptor metadata.
 
-Core storage logic now lives in phase.services.project_store to allow offline
-scripts to run without importing backend.
+This module centralizes all filesystem paths used to store projects,
+systems, uploaded structures, and computed descriptor artifacts.
 """
 
-from phase.services.project_store import *
-from phase.services.project_store import _utc_now, _read_json, _write_json
+from __future__ import annotations
+
+import json
+import uuid
+from dataclasses import dataclass, field, asdict
+from datetime import datetime
+import os
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Union
+import shutil
+
+
+# Allow overriding the data root (e.g., to point to a larger, persistent volume).
+DATA_ROOT = Path(os.getenv("PHASE_DATA_ROOT", "/app/data"))
+PROJECTS_DIR = DATA_ROOT / "projects"
+SelectionInput = Union[Dict[str, str], List[str]]
+
+
+def _read_json(path: Path) -> Dict[str, Any]:
+    with open(path, "r") as fh:
+        return json.load(fh)
+
+
+def _write_json(path: Path, payload: Dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(".json.tmp")
+    with open(tmp_path, "w") as fh:
+        json.dump(payload, fh, indent=2)
+    tmp_path.replace(path)
+
+
+def _utc_now() -> str:
+    return datetime.utcnow().isoformat()
+
 
 @dataclass
 class DescriptorState:

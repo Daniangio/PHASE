@@ -163,14 +163,17 @@ def fit_potts_pmi(
     return PottsModel(h=h, J=J, edges=list(edges))
 
 
+
 def fit_potts_pseudolikelihood_torch(
     labels: np.ndarray,
     K: Sequence[int],
     edges: Sequence[Tuple[int, int]],
     *,
     l2: float = 1e-5,
-    lr: float = 1e-3,
-    lr_min: float = 1e-3,
+    lambda_J_block: float = 1e-4,
+    zero_sum_gauge: bool = True,
+    lr: float = 1e-2,
+    lr_min: float = 1e-4,
     lr_schedule: str = "cosine",
     epochs: int = 200,
     batch_size: int = 512,
@@ -268,6 +271,50 @@ def fit_potts_pseudolikelihood_torch(
 
     loss_fn = torch.nn.CrossEntropyLoss()
 
+    eps = 1e-12
+
+    def _fro_norm(mat: "torch.Tensor") -> "torch.Tensor":
+        # Frobenius norm (smooth at 0)
+        return torch.sqrt(torch.sum(mat * mat) + eps)
+
+    @torch.no_grad()
+    def _apply_zero_sum_gauge_():
+        """
+        Put (h, J) into a standard zero-sum gauge while preserving the model distribution
+        (up to additive constants). Works on the PARAMS USED IN LOGITS (h_params, J_params).
+
+        For each edge (r,s) with matrix M (K_r x K_s):
+            row_mean[a] = mean_b M[a,b]
+            col_mean[b] = mean_a M[a,b]
+            overall = mean_{a,b} M[a,b]
+        We set:
+            M <- M - row_mean - col_mean + overall
+            h_r <- h_r + row_mean
+            h_s <- h_s + col_mean
+        Then finally center h_r to zero-mean (optional gauge fixing on fields).
+        """
+        # First, fix each coupling block and push row/col means into fields
+        for (r, s) in edges:
+            key = f"{r}_{s}"
+            M = J_params[key]                    # shape (K_r, K_s)
+
+            row_mean = M.mean(dim=1, keepdim=True)  # (K_r, 1)
+            col_mean = M.mean(dim=0, keepdim=True)  # (1, K_s)
+            overall  = M.mean()                      # scalar
+
+            # push means into the corresponding fields (preserves energies up to constants)
+            h_params[r].add_(row_mean.squeeze(1))
+            h_params[s].add_(col_mean.squeeze(0))
+
+            # double-center coupling
+            M.sub_(row_mean)
+            M.sub_(col_mean)
+            M.add_(overall)
+
+        # Then center fields to zero mean per site (pure gauge; adds constants)
+        for r in range(N):
+            h_params[r].sub_(h_params[r].mean())
+
     idx = np.arange(T)
     progress_every = max(1, int(progress_every))
     total_batches = max(1, (T + batch_size - 1) // batch_size)
@@ -309,9 +356,20 @@ def fit_potts_pseudolikelihood_torch(
                 logits = _logits_for_residue(xb, r)  # (B,K_r)
                 y = xb[:, r]
                 loss = loss + loss_fn(logits, y)
+            
+            # block regularization per edge (group-lasso style over coupling matrices)
+            if lambda_J_block > 0:
+                reg = torch.tensor(0.0, device=torch_device)
+                for key in J_params:
+                    reg = reg + _fro_norm(J_params[key])
+                loss = loss + lambda_J_block * reg
 
             loss.backward()
+
             opt.step()
+
+            if zero_sum_gauge:
+                _apply_zero_sum_gauge_()
 
             total += float(loss.item()) * len(bidx)
             nobs += len(bidx)

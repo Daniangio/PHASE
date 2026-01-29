@@ -28,6 +28,7 @@ export default function DescriptorVizPage() {
   const [error, setError] = useState(null);
 
   const [selectedStates, setSelectedStates] = useState([]);
+  const [selectedMetastableIds, setSelectedMetastableIds] = useState([]);
   const [residueFilter, setResidueFilter] = useState('');
   const [selectedResidue, setSelectedResidue] = useState('');
   const [residueOptions, setResidueOptions] = useState([]);
@@ -46,6 +47,7 @@ export default function DescriptorVizPage() {
   }, []);
   const [maxPoints, setMaxPoints] = useState(2000);
   const [appliedStateQuery, setAppliedStateQuery] = useState('');
+  const [appliedMetaQuery, setAppliedMetaQuery] = useState('');
   const [selectedClusterId, setSelectedClusterId] = useState('');
   const [clusterLegend, setClusterLegend] = useState([]);
   const [clusterLabelMode, setClusterLabelMode] = useState('halo');
@@ -129,6 +131,22 @@ export default function DescriptorVizPage() {
     }
     setAppliedStateQuery(queryKey);
   }, [appliedStateQuery, descriptorStates, location.search, system]);
+
+  useEffect(() => {
+    if (!system) return;
+    const params = new URLSearchParams(location.search || '');
+    const metaParam = params.get('metastable_ids');
+    if (!metaParam) return;
+    if (metaParam === appliedMetaQuery) return;
+    const ids = metaParam
+      .split(',')
+      .map((v) => v.trim())
+      .filter(Boolean);
+    if (ids.length) {
+      setSelectedMetastableIds(ids);
+    }
+    setAppliedMetaQuery(metaParam);
+  }, [appliedMetaQuery, location.search, system]);
 
 
   const residueKeys = useMemo(() => sortResidues(residueOptions), [residueOptions, sortResidues]);
@@ -395,6 +413,9 @@ export default function DescriptorVizPage() {
         qs.cluster_id = selectedClusterId;
         qs.cluster_label_mode = clusterLabelMode;
       }
+      if (selectedMetastableIds.length) {
+        qs.metastable_ids = selectedMetastableIds;
+      }
       if (selectedResidue) {
         qs.residue_keys = selectedResidue;
       }
@@ -492,6 +513,7 @@ export default function DescriptorVizPage() {
     maxPoints,
     clusterLabelMode,
     projectId,
+    selectedMetastableIds,
     selectedClusterId,
     selectedResidue,
     selectedStates,
@@ -507,7 +529,7 @@ export default function DescriptorVizPage() {
       setSelectedResidue('');
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedStates, selectedClusterId, selectedResidue, clusterLabelMode]);
+  }, [selectedStates, selectedClusterId, selectedResidue, clusterLabelMode, selectedMetastableIds]);
 
   const traces3d = useMemo(() => {
     const traces = [];
@@ -658,6 +680,9 @@ export default function DescriptorVizPage() {
             States: {selectedStates.length ? stateSummaries.map((s) => s.name).join(', ') : '—'}
           </div>
           <div>
+            Metastable: {selectedMetastableIds.length ? selectedMetastableIds.length : 'All'}
+          </div>
+          <div>
             Frames:{' '}
             {stateSummaries.length
               ? stateSummaries.map((s) => `${s.name}: ${s.frames ?? '—'}`).join(' • ')
@@ -675,7 +700,7 @@ export default function DescriptorVizPage() {
       {descriptorStates.length === 0 ? (
         <ErrorMessage message="No descriptor-ready states. Upload trajectories and build descriptors first." />
       ) : (
-        <div className="lg:grid lg:grid-cols-[minmax(220px,20%)_1fr] gap-4">
+        <div className="lg:grid lg:grid-cols-[minmax(260px,24%)_1fr] gap-4">
           <aside className="bg-gray-800 border border-gray-700 rounded-lg p-4 space-y-4">
             <div>
               <label className="block text-xs text-gray-400 mb-1">Max points per residue</label>
@@ -695,6 +720,100 @@ export default function DescriptorVizPage() {
             >
               {loadingAngles ? 'Loading…' : 'Refresh data'}
             </button>
+            <div>
+              <div className="flex items-center justify-between mb-2">
+                <p className="text-xs text-gray-400">Macro states</p>
+                <div className="flex items-center gap-2 text-[11px] text-gray-400">
+                  <button
+                    type="button"
+                    onClick={() => setSelectedStates(descriptorStates.map((s) => s.state_id))}
+                    className="hover:text-cyan-300"
+                  >
+                    Select all
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setSelectedStates([])}
+                    className="hover:text-cyan-300"
+                  >
+                    Deselect all
+                  </button>
+                </div>
+              </div>
+              <div className="space-y-2 max-h-48 overflow-y-auto border border-gray-700 rounded-md p-2 bg-gray-900">
+                {descriptorStates.map((state) => (
+                  <label key={state.state_id} className="flex items-center gap-2 text-xs text-gray-200">
+                    <input
+                      type="checkbox"
+                      checked={selectedStates.includes(state.state_id)}
+                      onChange={() =>
+                        setSelectedStates((prev) =>
+                          prev.includes(state.state_id)
+                            ? prev.filter((id) => id !== state.state_id)
+                            : [...prev, state.state_id]
+                        )
+                      }
+                      className="accent-cyan-500"
+                    />
+                    <span className="truncate">{state.name || state.state_id}</span>
+                  </label>
+                ))}
+              </div>
+            </div>
+            {metastableStates.length > 0 && (
+              <div>
+                <div className="flex items-center justify-between mb-2">
+                  <p className="text-xs text-gray-400">Metastable states</p>
+                  <div className="flex items-center gap-2 text-[11px] text-gray-400">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setSelectedMetastableIds(
+                          metastableStates.map((m) => m.metastable_id).filter(Boolean)
+                        )
+                      }
+                      className="hover:text-cyan-300"
+                    >
+                      Select all
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setSelectedMetastableIds([])}
+                      className="hover:text-cyan-300"
+                    >
+                      Deselect all
+                    </button>
+                  </div>
+                </div>
+                <div className="space-y-2 max-h-48 overflow-y-auto border border-gray-700 rounded-md p-2 bg-gray-900">
+                  {metastableStates.map((meta) => {
+                    const label = meta.name || meta.default_name || meta.metastable_id;
+                    const macroLabel =
+                      descriptorStates.find((s) => s.state_id === meta.macro_state_id)?.name ||
+                      meta.macro_state_id;
+                    return (
+                      <label key={meta.metastable_id} className="flex items-center gap-2 text-xs text-gray-200">
+                        <input
+                          type="checkbox"
+                          checked={selectedMetastableIds.includes(meta.metastable_id)}
+                          onChange={() =>
+                            setSelectedMetastableIds((prev) =>
+                              prev.includes(meta.metastable_id)
+                                ? prev.filter((id) => id !== meta.metastable_id)
+                                : [...prev, meta.metastable_id]
+                            )
+                          }
+                          className="accent-cyan-500"
+                        />
+                        <span className="truncate">
+                          {label} <span className="text-[10px] text-gray-500">({macroLabel})</span>
+                        </span>
+                      </label>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
             <div>
               <label className="block text-xs text-gray-400 mb-1">Cluster NPZ (optional coloring)</label>
               <select

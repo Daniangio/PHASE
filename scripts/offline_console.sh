@@ -279,15 +279,11 @@ state_menu() {
         CLUSTER_ID="$(printf "%s" "$CLUSTER_ROW" | awk -F'|' '{print $1}')"
         if [ -z "$CLUSTER_ID" ]; then
           echo "No cluster selected."
-          pause
-          ;;
         fi
         STATE_ROW="$(offline_select_state_one)"
         STATE_ID="$(printf "%s" "$STATE_ROW" | awk -F'|' '{print $1}')"
         if [ -z "$STATE_ID" ]; then
           echo "No state selected."
-          pause
-          ;;
         fi
         python -m phase.scripts.evaluate_state \
           --root "$OFFLINE_ROOT" \

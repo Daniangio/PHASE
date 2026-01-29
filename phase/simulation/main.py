@@ -157,6 +157,8 @@ def _pad_marginals_for_save(margs: Sequence[np.ndarray]) -> np.ndarray:
 def _load_assigned_labels(path: Path) -> np.ndarray | None:
     try:
         with np.load(path, allow_pickle=False) as data:
+            if "assigned__labels_assigned" in data:
+                return np.asarray(data["assigned__labels_assigned"], dtype=int)
             if "assigned__labels" in data:
                 return np.asarray(data["assigned__labels"], dtype=int)
     except Exception:
@@ -265,12 +267,19 @@ def _compute_cross_likelihood_classification(
     selected_meta_ids = {str(v) for v in (meta.get("selected_metastable_ids") or [])}
     assigned_state_ids = {str(k) for k in assigned_state_paths.keys()}
     assigned_meta_ids = {str(k) for k in assigned_meta_paths.keys()}
+    metastable_kinds = meta.get("metastable_kinds") or {}
     fit_state_ids = set()
     fit_meta_ids = set()
     if frame_state_ids is not None and frame_state_ids.shape[0] == labels.shape[0]:
         fit_state_ids = {str(v) for v in np.unique(frame_state_ids)}
     if frame_metastable_ids is not None and frame_metastable_ids.shape[0] == labels.shape[0]:
         fit_meta_ids = {str(v) for v in np.unique(frame_metastable_ids)}
+    if not fit_state_ids and not fit_meta_ids and selected_meta_ids:
+        for meta_id in selected_meta_ids:
+            if metastable_kinds.get(str(meta_id)) == "metastable":
+                fit_meta_ids.add(str(meta_id))
+            else:
+                fit_state_ids.add(str(meta_id))
 
     other_sources = []
     for src in md_sources:
@@ -298,6 +307,16 @@ def _compute_cross_likelihood_classification(
             if label.lower().startswith(prefix.lower()):
                 label = label[len(prefix):].strip()
         return label.strip()
+
+    def _resolve_source_label(src: dict) -> str:
+        src_id = str(src.get("id", ""))
+        if src_id.startswith("state:"):
+            state_id = src_id.split(":", 1)[1]
+            return _clean_label(state_labels.get(str(state_id), state_id))
+        if src_id.startswith("meta:"):
+            meta_id = src_id.split(":", 1)[1]
+            return _clean_label(metastable_labels.get(str(meta_id), meta_id))
+        return _clean_label(src.get("label") or src_id)
 
     delta_fit_list: list[np.ndarray] = []
     delta_other_list: list[np.ndarray] = []
@@ -373,7 +392,7 @@ def _compute_cross_likelihood_classification(
         auc_score_list.append(auc_score)
         roc_score_fpr_list.append(fpr_score)
         roc_score_tpr_list.append(tpr_score)
-        other_labels.append(_clean_label(src.get("label") or src.get("id")))
+        other_labels.append(_resolve_source_label(src))
         other_ids.append(str(src.get("id")))
 
     if not delta_fit_list:
@@ -929,6 +948,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--plm-lr-min", type=float, default=1e-3)
     ap.add_argument("--plm-lr-schedule", type=str, default="cosine", choices=["cosine", "none"])
     ap.add_argument("--plm-l2", type=float, default=1e-5)
+    ap.add_argument("--plm-lambda", type=float, default=1e-3)
     ap.add_argument("--plm-batch-size", type=int, default=512)
     ap.add_argument("--plm-progress-every", type=int, default=10)
     ap.add_argument(
@@ -1115,7 +1135,11 @@ def run_pipeline(
     if args.fit_only and args.model_npz:
         raise ValueError("Use --fit-only without --model-npz.")
 
-    ds = load_npz(args.npz, unassigned_policy=args.unassigned_policy)
+    ds = load_npz(
+        args.npz,
+        unassigned_policy=args.unassigned_policy,
+        allow_missing_edges=True,
+    )
     report("Loaded dataset", 8)
     labels = ds.labels
     K = ds.cluster_counts
@@ -1211,6 +1235,7 @@ def run_pipeline(
                     K,
                     edges,
                     l2=args.plm_l2,
+                    lambda_J_block=args.plm_lambda,
                     lr=args.plm_lr,
                     lr_min=args.plm_lr_min,
                     lr_schedule=args.plm_lr_schedule,

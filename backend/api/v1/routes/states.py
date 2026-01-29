@@ -162,13 +162,19 @@ async def upload_state_trajectory(
         slice_spec = stride_to_slice(stride_val)
 
     dirs = project_store.ensure_directories(project_id, system_id)
-    traj_dir = dirs["trajectories_dir"]
     system_dir = dirs["system_dir"]
+    tmp_dir = dirs["tmp_dir"]
 
-    traj_path = traj_dir / f"{state_id}_{trajectory.filename or 'traj'}"
+    traj_path = tmp_dir / f"{state_id}_{trajectory.filename or 'traj'}"
     await stream_upload(trajectory, traj_path)
 
-    state_meta.trajectory_file = str(traj_path.relative_to(system_dir))
+    if state_meta.trajectory_file:
+        old_traj = project_store.resolve_path(project_id, system_id, state_meta.trajectory_file)
+        try:
+            old_traj.unlink(missing_ok=True)
+        except Exception:
+            pass
+        state_meta.trajectory_file = None
     state_meta.source_traj = trajectory.filename
     state_meta.stride = stride_val
     state_meta.slice_spec = slice_spec
@@ -202,11 +208,17 @@ async def upload_state_trajectory(
             system_meta,
             state_meta,
             residue_filter=residue_selection,
+            traj_path_override=traj_path,
         )
     except Exception as exc:
         system_meta.status = "failed"
         project_store.save_system(system_meta)
         raise HTTPException(status_code=500, detail=f"Descriptor build failed after upload: {exc}") from exc
+    finally:
+        try:
+            traj_path.unlink(missing_ok=True)
+        except Exception:
+            pass
 
     return serialize_system(system_meta)
 

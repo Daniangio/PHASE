@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 from typing import Iterable, List
 
-from backend.services.project_store import ProjectStore, ProjectMetadata, SystemMetadata
+from phase.services.project_store import ProjectStore, ProjectMetadata, SystemMetadata
 
 
 def _project_meta_path(root: Path, project_id: str) -> Path:

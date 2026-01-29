@@ -120,7 +120,7 @@ def main(argv: list[str] | None = None) -> int:
                 update_cluster_metadata_with_assignments,
                 build_cluster_entry,
             )
-            from backend.services.project_store import ProjectStore
+            from phase.services.project_store import ProjectStore
 
             state_ids = _parse_paths(args.state_ids)
             cluster_id = str(uuid.uuid4())
