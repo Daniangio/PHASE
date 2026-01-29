@@ -42,6 +42,33 @@ trim() {
   printf "%s" "$1" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'
 }
 
+OFFLINE_ROOT=""
+OFFLINE_PROJECT_ID=""
+OFFLINE_SYSTEM_ID=""
+CLUSTER_ID=""
+NPZ_PATH=""
+MODEL_PATH=""
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --root)
+      OFFLINE_ROOT="$2"; shift 2 ;;
+    --project-id)
+      OFFLINE_PROJECT_ID="$2"; shift 2 ;;
+    --system-id)
+      OFFLINE_SYSTEM_ID="$2"; shift 2 ;;
+    --cluster-id)
+      CLUSTER_ID="$2"; shift 2 ;;
+    --npz)
+      NPZ_PATH="$2"; shift 2 ;;
+    --model-npz)
+      MODEL_PATH="$2"; shift 2 ;;
+    *)
+      echo "Unknown argument: $1" >&2
+      exit 1 ;;
+  esac
+done
+
 if [ -n "${VIRTUAL_ENV:-}" ] && [ -x "${VIRTUAL_ENV}/bin/python" ]; then
   VENV_DIR="${VIRTUAL_ENV}"
   echo "Using active virtual environment at: ${VENV_DIR}"
@@ -57,45 +84,67 @@ fi
 
 PYTHON_BIN="${VENV_DIR}/bin/python"
 
-offline_prompt_root "${ROOT_DIR}/data"
-offline_select_project
-offline_select_system
-CLUSTER_ROW="$(offline_select_cluster)"
-NPZ_PATH="$(printf "%s" "$CLUSTER_ROW" | awk -F'|' '{print $3}')"
+if [ -z "$OFFLINE_ROOT" ]; then
+  offline_prompt_root "${ROOT_DIR}/data"
+else
+  OFFLINE_ROOT="$(trim "$OFFLINE_ROOT")"
+  export PHASE_DATA_ROOT="$OFFLINE_ROOT"
+fi
+
+if [ -z "$OFFLINE_PROJECT_ID" ]; then
+  offline_select_project
+fi
+
+if [ -z "$OFFLINE_SYSTEM_ID" ]; then
+  offline_select_system
+fi
+
+if [ -z "$NPZ_PATH" ] || [ -z "$CLUSTER_ID" ]; then
+  CLUSTER_ROW="$(offline_select_cluster)"
+  CLUSTER_ID="$(printf "%s" "$CLUSTER_ROW" | awk -F'|' '{print $1}')"
+  NPZ_PATH="$(printf "%s" "$CLUSTER_ROW" | awk -F'|' '{print $3}')"
+fi
 if [ -z "$NPZ_PATH" ] || [ ! -f "$NPZ_PATH" ]; then
   echo "Cluster NPZ not found: $NPZ_PATH"
   exit 1
 fi
 
-MODEL_ROW="$(offline_select_model)"
-MODEL_PATH="$(printf "%s" "$MODEL_ROW" | awk -F'|' '{print $3}')"
+if [ -z "$MODEL_PATH" ]; then
+  MODEL_LINES="$(_offline_list list-models --project-id "$OFFLINE_PROJECT_ID" --system-id "$OFFLINE_SYSTEM_ID" || true)"
+  if [ -n "$CLUSTER_ID" ]; then
+    MODEL_LINES="$(printf "%s\n" "$MODEL_LINES" | awk -F'|' -v cid="$CLUSTER_ID" '$4==cid')"
+  fi
+  MODEL_ROW="$(offline_choose_one "Available Potts models:" "$MODEL_LINES")"
+  MODEL_PATH="$(printf "%s" "$MODEL_ROW" | awk -F'|' '{print $3}')"
+fi
 if [ -z "$MODEL_PATH" ] || [ ! -f "$MODEL_PATH" ]; then
   echo "Potts model not found: $MODEL_PATH"
   exit 1
 fi
 
-CONTACT_ALL="false"
-CONTACT_PDBS=""
-CONTACT_MODE="CA"
-CONTACT_CUTOFF="10.0"
-if prompt_bool "Use all-vs-all edges? (y/N)" "N"; then
-  CONTACT_ALL="true"
-else
-  PDB_ROWS="$(offline_select_pdbs)"
-  if [ -z "$PDB_ROWS" ]; then
-    echo "Select at least one PDB unless using all-vs-all."
-    exit 1
-  fi
-  CONTACT_PDBS="$(printf "%s\n" "$PDB_ROWS" | awk -F'|' '{print $3}' | paste -sd, -)"
-  CONTACT_MODE="$(prompt "Contact mode (CA/CM)" "CA")"
-  CONTACT_MODE="$(printf "%s" "$CONTACT_MODE" | tr '[:lower:]' '[:upper:]')"
-  CONTACT_CUTOFF="$(prompt "Contact cutoff (A)" "10.0")"
+RESULTS_DIR="$(python - <<PY
+from pathlib import Path
+from phase.services.project_store import ProjectStore
+root = Path("${OFFLINE_ROOT}") / "projects"
+store = ProjectStore(base_dir=root)
+dirs = store.ensure_cluster_directories("${OFFLINE_PROJECT_ID}", "${OFFLINE_SYSTEM_ID}", "${CLUSTER_ID}")
+cluster_dir = dirs["cluster_dir"]
+out = cluster_dir / "samples" / "sampling_${TIMESTAMP}"
+print(out)
+PY
+)"
+
+SAMPLING_METHOD="$(prompt "Sampling method (gibbs/sa)" "gibbs")"
+SAMPLING_METHOD="$(printf "%s" "$SAMPLING_METHOD" | tr '[:upper:]' '[:lower:]')"
+if [ "$SAMPLING_METHOD" != "sa" ]; then
+  SAMPLING_METHOD="gibbs"
 fi
 
-RESULTS_DIR="$(prompt "Results directory" "${DEFAULT_RESULTS}")"
-
-GIBBS_METHOD="$(prompt "Gibbs method (single/rex)" "rex")"
-GIBBS_METHOD="$(printf "%s" "$GIBBS_METHOD" | tr '[:upper:]' '[:lower:]')"
+GIBBS_METHOD="rex"
+if [ "$SAMPLING_METHOD" = "gibbs" ]; then
+  GIBBS_METHOD="$(prompt "Gibbs method (single/rex)" "rex")"
+  GIBBS_METHOD="$(printf "%s" "$GIBBS_METHOD" | tr '[:upper:]' '[:lower:]')"
+fi
 
 BETA="$(prompt "Target beta (used for report)" "1.0")"
 
@@ -114,37 +163,41 @@ REX_SWEEPS_PER_ROUND=""
 REX_THIN_ROUNDS=""
 REX_CHAINS=""
 
-if [ "$GIBBS_METHOD" = "single" ]; then
-  GIBBS_SAMPLES="$(prompt "Gibbs samples" "500")"
-  GIBBS_BURNIN="$(prompt "Gibbs burn-in sweeps" "50")"
-  GIBBS_THIN="$(prompt "Gibbs thin" "2")"
-  GIBBS_CHAINS="$(prompt "Gibbs chain count (parallel independent chains)" "1")"
-else
-  REX_BETAS="$(prompt "Explicit beta ladder (comma separated, leave blank for auto)" "")"
-  if [ -z "$(trim "$REX_BETAS")" ]; then
-    REX_BETA_MIN="$(prompt "REX beta min" "0.2")"
-    REX_BETA_MAX="$(prompt "REX beta max" "1.0")"
-    REX_N_REPLICAS="$(prompt "REX replicas" "8")"
-    REX_SPACING="$(prompt "REX spacing (geom/lin)" "geom")"
+if [ "$SAMPLING_METHOD" = "gibbs" ]; then
+  if [ "$GIBBS_METHOD" = "single" ]; then
+    GIBBS_SAMPLES="$(prompt "Gibbs samples" "500")"
+    GIBBS_BURNIN="$(prompt "Gibbs burn-in sweeps" "50")"
+    GIBBS_THIN="$(prompt "Gibbs thin" "2")"
+    GIBBS_CHAINS="$(prompt "Gibbs chain count (parallel independent chains)" "1")"
+  else
+    REX_BETAS="$(prompt "Explicit beta ladder (comma separated, leave blank for auto)" "")"
+    if [ -z "$(trim "$REX_BETAS")" ]; then
+      REX_BETA_MIN="$(prompt "REX beta min" "0.2")"
+      REX_BETA_MAX="$(prompt "REX beta max" "1.0")"
+      REX_N_REPLICAS="$(prompt "REX replicas" "8")"
+      REX_SPACING="$(prompt "REX spacing (geom/lin)" "geom")"
+    fi
+    REX_ROUNDS="$(prompt "REX total rounds (split across chains)" "2000")"
+    REX_BURNIN_ROUNDS="$(prompt "REX burn-in rounds" "50")"
+    REX_SWEEPS_PER_ROUND="$(prompt "REX sweeps per round (Gibbs sweeps per replica)" "2")"
+    REX_THIN_ROUNDS="$(prompt "REX thin rounds" "1")"
+    REX_CHAINS="$(prompt "REX chain count (runs in parallel, total rounds split)" "1")"
   fi
-  REX_ROUNDS="$(prompt "REX total rounds (split across chains)" "2000")"
-  REX_BURNIN_ROUNDS="$(prompt "REX burn-in rounds" "50")"
-  REX_SWEEPS_PER_ROUND="$(prompt "REX sweeps per round (Gibbs sweeps per replica)" "2")"
-  REX_THIN_ROUNDS="$(prompt "REX thin rounds" "1")"
-  REX_CHAINS="$(prompt "REX chain count (runs in parallel, total rounds split)" "1")"
+else
+  SA_READS="$(prompt "SA reads" "2000")"
+  SA_SWEEPS="$(prompt "SA sweeps" "2000")"
+  SA_BETA_HOT="$(prompt "SA beta hot (0 = default)" "0")"
+  SA_BETA_COLD="$(prompt "SA beta cold (0 = default)" "0")"
 fi
 
-SA_READS="$(prompt "SA reads" "2000")"
-SA_SWEEPS="$(prompt "SA sweeps" "2000")"
-SA_BETA_HOT="$(prompt "SA beta hot (0 = default)" "0")"
-SA_BETA_COLD="$(prompt "SA beta cold (0 = default)" "0")"
-
 ESTIMATE_BETA_EFF="false"
-if prompt_bool "Estimate beta_eff? (y/N)" "N"; then
-  ESTIMATE_BETA_EFF="true"
-  BETA_EFF_GRID="$(prompt "beta_eff grid (comma separated, blank=auto)" "")"
-  BETA_EFF_W_MARG="$(prompt "beta_eff weight for marginals" "1.0")"
-  BETA_EFF_W_PAIR="$(prompt "beta_eff weight for pairs" "1.0")"
+if [ "$SAMPLING_METHOD" = "gibbs" ]; then
+  if prompt_bool "Estimate beta_eff? (y/N)" "N"; then
+    ESTIMATE_BETA_EFF="true"
+    BETA_EFF_GRID="$(prompt "beta_eff grid (comma separated, blank=auto)" "")"
+    BETA_EFF_W_MARG="$(prompt "beta_eff weight for marginals" "1.0")"
+    BETA_EFF_W_PAIR="$(prompt "beta_eff weight for pairs" "1.0")"
+  fi
 fi
 
 SEED="$(prompt "Random seed" "0")"
@@ -158,23 +211,15 @@ CMD=(
   --npz "$NPZ_PATH"
   --model-npz "$MODEL_PATH"
   --results-dir "$RESULTS_DIR"
+  --sampling-method "$SAMPLING_METHOD"
   --gibbs-method "$GIBBS_METHOD"
   --beta "$BETA"
-  --sa-reads "$SA_READS"
-  --sa-sweeps "$SA_SWEEPS"
   --seed "$SEED"
 )
 
-if [ "$CONTACT_ALL" = "true" ]; then
-  CMD+=(--contact-all-vs-all)
-else
-  CMD+=(--pdbs "$CONTACT_PDBS")
-fi
-CMD+=(--contact-atom-mode "$CONTACT_MODE" --contact-cutoff "$CONTACT_CUTOFF")
-
-if [ "$GIBBS_METHOD" = "single" ]; then
+if [ "$SAMPLING_METHOD" = "gibbs" ] && [ "$GIBBS_METHOD" = "single" ]; then
   CMD+=(--gibbs-samples "$GIBBS_SAMPLES" --gibbs-burnin "$GIBBS_BURNIN" --gibbs-thin "$GIBBS_THIN" --gibbs-chains "$GIBBS_CHAINS")
-else
+elif [ "$SAMPLING_METHOD" = "gibbs" ]; then
   if [ -n "$(trim "$REX_BETAS")" ]; then
     CMD+=(--rex-betas "$(trim "$REX_BETAS")")
   else
@@ -194,7 +239,11 @@ else
   )
 fi
 
-if [ "$SA_BETA_HOT" != "0" ] && [ "$SA_BETA_COLD" != "0" ]; then
+if [ "$SAMPLING_METHOD" = "sa" ]; then
+  CMD+=(--sa-reads "$SA_READS" --sa-sweeps "$SA_SWEEPS")
+fi
+
+if [ "$SAMPLING_METHOD" = "sa" ] && [ "$SA_BETA_HOT" != "0" ] && [ "$SA_BETA_COLD" != "0" ]; then
   CMD+=(--sa-beta-hot "$SA_BETA_HOT" --sa-beta-cold "$SA_BETA_COLD")
 fi
 

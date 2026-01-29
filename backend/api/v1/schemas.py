@@ -43,6 +43,8 @@ class SimulationJobRequest(BaseModel):
     project_id: str
     system_id: str
     cluster_id: str
+    sampling_method: Optional[str] = None
+    sample_name: Optional[str] = None
     use_potts_model: Optional[bool] = True
     potts_model_path: Optional[str] = None
     potts_model_id: Optional[str] = None

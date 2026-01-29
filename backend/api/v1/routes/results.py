@@ -4,6 +4,7 @@ import shutil
 import uuid
 from datetime import datetime
 from pathlib import Path
+from typing import Sequence
 
 import numpy as np
 from fastapi import APIRouter, HTTPException, Query, Response, UploadFile, File, Form
@@ -152,10 +153,10 @@ def _augment_sampling_summary(
     assignments = assign_cluster_labels_to_states(base_cluster_path, project_id, system_id)
     update_cluster_metadata_with_assignments(base_cluster_path, assignments)
 
-    ds = load_npz(str(base_cluster_path))
+    ds = load_npz(str(base_cluster_path), allow_missing_edges=True)
     labels = ds.labels
     K = ds.cluster_counts
-    edges = ds.edges
+    edges = list(ds.edges)
 
     with np.load(summary_path, allow_pickle=False) as data:
         payload = {k: data[k] for k in data.files}
@@ -164,9 +165,10 @@ def _augment_sampling_summary(
         summary_k = np.asarray(payload["K"], dtype=int)
         if summary_k.shape != K.shape or np.any(summary_k != K):
             raise HTTPException(status_code=400, detail="Uploaded summary does not match selected cluster NPZ.")
+    summary_edges = None
     if "edges" in payload and payload["edges"].size:
         summary_edges = np.asarray(payload["edges"], dtype=int)
-        if summary_edges.shape != np.asarray(edges, dtype=int).shape:
+        if edges and summary_edges.shape != np.asarray(edges, dtype=int).shape:
             raise HTTPException(status_code=400, detail="Uploaded summary edges do not match selected cluster NPZ.")
 
     X_gibbs = np.asarray(payload.get("X_gibbs", np.zeros((0, len(K)), dtype=int)), dtype=int)
@@ -175,6 +177,13 @@ def _augment_sampling_summary(
     sa_schedule_labels = None
     if isinstance(sa_labels_raw, np.ndarray) and sa_labels_raw.size:
         sa_schedule_labels = [str(v) for v in sa_labels_raw.tolist()]
+
+    model = load_potts_model(model_path) if model_path and model_path.exists() else None
+    if not edges:
+        if summary_edges is not None and summary_edges.size:
+            edges = [(int(a), int(b)) for a, b in summary_edges]
+        elif model is not None and model.edges:
+            edges = list(model.edges)
 
     beta = 1.0
     if "target_beta" in payload and payload["target_beta"].size:
@@ -289,7 +298,51 @@ def _augment_sampling_summary(
     js2_sa = js2_md_sample[0, sa_idx] if md_sources and sa_idx is not None else np.array([], dtype=float)
     js2_sa_vs_gibbs = js2_gibbs_sample[sa_idx] if sa_idx is not None else np.array([], dtype=float)
 
-    model = load_potts_model(model_path) if model_path.exists() else None
+    try:
+        system_meta = project_store.get_system(project_id, system_id)
+        state_label_map = {sid: state.name for sid, state in system_meta.states.items()}
+        meta_label_map = {str(m.get("metastable_id")): m.get("name") for m in system_meta.metastable_states or []}
+    except Exception:
+        state_label_map = {}
+        meta_label_map = {}
+
+    try:
+        cluster_entry = get_cluster_entry(system_meta, base_cluster_id)
+        cluster_samples = cluster_entry.get("samples") if isinstance(cluster_entry, dict) else []
+    except Exception:
+        cluster_samples = []
+
+    md_sample_name_by_state: dict[str, str] = {}
+    md_sample_name_by_meta: dict[str, str] = {}
+    if isinstance(cluster_samples, list):
+        for sample in cluster_samples:
+            if not isinstance(sample, dict):
+                continue
+            if sample.get("type") != "md_eval":
+                continue
+            name = sample.get("name")
+            state_id = sample.get("state_id")
+            meta_id = sample.get("metastable_id")
+            if name and state_id:
+                md_sample_name_by_state[str(state_id)] = str(name)
+            if name and meta_id:
+                md_sample_name_by_meta[str(meta_id)] = str(name)
+
+    def _pretty_md_label(source_id: str, current: str) -> str:
+        if source_id.startswith("state:"):
+            state_id = source_id.split(":", 1)[-1]
+            if state_id in md_sample_name_by_state:
+                return md_sample_name_by_state[state_id]
+            return f"Macro: {state_label_map.get(state_id, current.split(':', 1)[-1].strip())}"
+        if source_id.startswith("meta:"):
+            meta_id = source_id.split(":", 1)[-1]
+            if meta_id in md_sample_name_by_meta:
+                return md_sample_name_by_meta[meta_id]
+            return f"Metastable: {meta_label_map.get(meta_id, current.split(':', 1)[-1].strip())}"
+        return current
+
+    for src in md_sources:
+        src["label"] = _pretty_md_label(str(src.get("id", "")), str(src.get("label", "")))
     edge_strength = np.array([], dtype=float)
     if model is not None and len(edges) > 0:
         strengths = []
@@ -322,8 +375,41 @@ def _augment_sampling_summary(
         batch_size=512,
     )
 
+    def _map_labels(ids: Sequence[str], labels_in: Sequence[str]) -> list[str]:
+        mapped = []
+        for idx, raw_id in enumerate(ids):
+            raw_id = str(raw_id)
+            label = None
+            if raw_id.startswith("meta:"):
+                meta_id = raw_id.split(":", 1)[-1]
+                label = meta_label_map.get(meta_id)
+            elif raw_id.startswith("state:"):
+                state_id = raw_id.split(":", 1)[-1]
+                label = state_label_map.get(state_id)
+            else:
+                label = state_label_map.get(raw_id) or meta_label_map.get(raw_id)
+            if not label and idx < len(labels_in):
+                label = str(labels_in[idx])
+            mapped.append(label or raw_id)
+        return mapped
+
+    if cross_likelihood:
+        cross_likelihood["active_state_labels"] = _map_labels(
+            cross_likelihood.get("active_state_ids", []),
+            cross_likelihood.get("active_state_labels", []),
+        )
+        cross_likelihood["inactive_state_labels"] = _map_labels(
+            cross_likelihood.get("inactive_state_ids", []),
+            cross_likelihood.get("inactive_state_labels", []),
+        )
+        cross_likelihood["other_state_labels"] = _map_labels(
+            cross_likelihood.get("other_state_ids", []),
+            cross_likelihood.get("other_state_labels", []),
+        )
+
     payload.update(
         {
+            "edges": np.asarray(edges, dtype=int) if edges else np.zeros((0, 2), dtype=int),
             "md_source_ids": np.asarray(md_source_ids, dtype=str),
             "md_source_labels": np.asarray(md_source_labels, dtype=str),
             "md_source_types": np.asarray(md_source_types, dtype=str),
@@ -699,8 +785,11 @@ async def upload_simulation_result(
     system_id: str = Form(...),
     cluster_id: str = Form(...),
     compare_cluster_ids: list[str] = Form(default=[]),
+    sample_name: str | None = Form(default=None),
+    sampling_method: str | None = Form(default=None),
     summary_npz: UploadFile = File(...),
-    potts_model: UploadFile = File(...),
+    potts_model_id: str | None = Form(default=None),
+    potts_model: UploadFile | None = File(default=None),
 ):
     try:
         system_meta = project_store.get_system(project_id, system_id)
@@ -715,7 +804,7 @@ async def upload_simulation_result(
 
     if summary_npz.filename and not summary_npz.filename.lower().endswith(".npz"):
         raise HTTPException(status_code=400, detail="Summary upload must be an .npz file.")
-    if potts_model.filename and not potts_model.filename.lower().endswith(".npz"):
+    if potts_model and potts_model.filename and not potts_model.filename.lower().endswith(".npz"):
         raise HTTPException(status_code=400, detail="Potts model upload must be an .npz file.")
 
     job_uuid = str(uuid.uuid4())
@@ -729,40 +818,63 @@ async def upload_simulation_result(
     summary_path = results_dir / "run_summary.npz"
     await stream_upload(summary_npz, summary_path)
 
-    model_filename = _safe_filename(potts_model.filename, f"{cluster_id}_potts_model.npz")
-    if not model_filename.lower().endswith(".npz"):
-        model_filename = f"{model_filename}.npz"
-    model_id = str(uuid.uuid4())
-    model_dir = dirs["potts_models_dir"] / model_id
-    model_dir.mkdir(parents=True, exist_ok=True)
-    model_path = model_dir / model_filename
-    await stream_upload(potts_model, model_path)
-    model_rel = str(model_path.relative_to(system_dir))
-    models = entry.get("potts_models")
-    if not isinstance(models, list):
-        models = []
-    models.append(
-        {
-            "model_id": model_id,
-            "name": Path(model_filename).stem,
-            "path": model_rel,
-            "created_at": datetime.utcnow().isoformat(),
-            "source": "upload",
-            "params": {},
-        }
-    )
-    entry["potts_models"] = models
+    model_path = None
+    model_id = None
+    if potts_model_id:
+        models = entry.get("potts_models") or []
+        match = next((m for m in models if m.get("model_id") == potts_model_id), None)
+        if not match:
+            raise HTTPException(status_code=404, detail=f"Potts model '{potts_model_id}' not found for this cluster.")
+        model_id = potts_model_id
+        model_rel = match.get("path")
+        if not model_rel:
+            raise HTTPException(status_code=404, detail="Selected Potts model is missing a stored path.")
+        model_path = Path(model_rel)
+        if not model_path.is_absolute():
+            model_path = system_dir / model_rel
+        if not model_path.exists():
+            raise HTTPException(status_code=404, detail="Selected Potts model file is missing on disk.")
+    elif potts_model is not None:
+        model_filename = _safe_filename(potts_model.filename, f"{cluster_id}_potts_model.npz")
+        if not model_filename.lower().endswith(".npz"):
+            model_filename = f"{model_filename}.npz"
+        model_id = str(uuid.uuid4())
+        model_dir = dirs["potts_models_dir"] / model_id
+        model_dir.mkdir(parents=True, exist_ok=True)
+        model_path = model_dir / model_filename
+        await stream_upload(potts_model, model_path)
+        model_rel = str(model_path.relative_to(system_dir))
+        models = entry.get("potts_models")
+        if not isinstance(models, list):
+            models = []
+        models.append(
+            {
+                "model_id": model_id,
+                "name": Path(model_filename).stem,
+                "path": model_rel,
+                "created_at": datetime.utcnow().isoformat(),
+                "source": "upload",
+                "params": {},
+            }
+        )
+        entry["potts_models"] = models
+    else:
+        raise HTTPException(status_code=400, detail="Select an existing Potts model to attach to this sampling run.")
     sample_paths = {"summary_npz": str(summary_path.relative_to(system_dir))}
 
     samples = entry.get("samples")
     if not isinstance(samples, list):
         samples = []
+    sample_label = sample_name.strip() if isinstance(sample_name, str) and sample_name.strip() else None
+    method_label = str(sampling_method).lower().strip() if sampling_method else None
+    if method_label not in ("gibbs", "sa"):
+        method_label = "upload"
     samples.append(
         {
             "sample_id": sample_id,
-            "name": f"Sampling {datetime.utcnow().strftime('%Y%m%d %H:%M')}",
+            "name": sample_label or f"Sampling {datetime.utcnow().strftime('%Y%m%d %H:%M')}",
             "type": "potts_sampling",
-            "method": "upload",
+            "method": method_label,
             "model_id": model_id,
             "created_at": datetime.utcnow().isoformat(),
             "paths": sample_paths,
@@ -868,7 +980,7 @@ async def upload_simulation_result(
             "cross_likelihood_report": _relativize_path(cross_likelihood_report_path) if cross_likelihood_report_path else None,
             "beta_scan_plot": _relativize_path(beta_scan_path) if beta_scan_path else None,
             "cluster_npz": _relativize_path(cluster_path),
-            "potts_model": _relativize_path(model_path),
+            "potts_model": _relativize_path(model_path) if model_path else None,
             "beta_eff": beta_eff_value,
         },
         "system_reference": {
@@ -885,8 +997,9 @@ async def upload_simulation_result(
     }
 
     result_file = _find_result_file(job_uuid)
-    if not result_file or not result_file.exists():
-        raise HTTPException(status_code=404, detail=f"No data found for job UUID '{job_uuid}'.")
+    if not result_file:
+        results_dirs = project_store.ensure_results_directories(project_id, system_id)
+        result_file = results_dirs["jobs_dir"] / f"{job_uuid}.json"
     try:
         result_file.write_text(json.dumps(result_payload, indent=2))
     except Exception as exc:

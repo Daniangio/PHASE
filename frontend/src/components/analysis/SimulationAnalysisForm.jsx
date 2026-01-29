@@ -15,6 +15,8 @@ export default function SimulationAnalysisForm({ clusterRuns, onSubmit }) {
   const [saSweeps, setSaSweeps] = useState('');
   const [saSchedules, setSaSchedules] = useState([]);
   const [pottsModelId, setPottsModelId] = useState('');
+  const [samplingMethod, setSamplingMethod] = useState('gibbs');
+  const [sampleName, setSampleName] = useState('');
   const [plmEpochs, setPlmEpochs] = useState('');
   const [plmLr, setPlmLr] = useState('');
   const [plmLrMin, setPlmLrMin] = useState('');
@@ -91,47 +93,53 @@ export default function SimulationAnalysisForm({ clusterRuns, onSubmit }) {
       const payload = { cluster_id: clusterId };
       payload.use_potts_model = true;
       payload.potts_model_id = pottsModelId;
-      const betasRaw = rexBetas.trim();
-      if (betasRaw) {
-        payload.rex_betas = parseBetaList(betasRaw);
-      } else {
-        if (rexBetaMin === '' || rexBetaMax === '') {
-          throw new Error('Provide rex betas or both beta min and max.');
-        }
-        payload.rex_beta_min = Number(rexBetaMin);
-        payload.rex_beta_max = Number(rexBetaMax);
-        payload.rex_spacing = rexSpacing || 'geom';
-      }
+      payload.sampling_method = samplingMethod;
+      if (sampleName.trim()) payload.sample_name = sampleName.trim();
 
-      if (rexSamples !== '') payload.rex_samples = Number(rexSamples);
-      if (rexBurnin !== '') payload.rex_burnin = Number(rexBurnin);
-      if (rexThin !== '') payload.rex_thin = Number(rexThin);
-      if (saReads !== '') payload.sa_reads = Number(saReads);
-      if (saSweeps !== '') payload.sa_sweeps = Number(saSweeps);
-      const customSchedules = [];
-      for (const schedule of saSchedules) {
-        const hotRaw = String(schedule.betaHot ?? '').trim();
-        const coldRaw = String(schedule.betaCold ?? '').trim();
-        if (!hotRaw && !coldRaw) {
-          continue;
+      if (samplingMethod === 'gibbs') {
+        const betasRaw = rexBetas.trim();
+        if (betasRaw) {
+          payload.rex_betas = parseBetaList(betasRaw);
+        } else {
+          if (rexBetaMin === '' || rexBetaMax === '') {
+            throw new Error('Provide rex betas or both beta min and max.');
+          }
+          payload.rex_beta_min = Number(rexBetaMin);
+          payload.rex_beta_max = Number(rexBetaMax);
+          payload.rex_spacing = rexSpacing || 'geom';
         }
-        if (!hotRaw || !coldRaw) {
-          throw new Error('Provide both beta hot and beta cold for each SA schedule.');
+
+        if (rexSamples !== '') payload.rex_samples = Number(rexSamples);
+        if (rexBurnin !== '') payload.rex_burnin = Number(rexBurnin);
+        if (rexThin !== '') payload.rex_thin = Number(rexThin);
+      } else {
+        if (saReads !== '') payload.sa_reads = Number(saReads);
+        if (saSweeps !== '') payload.sa_sweeps = Number(saSweeps);
+        const customSchedules = [];
+        for (const schedule of saSchedules) {
+          const hotRaw = String(schedule.betaHot ?? '').trim();
+          const coldRaw = String(schedule.betaCold ?? '').trim();
+          if (!hotRaw && !coldRaw) {
+            continue;
+          }
+          if (!hotRaw || !coldRaw) {
+            throw new Error('Provide both beta hot and beta cold for each SA schedule.');
+          }
+          const hot = Number(hotRaw);
+          const cold = Number(coldRaw);
+          if (!Number.isFinite(hot) || !Number.isFinite(cold)) {
+            throw new Error('SA beta values must be numeric.');
+          }
+          if (hot <= 0 || cold <= 0) {
+            throw new Error('SA beta values must be > 0.');
+          }
+          if (hot > cold) {
+            throw new Error('SA beta hot must be <= SA beta cold.');
+          }
+          customSchedules.push([hot, cold]);
         }
-        const hot = Number(hotRaw);
-        const cold = Number(coldRaw);
-        if (!Number.isFinite(hot) || !Number.isFinite(cold)) {
-          throw new Error('SA beta values must be numeric.');
-        }
-        if (hot <= 0 || cold <= 0) {
-          throw new Error('SA beta values must be > 0.');
-        }
-        if (hot > cold) {
-          throw new Error('SA beta hot must be <= SA beta cold.');
-        }
-        customSchedules.push([hot, cold]);
+        if (customSchedules.length) payload.sa_beta_schedules = customSchedules;
       }
-      if (customSchedules.length) payload.sa_beta_schedules = customSchedules;
       if (plmEpochs !== '') payload.plm_epochs = Number(plmEpochs);
       if (plmLr !== '') payload.plm_lr = Number(plmLr);
       if (plmLrMin !== '') payload.plm_lr_min = Number(plmLrMin);
@@ -199,54 +207,216 @@ export default function SimulationAnalysisForm({ clusterRuns, onSubmit }) {
         </p>
       </div>
 
-      <div className="border border-gray-700 rounded-md p-3 space-y-3">
-        <div>
-          <label className="block text-sm text-gray-300 mb-1">Explicit beta ladder (optional)</label>
-          <input
-            type="text"
-            placeholder="0.2, 0.3, 0.5, 0.8, 1.0"
-            value={rexBetas}
-            onChange={(event) => setRexBetas(event.target.value)}
-            className="w-full bg-gray-900 border border-gray-700 rounded-md px-3 py-2 text-white focus:ring-cyan-500"
-          />
-          <p className="text-xs text-gray-500 mt-1">If provided, overrides auto ladder settings.</p>
-        </div>
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-          <div>
-            <label className="block text-sm text-gray-300 mb-1">Beta min</label>
-            <input
-              type="number"
-              step="0.01"
-              placeholder="0.2"
-              value={rexBetaMin}
-              onChange={(event) => setRexBetaMin(event.target.value)}
-              className="w-full bg-gray-900 border border-gray-700 rounded-md px-3 py-2 text-white focus:ring-cyan-500"
-            />
-          </div>
-          <div>
-            <label className="block text-sm text-gray-300 mb-1">Beta max</label>
-            <input
-              type="number"
-              step="0.01"
-              placeholder="1.0"
-              value={rexBetaMax}
-              onChange={(event) => setRexBetaMax(event.target.value)}
-              className="w-full bg-gray-900 border border-gray-700 rounded-md px-3 py-2 text-white focus:ring-cyan-500"
-            />
-          </div>
-          <div>
-            <label className="block text-sm text-gray-300 mb-1">Spacing</label>
-            <select
-              value={rexSpacing}
-              onChange={(event) => setRexSpacing(event.target.value)}
-              className="w-full bg-gray-900 border border-gray-700 rounded-md px-3 py-2 text-white focus:ring-cyan-500"
-            >
-              <option value="geom">Geometric</option>
-              <option value="lin">Linear</option>
-            </select>
-          </div>
-        </div>
+      <div>
+        <label className="block text-sm text-gray-300 mb-1">Sampling method</label>
+        <select
+          value={samplingMethod}
+          onChange={(event) => setSamplingMethod(event.target.value)}
+          className="w-full bg-gray-900 border border-gray-700 rounded-md px-3 py-2 text-white focus:ring-cyan-500"
+        >
+          <option value="gibbs">Gibbs (single/REX)</option>
+          <option value="sa">Simulated Annealing (SA)</option>
+        </select>
       </div>
+
+      <div>
+        <label className="block text-sm text-gray-300 mb-1">Sampling name (optional)</label>
+        <input
+          type="text"
+          value={sampleName}
+          onChange={(event) => setSampleName(event.target.value)}
+          placeholder="e.g., Gibbs β=1.0, 10k samples"
+          className="w-full bg-gray-900 border border-gray-700 rounded-md px-3 py-2 text-white placeholder:text-gray-500 focus:ring-cyan-500"
+        />
+      </div>
+
+      {samplingMethod === 'gibbs' && (
+        <>
+          <div className="border border-gray-700 rounded-md p-3 space-y-3">
+            <div>
+              <label className="block text-sm text-gray-300 mb-1">Explicit beta ladder (optional)</label>
+              <input
+                type="text"
+                placeholder="0.2, 0.3, 0.5, 0.8, 1.0"
+                value={rexBetas}
+                onChange={(event) => setRexBetas(event.target.value)}
+                className="w-full bg-gray-900 border border-gray-700 rounded-md px-3 py-2 text-white focus:ring-cyan-500"
+              />
+              <p className="text-xs text-gray-500 mt-1">If provided, overrides auto ladder settings.</p>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+              <div>
+                <label className="block text-sm text-gray-300 mb-1">Beta min</label>
+                <input
+                  type="number"
+                  step="0.01"
+                  placeholder="0.2"
+                  value={rexBetaMin}
+                  onChange={(event) => setRexBetaMin(event.target.value)}
+                  className="w-full bg-gray-900 border border-gray-700 rounded-md px-3 py-2 text-white focus:ring-cyan-500"
+                />
+              </div>
+              <div>
+                <label className="block text-sm text-gray-300 mb-1">Beta max</label>
+                <input
+                  type="number"
+                  step="0.01"
+                  placeholder="1.0"
+                  value={rexBetaMax}
+                  onChange={(event) => setRexBetaMax(event.target.value)}
+                  className="w-full bg-gray-900 border border-gray-700 rounded-md px-3 py-2 text-white focus:ring-cyan-500"
+                />
+              </div>
+              <div>
+                <label className="block text-sm text-gray-300 mb-1">Spacing</label>
+                <select
+                  value={rexSpacing}
+                  onChange={(event) => setRexSpacing(event.target.value)}
+                  className="w-full bg-gray-900 border border-gray-700 rounded-md px-3 py-2 text-white focus:ring-cyan-500"
+                >
+                  <option value="geom">Geometric</option>
+                  <option value="lin">Linear</option>
+                </select>
+              </div>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+            <div>
+              <label className="block text-sm text-gray-300 mb-1">REX samples (rounds)</label>
+              <input
+                type="number"
+                min={1}
+                placeholder="Default: 2000"
+                value={rexSamples}
+                onChange={(event) => setRexSamples(event.target.value)}
+                className="w-full bg-gray-900 border border-gray-700 rounded-md px-3 py-2 text-white focus:ring-cyan-500"
+              />
+            </div>
+            <div>
+              <label className="block text-sm text-gray-300 mb-1">REX burn-in</label>
+              <input
+                type="number"
+                min={1}
+                placeholder="Default: 50"
+                value={rexBurnin}
+                onChange={(event) => setRexBurnin(event.target.value)}
+                className="w-full bg-gray-900 border border-gray-700 rounded-md px-3 py-2 text-white focus:ring-cyan-500"
+              />
+            </div>
+            <div>
+              <label className="block text-sm text-gray-300 mb-1">REX thin</label>
+              <input
+                type="number"
+                min={1}
+                placeholder="Default: 1"
+                value={rexThin}
+                onChange={(event) => setRexThin(event.target.value)}
+                className="w-full bg-gray-900 border border-gray-700 rounded-md px-3 py-2 text-white focus:ring-cyan-500"
+              />
+            </div>
+          </div>
+        </>
+      )}
+
+      {samplingMethod === 'sa' && (
+        <>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <div>
+              <label className="block text-sm text-gray-300 mb-1">SA reads</label>
+              <input
+                type="number"
+                min={1}
+                placeholder="Default: 2000"
+                value={saReads}
+                onChange={(event) => setSaReads(event.target.value)}
+                className="w-full bg-gray-900 border border-gray-700 rounded-md px-3 py-2 text-white focus:ring-cyan-500"
+              />
+            </div>
+            <div>
+              <label className="block text-sm text-gray-300 mb-1">SA sweeps</label>
+              <input
+                type="number"
+                min={1}
+                placeholder="Default: 2000"
+                value={saSweeps}
+                onChange={(event) => setSaSweeps(event.target.value)}
+                className="w-full bg-gray-900 border border-gray-700 rounded-md px-3 py-2 text-white focus:ring-cyan-500"
+              />
+            </div>
+          </div>
+          <div className="space-y-2">
+            <div className="flex items-center justify-between">
+              <label className="flex items-center gap-2 text-sm text-gray-300">
+                SA beta schedules
+                <span className="relative inline-flex group">
+                  <button
+                    type="button"
+                    className="inline-flex items-center justify-center text-gray-500 hover:text-gray-300 focus:outline-none"
+                    aria-label="SA beta schedules help"
+                  >
+                    <Info className="h-4 w-4" />
+                  </button>
+                  <span className="pointer-events-none absolute left-1/2 top-full z-20 mt-2 w-72 -translate-x-1/2 rounded-md border border-gray-700 bg-gray-900 px-3 py-2 text-xs text-gray-200 opacity-0 shadow-lg transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
+                    Auto schedule is always included. Add extra schedules as beta_hot (fast mixing) to beta_cold (low excitation). Reasonable ranges: beta_hot ~0.1–0.5, beta_cold ~2–10.
+                  </span>
+                </span>
+              </label>
+              <button
+                type="button"
+                onClick={() => setSaSchedules((prev) => [...prev, { betaHot: '', betaCold: '' }])}
+                className="text-xs text-cyan-300 hover:text-cyan-200"
+              >
+                Add schedule
+              </button>
+            </div>
+
+            <div className="rounded-md border border-dashed border-gray-700 bg-gray-900/30 px-3 py-2 text-xs text-gray-400">
+              Auto schedule (neal default beta range)
+            </div>
+
+            {saSchedules.length > 0 && (
+              <div className="space-y-2">
+                {saSchedules.map((schedule, index) => (
+                  <div key={`sa-schedule-${index}`} className="grid grid-cols-1 md:grid-cols-3 gap-2">
+                    <input
+                      type="number"
+                      step="0.01"
+                      placeholder="beta_hot (e.g. 0.2)"
+                      value={schedule.betaHot}
+                      onChange={(event) =>
+                        setSaSchedules((prev) =>
+                          prev.map((item, i) => (i === index ? { ...item, betaHot: event.target.value } : item))
+                        )
+                      }
+                      className="w-full bg-gray-900 border border-gray-700 rounded-md px-3 py-2 text-white focus:ring-cyan-500"
+                    />
+                    <input
+                      type="number"
+                      step="0.01"
+                      placeholder="beta_cold (e.g. 5.0)"
+                      value={schedule.betaCold}
+                      onChange={(event) =>
+                        setSaSchedules((prev) =>
+                          prev.map((item, i) => (i === index ? { ...item, betaCold: event.target.value } : item))
+                        )
+                      }
+                      className="w-full bg-gray-900 border border-gray-700 rounded-md px-3 py-2 text-white focus:ring-cyan-500"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setSaSchedules((prev) => prev.filter((_, i) => i !== index))}
+                      className="text-xs text-gray-400 hover:text-red-300"
+                    >
+                      Remove
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </>
+      )}
 
       <button
         type="button"
@@ -346,137 +516,6 @@ export default function SimulationAnalysisForm({ clusterRuns, onSubmit }) {
           </div>
         </div>
       )}
-
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-        <div>
-          <label className="block text-sm text-gray-300 mb-1">REX samples (rounds)</label>
-          <input
-            type="number"
-            min={1}
-            placeholder="Default: 2000"
-            value={rexSamples}
-            onChange={(event) => setRexSamples(event.target.value)}
-            className="w-full bg-gray-900 border border-gray-700 rounded-md px-3 py-2 text-white focus:ring-cyan-500"
-          />
-        </div>
-        <div>
-          <label className="block text-sm text-gray-300 mb-1">REX burn-in</label>
-          <input
-            type="number"
-            min={1}
-            placeholder="Default: 50"
-            value={rexBurnin}
-            onChange={(event) => setRexBurnin(event.target.value)}
-            className="w-full bg-gray-900 border border-gray-700 rounded-md px-3 py-2 text-white focus:ring-cyan-500"
-          />
-        </div>
-        <div>
-          <label className="block text-sm text-gray-300 mb-1">REX thin</label>
-          <input
-            type="number"
-            min={1}
-            placeholder="Default: 1"
-            value={rexThin}
-            onChange={(event) => setRexThin(event.target.value)}
-            className="w-full bg-gray-900 border border-gray-700 rounded-md px-3 py-2 text-white focus:ring-cyan-500"
-          />
-        </div>
-      </div>
-
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-        <div>
-          <label className="block text-sm text-gray-300 mb-1">SA reads</label>
-          <input
-            type="number"
-            min={1}
-            placeholder="Default: 2000"
-            value={saReads}
-            onChange={(event) => setSaReads(event.target.value)}
-            className="w-full bg-gray-900 border border-gray-700 rounded-md px-3 py-2 text-white focus:ring-cyan-500"
-          />
-        </div>
-        <div>
-          <label className="block text-sm text-gray-300 mb-1">SA sweeps</label>
-          <input
-            type="number"
-            min={1}
-            placeholder="Default: 2000"
-            value={saSweeps}
-            onChange={(event) => setSaSweeps(event.target.value)}
-            className="w-full bg-gray-900 border border-gray-700 rounded-md px-3 py-2 text-white focus:ring-cyan-500"
-          />
-        </div>
-      </div>
-      <div className="space-y-2">
-        <div className="flex items-center justify-between">
-          <label className="flex items-center gap-2 text-sm text-gray-300">
-            SA beta schedules
-            <span className="relative inline-flex group">
-              <button
-                type="button"
-                className="inline-flex items-center justify-center text-gray-500 hover:text-gray-300 focus:outline-none"
-                aria-label="SA beta schedules help"
-              >
-                <Info className="h-4 w-4" />
-              </button>
-              <span className="pointer-events-none absolute left-1/2 top-full z-20 mt-2 w-72 -translate-x-1/2 rounded-md border border-gray-700 bg-gray-900 px-3 py-2 text-xs text-gray-200 opacity-0 shadow-lg transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
-                Auto schedule is always included. Add extra schedules as beta_hot (fast mixing) to beta_cold (low excitation). Reasonable ranges: beta_hot ~0.1–0.5, beta_cold ~2–10.
-              </span>
-            </span>
-          </label>
-          <button
-            type="button"
-            onClick={() => setSaSchedules((prev) => [...prev, { betaHot: '', betaCold: '' }])}
-            className="text-xs text-cyan-300 hover:text-cyan-200"
-          >
-            Add schedule
-          </button>
-        </div>
-
-        <div className="rounded-md border border-dashed border-gray-700 bg-gray-900/30 px-3 py-2 text-xs text-gray-400">
-          Auto schedule (neal default beta range)
-        </div>
-
-        {saSchedules.length > 0 && (
-          <div className="space-y-2">
-            {saSchedules.map((schedule, index) => (
-              <div key={`sa-schedule-${index}`} className="grid grid-cols-1 md:grid-cols-3 gap-2">
-                <input
-                  type="number"
-                  step="0.01"
-                  placeholder="beta_hot (e.g. 0.2)"
-                  value={schedule.betaHot}
-                  onChange={(event) =>
-                    setSaSchedules((prev) =>
-                      prev.map((item, i) => (i === index ? { ...item, betaHot: event.target.value } : item))
-                    )
-                  }
-                  className="w-full bg-gray-900 border border-gray-700 rounded-md px-3 py-2 text-white focus:ring-cyan-500"
-                />
-                <input
-                  type="number"
-                  step="0.01"
-                  placeholder="beta_cold (e.g. 5.0)"
-                  value={schedule.betaCold}
-                  onChange={(event) =>
-                    setSaSchedules((prev) =>
-                      prev.map((item, i) => (i === index ? { ...item, betaCold: event.target.value } : item))
-                    )
-                  }
-                  className="w-full bg-gray-900 border border-gray-700 rounded-md px-3 py-2 text-white focus:ring-cyan-500"
-                />
-                <button
-                  type="button"
-                  onClick={() => setSaSchedules((prev) => prev.filter((_, i) => i !== index))}
-                  className="text-xs text-gray-400 hover:text-red-300"
-                >
-                  Remove
-                </button>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
 
       <ErrorMessage message={error} />
       <button

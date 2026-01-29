@@ -145,7 +145,7 @@ def list_models(root: Path, project_id: str, system_id: str) -> None:
             if not abs_path.exists():
                 continue
             model_name = model.get("name") or Path(model_rel).stem
-            rows.append([cluster_id, model.get("model_id") or "", f"{cluster_name} :: {model_name}", str(abs_path)])
+            rows.append([model.get("model_id") or "", f"{cluster_name} :: {model_name}", str(abs_path), cluster_id])
     _print_rows(rows)
 
 

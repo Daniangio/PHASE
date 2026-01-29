@@ -39,6 +39,7 @@ import {
   renamePottsModel,
   deletePottsModel,
   deleteSavedCluster,
+  deleteSamplingSample,
 } from '../api/projects';
 import {
   fetchResults,
@@ -245,38 +246,13 @@ export default function SystemDetailPage() {
     () => sampleEntries.filter((s) => s.type === 'md_eval'),
     [sampleEntries]
   );
-  const clusterSimulationResults = useMemo(
-    () => simulationResults.filter((result) => result.cluster_id === pottsFitClusterId),
-    [simulationResults, pottsFitClusterId]
-  );
   const gibbsSamples = useMemo(
-    () =>
-      clusterSimulationResults.filter((result) => {
-        const params = result.params || {};
-        return (
-          params.gibbs_samples ||
-          params.rex_samples ||
-          params.gibbs_method ||
-          params.rex_betas ||
-          params.rex_beta_min ||
-          params.rex_beta_max
-        );
-      }),
-    [clusterSimulationResults]
+    () => sampleEntries.filter((s) => s.type === 'potts_sampling' && s.method === 'gibbs'),
+    [sampleEntries]
   );
   const saSamples = useMemo(
-    () =>
-      clusterSimulationResults.filter((result) => {
-        const params = result.params || {};
-        return (
-          params.sa_reads ||
-          params.sa_sweeps ||
-          params.sa_beta_hot ||
-          params.sa_beta_cold ||
-          (Array.isArray(params.sa_beta_schedules) && params.sa_beta_schedules.length > 0)
-        );
-      }),
-    [clusterSimulationResults]
+    () => sampleEntries.filter((s) => s.type === 'potts_sampling' && s.method === 'sa'),
+    [sampleEntries]
   );
   const macroReady = Boolean(macroLocked && descriptorsReady);
   const showSidebar = macroReady;
@@ -554,7 +530,29 @@ export default function SystemDetailPage() {
     navigate(`/jobs/${response.job_id}`, { state: { analysis_uuid: response.analysis_uuid } });
   };
 
-  const handleUploadSimulationResults = async ({ cluster_id, compare_cluster_ids, summaryFile, modelFile }) => {
+  const handleDeleteSample = useCallback(
+    async (sampleId) => {
+      if (!pottsFitClusterId) return;
+      const ok = window.confirm('Delete this sampling result? This cannot be undone.');
+      if (!ok) return;
+      try {
+        await deleteSamplingSample(projectId, systemId, pottsFitClusterId, sampleId);
+        await refreshSystem();
+      } catch (err) {
+        setActionError(err.message || 'Failed to delete sample.');
+      }
+    },
+    [projectId, systemId, pottsFitClusterId, refreshSystem]
+  );
+
+  const handleUploadSimulationResults = async ({
+    cluster_id,
+    compare_cluster_ids,
+    summaryFile,
+    pottsModelId,
+    sampleName,
+    samplingMethod,
+  }) => {
     setSamplingUploadBusy(true);
     setSamplingUploadProgress(0);
     try {
@@ -564,7 +562,9 @@ export default function SystemDetailPage() {
         cluster_id,
         compare_cluster_ids,
         summaryFile,
-        modelFile,
+        pottsModelId,
+        sampleName,
+        samplingMethod,
         { onUploadProgress: (percent) => setSamplingUploadProgress(percent) }
       );
       setSamplingUploadProgress(null);
@@ -1424,10 +1424,10 @@ export default function SystemDetailPage() {
               handleUploadSimulationResults={handleUploadSimulationResults}
               samplingUploadBusy={samplingUploadBusy}
               enqueueSimulationJob={enqueueSimulationJob}
-              simulationResults={simulationResults}
-              resultsLoading={resultsLoading}
-              resultsError={resultsError}
               navigate={navigate}
+              projectId={projectId}
+              systemId={systemId}
+              handleDeleteSample={handleDeleteSample}
             />
           )}
         </section>

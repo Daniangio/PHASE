@@ -69,10 +69,10 @@ print_model_list() {
     set -e
     return
   fi
-  while IFS='|' read -r cluster_id model_id name path; do
-    [ -z "$cluster_id" ] && continue
+  while IFS='|' read -r model_id name path cluster_id; do
+    [ -z "$model_id" ] && continue
     echo "  - ${name:-$model_id} (${model_id})"
-    echo "      cluster: ${cluster_id}"
+    [ -n "$cluster_id" ] && echo "      cluster: ${cluster_id}"
     [ -n "$path" ] && echo "      path: $path"
   done <<< "$lines"
   set -e
@@ -174,6 +174,73 @@ system_menu() {
   done
 }
 
+cluster_menu() {
+  while true; do
+    echo ""
+    echo "Project: ${OFFLINE_PROJECT_NAME:-$OFFLINE_PROJECT_ID} (${OFFLINE_PROJECT_ID})"
+    echo "System: ${OFFLINE_SYSTEM_NAME:-$OFFLINE_SYSTEM_ID} (${OFFLINE_SYSTEM_ID})"
+    echo "Cluster: ${OFFLINE_CLUSTER_NAME:-$OFFLINE_CLUSTER_ID} (${OFFLINE_CLUSTER_ID})"
+    echo ""
+    ACTION_LINES=$'list-models|List Potts models\nlist-samples|List sampling runs\nfit|Fit Potts model\nsample|Run sampling\nevaluate|Evaluate state against cluster\nback|Back to systems'
+    ACTION_ROW="$(offline_choose_one "Cluster actions:" "$ACTION_LINES")"
+    ACTION="$(printf "%s" "$ACTION_ROW" | awk -F'|' '{print $1}')"
+    case "$ACTION" in
+      list-models)
+        echo ""
+        echo "Potts models:"
+        MODEL_LINES="$(_offline_list list-models --project-id "$OFFLINE_PROJECT_ID" --system-id "$OFFLINE_SYSTEM_ID" || true)"
+        MODEL_LINES="$(printf "%s\n" "$MODEL_LINES" | awk -F'|' -v cid="$OFFLINE_CLUSTER_ID" '$4==cid')"
+        print_model_list "$MODEL_LINES"
+        pause
+        ;;
+      list-samples)
+        echo ""
+        echo "Samples:"
+        SAMPLE_LINES="$(_offline_list list-sampling --project-id "$OFFLINE_PROJECT_ID" --system-id "$OFFLINE_SYSTEM_ID" || true)"
+        SAMPLE_LINES="$(printf "%s\n" "$SAMPLE_LINES" | awk -F'|' -v cid="$OFFLINE_CLUSTER_ID" '$1==cid')"
+        print_sample_list "$SAMPLE_LINES"
+        pause
+        ;;
+      fit)
+        ensure_env || return 0
+        "${ROOT_DIR}/scripts/potts_fit.sh" \
+          --root "$OFFLINE_ROOT" \
+          --project-id "$OFFLINE_PROJECT_ID" \
+          --system-id "$OFFLINE_SYSTEM_ID" \
+          --cluster-id "$OFFLINE_CLUSTER_ID" \
+          --npz "$OFFLINE_CLUSTER_PATH"
+        ;;
+      sample)
+        ensure_env || return 0
+        "${ROOT_DIR}/scripts/potts_sampling.sh" \
+          --root "$OFFLINE_ROOT" \
+          --project-id "$OFFLINE_PROJECT_ID" \
+          --system-id "$OFFLINE_SYSTEM_ID" \
+          --cluster-id "$OFFLINE_CLUSTER_ID" \
+          --npz "$OFFLINE_CLUSTER_PATH"
+        ;;
+      evaluate)
+        ensure_env || return 0
+        STATE_ROW="$(offline_select_state_one)"
+        STATE_ID="$(printf "%s" "$STATE_ROW" | awk -F'|' '{print $1}')"
+        if [ -z "$STATE_ID" ]; then
+          echo "No state selected."
+        fi
+        python -m phase.scripts.evaluate_state \
+          --root "$OFFLINE_ROOT" \
+          --project-id "$OFFLINE_PROJECT_ID" \
+          --system-id "$OFFLINE_SYSTEM_ID" \
+          --cluster-id "$OFFLINE_CLUSTER_ID" \
+          --state-id "$STATE_ID"
+        pause
+        ;;
+      back|"")
+        return 0
+        ;;
+    esac
+  done
+}
+
 state_menu() {
   while true; do
     echo ""
@@ -184,10 +251,22 @@ state_menu() {
     STATE_LINES="$(_offline_list list-states --project-id "$OFFLINE_PROJECT_ID" --system-id "$OFFLINE_SYSTEM_ID" || true)"
     print_state_summary "$STATE_LINES"
     echo ""
-    ACTION_LINES=$'add-state|Add state (PDB+trajectory)\nlist-clusters|List clusters\nlist-models|List Potts models\nlist-samples|List sampling runs\nclean-models|Clean stale Potts model entries\ncluster|Run clustering\nfit|Fit Potts model\nsample|Run sampling\nevaluate|Evaluate state against cluster\nback|Back to systems'
+    ACTION_LINES=$'open-cluster|Open cluster\nadd-state|Add state (PDB+trajectory)\nlist-clusters|List clusters\ncluster|Run clustering\nback|Back to systems'
     ACTION_ROW="$(offline_choose_one "System actions:" "$ACTION_LINES")"
     ACTION="$(printf "%s" "$ACTION_ROW" | awk -F'|' '{print $1}')"
     case "$ACTION" in
+      open-cluster)
+        CLUSTER_ROW="$(offline_select_cluster)"
+        OFFLINE_CLUSTER_ID="$(printf "%s" "$CLUSTER_ROW" | awk -F'|' '{print $1}')"
+        OFFLINE_CLUSTER_NAME="$(printf "%s" "$CLUSTER_ROW" | awk -F'|' '{print $2}')"
+        OFFLINE_CLUSTER_PATH="$(printf "%s" "$CLUSTER_ROW" | awk -F'|' '{print $3}')"
+        if [ -z "$OFFLINE_CLUSTER_ID" ]; then
+          echo "No cluster selected."
+        else
+          export OFFLINE_CLUSTER_ID OFFLINE_CLUSTER_NAME OFFLINE_CLUSTER_PATH
+          cluster_menu
+        fi
+        ;;
       add-state)
         STATE_ID="$(prompt "State ID" "state_1")"
         STATE_NAME="$(prompt "State name" "$STATE_ID")"
@@ -228,70 +307,12 @@ state_menu() {
         print_simple_list "$CLUSTER_LINES"
         pause
         ;;
-      list-models)
-        echo ""
-        echo "Potts models:"
-        MODEL_LINES="$(_offline_list list-models --project-id "$OFFLINE_PROJECT_ID" --system-id "$OFFLINE_SYSTEM_ID" || true)"
-        print_model_list "$MODEL_LINES"
-        pause
-        ;;
-      clean-models)
-        echo ""
-        echo "Stale model entries (missing files):"
-        STALE_LINES="$(_offline_list prune-models --project-id "$OFFLINE_PROJECT_ID" --system-id "$OFFLINE_SYSTEM_ID" --dry-run || true)"
-        print_simple_list "$STALE_LINES"
-        if prompt_bool "Remove these entries from metadata? (y/N)" "N"; then
-          _offline_list prune-models --project-id "$OFFLINE_PROJECT_ID" --system-id "$OFFLINE_SYSTEM_ID" >/dev/null
-          echo "Cleaned."
-        else
-          echo "No changes made."
-        fi
-        pause
-        ;;
-      list-samples)
-        echo ""
-        echo "Samples:"
-        SAMPLE_LINES="$(_offline_list list-sampling --project-id "$OFFLINE_PROJECT_ID" --system-id "$OFFLINE_SYSTEM_ID" || true)"
-        print_sample_list "$SAMPLE_LINES"
-        pause
-        ;;
       cluster)
         ensure_env || return 0
         "${ROOT_DIR}/scripts/cluster_npz.sh" \
           --root "$OFFLINE_ROOT" \
           --project-id "$OFFLINE_PROJECT_ID" \
           --system-id "$OFFLINE_SYSTEM_ID"
-        ;;
-      fit)
-        ensure_env || return 0
-        "${ROOT_DIR}/scripts/potts_fit.sh" \
-          --root "$OFFLINE_ROOT" \
-          --project-id "$OFFLINE_PROJECT_ID" \
-          --system-id "$OFFLINE_SYSTEM_ID"
-        ;;
-      sample)
-        ensure_env || return 0
-        "${ROOT_DIR}/scripts/potts_sampling.sh"
-        ;;
-      evaluate)
-        ensure_env || return 0
-        CLUSTER_ROW="$(offline_select_cluster)"
-        CLUSTER_ID="$(printf "%s" "$CLUSTER_ROW" | awk -F'|' '{print $1}')"
-        if [ -z "$CLUSTER_ID" ]; then
-          echo "No cluster selected."
-        fi
-        STATE_ROW="$(offline_select_state_one)"
-        STATE_ID="$(printf "%s" "$STATE_ROW" | awk -F'|' '{print $1}')"
-        if [ -z "$STATE_ID" ]; then
-          echo "No state selected."
-        fi
-        python -m phase.scripts.evaluate_state \
-          --root "$OFFLINE_ROOT" \
-          --project-id "$OFFLINE_PROJECT_ID" \
-          --system-id "$OFFLINE_SYSTEM_ID" \
-          --cluster-id "$CLUSTER_ID" \
-          --state-id "$STATE_ID"
-        pause
         ;;
       back|"")
         return 0

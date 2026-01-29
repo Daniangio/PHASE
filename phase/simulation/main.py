@@ -958,6 +958,13 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Device for PLM training (auto/cpu/cuda or torch device string).",
     )
 
+    ap.add_argument(
+        "--sampling-method",
+        default="gibbs",
+        choices=["gibbs", "sa"],
+        help="Choose which sampler to run: gibbs (single/REX) or sa (simulated annealing only).",
+    )
+
     # Gibbs / REX-Gibbs
     ap.add_argument("--gibbs-method", default="single", choices=["single", "rex"])
     ap.add_argument("--gibbs-samples", type=int, default=500, help="How many Potts samples to collect from Gibbs (the returned sample count).")
@@ -1296,9 +1303,27 @@ def run_pipeline(
     beta_eff_value: float | None = None
     swap_accept_rate: np.ndarray | None = None
     samples_by_beta: dict[float, np.ndarray] | None = None
+    rex_info: dict[str, object] | None = None
+    X_gibbs = np.zeros((0, labels.shape[1]), dtype=int)
+    X_sa = np.zeros((0, labels.shape[1]), dtype=int)
+    sa_samples: list[np.ndarray] = []
+    sa_valid_counts_list: list[np.ndarray] = []
+    sa_invalid_mask_list: list[np.ndarray] = []
+    sa_schedule_labels: list[str] = []
+    p_sa_by_schedule: np.ndarray | None = None
+    js_sa_by_schedule: np.ndarray | None = None
+    sa_valid_counts_by_schedule: np.ndarray | None = None
+    sa_invalid_mask_by_schedule: np.ndarray | None = None
+    p_gibbs_by_beta: np.ndarray | None = None
+    js_gibbs_by_beta: np.ndarray | None = None
+    js_pair_gibbs_by_beta: np.ndarray | None = None
+
+    sampling_method = getattr(args, "sampling_method", "gibbs")
+    run_gibbs = sampling_method == "gibbs"
+    run_sa = sampling_method == "sa"
 
     # --- Sampling baseline: Gibbs or REX-Gibbs at beta=args.beta ---
-    if args.gibbs_method == "single":
+    if run_gibbs and args.gibbs_method == "single":
         total_samples = int(args.gibbs_samples)
         gibbs_chains = max(1, int(args.gibbs_chains))
         if total_samples <= 0:
@@ -1370,7 +1395,7 @@ def run_pipeline(
 
         rex_info = None
         betas = [float(args.beta)]
-    else:
+    elif run_gibbs:
         report("Sampling Gibbs (replica exchange)", 50)
         rex_info = None
         rex_max_workers = 1
@@ -1507,114 +1532,114 @@ def run_pipeline(
             )
 
     # --- SA/QUBO sampling ---
-    report("Sampling SA/QUBO", 70)
-    qubo = potts_to_qubo_onehot(model, beta=args.beta, penalty_safety=args.penalty_safety)
+    if run_sa:
+        report("Sampling SA/QUBO", 70)
+        qubo = potts_to_qubo_onehot(model, beta=args.beta, penalty_safety=args.penalty_safety)
 
-    sa_schedule_specs: list[dict[str, object]] = [{"label": "SA auto", "beta_range": None}]
-    seen_schedules: set[tuple[float, float]] = set()
+        sa_schedule_specs: list[dict[str, object]] = [{"label": "SA auto", "beta_range": None}]
+        seen_schedules: set[tuple[float, float]] = set()
 
-    def _add_sa_schedule(hot: float, cold: float) -> None:
-        if hot <= 0 or cold <= 0:
-            raise ValueError("SA betas must be > 0.")
-        if hot > cold:
-            raise ValueError("SA beta hot must be <= beta cold.")
-        key = (float(hot), float(cold))
-        if key in seen_schedules:
-            return
-        seen_schedules.add(key)
-        sa_schedule_specs.append({
-            "label": f"SA β={key[0]:g}→{key[1]:g}",
-            "beta_range": key,
-        })
+        def _add_sa_schedule(hot: float, cold: float) -> None:
+            if hot <= 0 or cold <= 0:
+                raise ValueError("SA betas must be > 0.")
+            if hot > cold:
+                raise ValueError("SA beta hot must be <= beta cold.")
+            key = (float(hot), float(cold))
+            if key in seen_schedules:
+                return
+            seen_schedules.add(key)
+            sa_schedule_specs.append({
+                "label": f"SA β={key[0]:g}→{key[1]:g}",
+                "beta_range": key,
+            })
 
-    if (args.sa_beta_hot and not args.sa_beta_cold) or (args.sa_beta_cold and not args.sa_beta_hot):
-        raise ValueError("Provide both sa_beta_hot and sa_beta_cold, or neither.")
-    if args.sa_beta_hot and args.sa_beta_cold:
-        _add_sa_schedule(float(args.sa_beta_hot), float(args.sa_beta_cold))
+        if (args.sa_beta_hot and not args.sa_beta_cold) or (args.sa_beta_cold and not args.sa_beta_hot):
+            raise ValueError("Provide both sa_beta_hot and sa_beta_cold, or neither.")
+        if args.sa_beta_hot and args.sa_beta_cold:
+            _add_sa_schedule(float(args.sa_beta_hot), float(args.sa_beta_cold))
 
-    for raw in args.sa_beta_schedule or []:
-        hot, cold = _parse_beta_schedule(raw)
-        _add_sa_schedule(hot, cold)
+        for raw in args.sa_beta_schedule or []:
+            hot, cold = _parse_beta_schedule(raw)
+            _add_sa_schedule(hot, cold)
 
-    sa_samples: list[np.ndarray] = []
-    sa_valid_counts_list: list[np.ndarray] = []
-    sa_invalid_mask_list: list[np.ndarray] = []
+        total_sa = len(sa_schedule_specs)
+        repair = None if args.repair == "none" else args.repair
+        for idx, spec in enumerate(sa_schedule_specs):
+            label = str(spec["label"])
+            beta_range = spec["beta_range"]
+            report(f"Sampling SA/QUBO ({label})", 70 + 8 * idx / max(1, total_sa))
 
-    total_sa = len(sa_schedule_specs)
-    repair = None if args.repair == "none" else args.repair
-    for idx, spec in enumerate(sa_schedule_specs):
-        label = str(spec["label"])
-        beta_range = spec["beta_range"]
-        report(f"Sampling SA/QUBO ({label})", 70 + 8 * idx / max(1, total_sa))
+            Z_sa = sa_sample_qubo_neal(
+                qubo,
+                n_reads=args.sa_reads,
+                sweeps=args.sa_sweeps,
+                seed=args.seed + idx,
+                progress=args.progress,
+                beta_range=beta_range if isinstance(beta_range, tuple) else None,
+            )
 
-        Z_sa = sa_sample_qubo_neal(
-            qubo,
-            n_reads=args.sa_reads,
-            sweeps=args.sa_sweeps,
-            seed=args.seed + idx,
-            progress=args.progress,
-            beta_range=beta_range if isinstance(beta_range, tuple) else None,
-        )
+            X_sa_local = np.zeros((Z_sa.shape[0], len(qubo.var_slices)), dtype=int)
+            valid_counts = np.zeros(Z_sa.shape[0], dtype=int)
+            for i in range(Z_sa.shape[0]):
+                x, valid = decode_onehot(Z_sa[i], qubo, repair=repair)
+                X_sa_local[i] = x
+                valid_counts[i] = int(valid.sum())
 
-        X_sa_local = np.zeros((Z_sa.shape[0], len(qubo.var_slices)), dtype=int)
-        valid_counts = np.zeros(Z_sa.shape[0], dtype=int)
-        for i in range(Z_sa.shape[0]):
-            x, valid = decode_onehot(Z_sa[i], qubo, repair=repair)
-            X_sa_local[i] = x
-            valid_counts[i] = int(valid.sum())
+            viol = np.array([np.any(qubo.constraint_violations(z) != 0) for z in Z_sa], dtype=bool)
+            print(
+                f"[qubo] {label}: invalid_samples={viol.mean()*100:.2f}%  "
+                f"avg_valid_residues={valid_counts.mean():.1f}/{len(qubo.var_slices)}  repair={args.repair}"
+            )
 
-        viol = np.array([np.any(qubo.constraint_violations(z) != 0) for z in Z_sa], dtype=bool)
-        print(
-            f"[qubo] {label}: invalid_samples={viol.mean()*100:.2f}%  "
-            f"avg_valid_residues={valid_counts.mean():.1f}/{len(qubo.var_slices)}  repair={args.repair}"
-        )
-
-        sa_samples.append(X_sa_local)
-        sa_valid_counts_list.append(valid_counts)
-        sa_invalid_mask_list.append(viol)
+            sa_samples.append(X_sa_local)
+            sa_valid_counts_list.append(valid_counts)
+            sa_invalid_mask_list.append(viol)
 
     # --- Compare to MD ---
     report("Computing summary metrics", 80)
     p_md = marginals(labels, K)
-    p_g = marginals(X_gibbs, K)
-    p_sa_list = [marginals(X_sa_local, K) for X_sa_local in sa_samples]
+    if run_gibbs and X_gibbs.size:
+        p_g = marginals(X_gibbs, K)
+        js_g = per_residue_js(p_md, p_g)
+    else:
+        p_g = [np.zeros(int(k), dtype=float) for k in K]
+        js_g = np.zeros(len(K), dtype=float)
 
-    js_g = per_residue_js(p_md, p_g)
-    js_sa_list = [per_residue_js(p_md, p_sa_local) for p_sa_local in p_sa_list]
-
-    sa_schedule_labels = [str(spec["label"]) for spec in sa_schedule_specs]
-    p_sa_by_schedule = np.stack([_pad_marginals_for_save(p) for p in p_sa_list], axis=0)
-    js_sa_by_schedule = np.stack([np.asarray(js_vec, dtype=float) for js_vec in js_sa_list], axis=0)
-    sa_valid_counts_by_schedule = np.stack(sa_valid_counts_list, axis=0)
-    sa_invalid_mask_by_schedule = np.stack(sa_invalid_mask_list, axis=0)
-
-    X_sa = sa_samples[0]
-    valid_counts = sa_valid_counts_list[0]
-    viol = sa_invalid_mask_list[0]
-
-    p_sa = p_sa_list[0]
-    js_sa = js_sa_list[0]
-    print(
-        f"[marginals] JS(MD, {sa_schedule_specs[0]['label']}): "
-        f"mean={js_sa.mean():.4f}  median={np.median(js_sa):.4f}  max={js_sa.max():.4f}"
-    )
-    for idx, js_vec in enumerate(js_sa_list[1:], start=1):
-        label = sa_schedule_specs[idx]["label"]
+    if run_sa and sa_samples:
+        p_sa_list = [marginals(X_sa_local, K) for X_sa_local in sa_samples]
+        js_sa_list = [per_residue_js(p_md, p_sa_local) for p_sa_local in p_sa_list]
+        sa_schedule_labels = [str(spec["label"]) for spec in sa_schedule_specs]
+        p_sa_by_schedule = np.stack([_pad_marginals_for_save(p) for p in p_sa_list], axis=0)
+        js_sa_by_schedule = np.stack([np.asarray(js_vec, dtype=float) for js_vec in js_sa_list], axis=0)
+        sa_valid_counts_by_schedule = np.stack(sa_valid_counts_list, axis=0)
+        sa_invalid_mask_by_schedule = np.stack(sa_invalid_mask_list, axis=0)
+        X_sa = sa_samples[0]
+        p_sa = p_sa_list[0]
+        js_sa = js_sa_list[0]
+        valid_counts = sa_valid_counts_list[0]
+        viol = sa_invalid_mask_list[0]
         print(
-            f"[marginals] JS(MD, {label}): "
-            f"mean={js_vec.mean():.4f}  median={np.median(js_vec):.4f}  max={js_vec.max():.4f}"
+            f"[marginals] JS(MD, {sa_schedule_specs[0]['label']}): "
+            f"mean={js_sa.mean():.4f}  median={np.median(js_sa):.4f}  max={js_sa.max():.4f}"
         )
+        for idx, js_vec in enumerate(js_sa_list[1:], start=1):
+            label = sa_schedule_specs[idx]["label"]
+            print(
+                f"[marginals] JS(MD, {label}): "
+                f"mean={js_vec.mean():.4f}  median={np.median(js_vec):.4f}  max={js_vec.max():.4f}"
+            )
+    else:
+        p_sa = [np.zeros(int(k), dtype=float) for k in K]
+        js_sa = np.zeros(len(K), dtype=float)
+        valid_counts = np.zeros((0,), dtype=int)
+        viol = np.zeros((0,), dtype=bool)
 
-    p_gibbs_by_beta: np.ndarray | None = None
-    js_gibbs_by_beta: np.ndarray | None = None
-    js_pair_gibbs_by_beta: np.ndarray | None = None
-
-    if args.gibbs_method == "single":
+    if run_gibbs and args.gibbs_method == "single":
         print(
             f"[marginals] JS(MD, Gibbs@beta={args.beta}): "
             f"mean={js_g.mean():.4f}  median={np.median(js_g):.4f}  max={js_g.max():.4f}"
         )
-    elif samples_by_beta is not None:
+    elif run_gibbs and samples_by_beta is not None:
         p_gibbs_by_beta_list = []
         js_gibbs_by_beta_list = []
         js_pair_gibbs_by_beta_list: list[float] = []
@@ -1642,18 +1667,23 @@ def run_pipeline(
             js_pair_gibbs_by_beta = np.asarray(js_pair_gibbs_by_beta_list, dtype=float)
 
     # Optional: pairwise summary
-    if len(edges) > 0:
+    if len(edges) > 0 and run_gibbs:
         P_md = pairwise_joints_on_edges(labels, K, edges)
         P_g = pairwise_joints_on_edges(X_gibbs, K, edges)
-        P_sa = pairwise_joints_on_edges(X_sa, K, edges)
+        P_sa = pairwise_joints_on_edges(X_sa, K, edges) if run_sa and X_sa.size else None
 
         # mean over edges via combined_distance pair term
         # (reuse combined_distance with only pair term by passing w_marg=0)
         js_pair_g = combined_distance(labels, X_gibbs, K=K, edges=edges, w_marg=0.0, w_pair=1.0)
-        js_pair_sa = combined_distance(labels, X_sa, K=K, edges=edges, w_marg=0.0, w_pair=1.0)
+        js_pair_sa = (
+            combined_distance(labels, X_sa, K=K, edges=edges, w_marg=0.0, w_pair=1.0)
+            if run_sa and X_sa.size
+            else 0.0
+        )
         if js_pair_gibbs_by_beta is None:
             print(f"[pairs]   JS(MD, Gibbs) over edges: {js_pair_g:.4f}")
-        print(f"[pairs]   JS(MD, SA-QUBO) over edges: {js_pair_sa:.4f}")
+        if run_sa:
+            print(f"[pairs]   JS(MD, SA-QUBO) over edges: {js_pair_sa:.4f}")
         if js_pair_gibbs_by_beta is not None:
             for b, js_pair in zip(betas, js_pair_gibbs_by_beta):
                 print(f"[pairs]   JS(MD, Gibbs@beta={b}) over edges: {js_pair:.4f}")
@@ -1760,7 +1790,7 @@ def run_pipeline(
     # --- Estimate beta_eff for SA (optional) ---
     if args.estimate_beta_eff:
         report("Estimating beta_eff", 88)
-        if rex_info is None:
+        if not run_gibbs or args.gibbs_method != "rex" or rex_info is None:
             print("[beta_eff] warning: beta_eff scan requires --gibbs-method rex (reusing REX samples). Skipping beta_eff.")
             summary_path = _save_run_summary(
                 results_dir,

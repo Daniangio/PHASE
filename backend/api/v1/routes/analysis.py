@@ -90,21 +90,26 @@ async def submit_simulation_job(
 
     get_cluster_entry(system_meta, payload.cluster_id)
 
+    sampling_method = (payload.sampling_method or "gibbs").lower()
+    if sampling_method not in {"gibbs", "sa"}:
+        raise HTTPException(status_code=400, detail="sampling_method must be 'gibbs' or 'sa'.")
+
     rex_betas = payload.rex_betas
     if isinstance(rex_betas, str) and not rex_betas.strip():
         rex_betas = None
     if isinstance(rex_betas, list) and len(rex_betas) == 0:
         rex_betas = None
 
-    if rex_betas is None:
-        rex_params = [payload.rex_beta_min, payload.rex_beta_max, payload.rex_spacing]
-        if any(val is not None for val in rex_params) and not all(val is not None for val in rex_params):
-            raise HTTPException(
-                status_code=400,
-                detail="Provide rex_beta_min, rex_beta_max, rex_spacing together or rex_betas.",
-            )
+    if sampling_method == "gibbs":
+        if rex_betas is None:
+            rex_params = [payload.rex_beta_min, payload.rex_beta_max, payload.rex_spacing]
+            if any(val is not None for val in rex_params) and not all(val is not None for val in rex_params):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Provide rex_beta_min, rex_beta_max, rex_spacing together or rex_betas.",
+                )
 
-    if payload.rex_spacing is not None and payload.rex_spacing not in {"geom", "lin"}:
+    if sampling_method == "gibbs" and payload.rex_spacing is not None and payload.rex_spacing not in {"geom", "lin"}:
         raise HTTPException(status_code=400, detail="rex_spacing must be 'geom' or 'lin'.")
 
     for name, value in {

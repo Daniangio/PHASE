@@ -70,10 +70,10 @@ export default function SystemDetailPottsSection(props) {
     handleUploadSimulationResults,
     samplingUploadBusy,
     enqueueSimulationJob,
-    simulationResults,
-    resultsLoading,
-    resultsError,
     navigate,
+    projectId,
+    systemId,
+    handleDeleteSample,
   } = props;
 
   const [fitOverlayOpen, setFitOverlayOpen] = useState(false);
@@ -185,20 +185,6 @@ export default function SystemDetailPottsSection(props) {
                   />
                 </div>
               )}
-              <div className="border-t border-gray-800 pt-3 space-y-2">
-                <h4 className="text-xs font-semibold text-gray-300">Sampling results</h4>
-                {resultsLoading && <p className="text-xs text-gray-500">Loading results…</p>}
-                {resultsError && <ErrorMessage message={resultsError} />}
-                {!resultsLoading && !resultsError && (
-                  <AnalysisResultsList
-                    results={simulationResults}
-                    emptyLabel="No Potts sampling results for this system yet."
-                    onOpen={(result) => navigate(`/results/${result.job_id}`)}
-                    onOpenSimulation={(result) => navigate(`/simulation/${result.job_id}`)}
-                    onDelete={handleDeleteResult}
-                  />
-                )}
-              </div>
             </>
           )}
         </section>
@@ -347,13 +333,35 @@ export default function SystemDetailPottsSection(props) {
               {gibbsSamples.length > 0 && (
                 <div className="space-y-1 mt-2">
                   {gibbsSamples.map((sample) => (
-                    <div
-                      key={sample.job_id}
-                      className="text-[11px] text-gray-300 rounded-md border border-gray-800 bg-gray-950/40 px-2 py-1"
-                    >
-                      {sample.cluster_name || sample.cluster_id || 'Cluster'} • {sample.created_at || ''}
-                    </div>
-                  ))}
+                      <div
+                        key={sample.sample_id || sample.path}
+                        className="flex items-center justify-between gap-2 rounded-md border border-gray-800 bg-gray-950/40 px-2 py-1 text-[11px] text-gray-300"
+                      >
+                        <span className="truncate">{sample.name || 'Gibbs sample'} • {sample.created_at || ''}</span>
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              navigate(
+                                `/projects/${projectId}/systems/${systemId}/sampling/visualize?cluster_id=${pottsFitClusterId}&sample_id=${sample.sample_id}`
+                              )
+                            }
+                            className="text-gray-400 hover:text-cyan-300"
+                            aria-label={`View report for ${sample.name || 'Gibbs sample'}`}
+                          >
+                            <Eye className="h-4 w-4" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteSample(sample.sample_id)}
+                            className="text-gray-400 hover:text-red-300"
+                            aria-label={`Delete ${sample.name || 'Gibbs sample'}`}
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </button>
+                        </div>
+                      </div>
+                    ))}
                 </div>
               )}
             </div>
@@ -363,13 +371,35 @@ export default function SystemDetailPottsSection(props) {
               {saSamples.length > 0 && (
                 <div className="space-y-1 mt-2">
                   {saSamples.map((sample) => (
-                    <div
-                      key={sample.job_id}
-                      className="text-[11px] text-gray-300 rounded-md border border-gray-800 bg-gray-950/40 px-2 py-1"
-                    >
-                      {sample.cluster_name || sample.cluster_id || 'Cluster'} • {sample.created_at || ''}
-                    </div>
-                  ))}
+                      <div
+                        key={sample.sample_id || sample.path}
+                        className="flex items-center justify-between gap-2 rounded-md border border-gray-800 bg-gray-950/40 px-2 py-1 text-[11px] text-gray-300"
+                      >
+                        <span className="truncate">{sample.name || 'SA sample'} • {sample.created_at || ''}</span>
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              navigate(
+                                `/projects/${projectId}/systems/${systemId}/sampling/visualize?cluster_id=${pottsFitClusterId}&sample_id=${sample.sample_id}`
+                              )
+                            }
+                            className="text-gray-400 hover:text-cyan-300"
+                            aria-label={`View report for ${sample.name || 'SA sample'}`}
+                          >
+                            <Eye className="h-4 w-4" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteSample(sample.sample_id)}
+                            className="text-gray-400 hover:text-red-300"
+                            aria-label={`Delete ${sample.name || 'SA sample'}`}
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </button>
+                        </div>
+                      </div>
+                    ))}
                 </div>
               )}
             </div>

@@ -13,7 +13,7 @@ from fastapi.responses import FileResponse
 
 import numpy as np
 
-from backend.api.v1.common import get_queue, project_store, stream_upload
+from backend.api.v1.common import DATA_ROOT, get_queue, project_store, stream_upload, get_cluster_entry
 from backend.services.metastable_clusters import (
     generate_metastable_cluster_npz,
     assign_cluster_labels_to_states,
@@ -65,6 +65,203 @@ def _decode_metadata_json(meta_raw: Any) -> Dict[str, Any]:
                 value = match.group(1)
         return json.loads(value)
     raise ValueError("metadata_json is not a valid JSON string.")
+
+
+@router.get(
+    "/projects/{project_id}/systems/{system_id}/metastable/clusters/{cluster_id}/samples/{sample_id}/summary",
+    summary="Load a sampling summary NPZ for visualization",
+)
+async def get_sampling_summary(
+    project_id: str,
+    system_id: str,
+    cluster_id: str,
+    sample_id: str,
+):
+    try:
+        system_meta = project_store.get_system(project_id, system_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="System not found.")
+
+    entry = get_cluster_entry(system_meta, cluster_id)
+    samples = entry.get("samples") if isinstance(entry, dict) else None
+    if not isinstance(samples, list):
+        raise HTTPException(status_code=404, detail="No samples recorded for this cluster.")
+    sample_entry = next((s for s in samples if isinstance(s, dict) and s.get("sample_id") == sample_id), None)
+    if not sample_entry:
+        raise HTTPException(status_code=404, detail="Sample not found in cluster metadata.")
+    paths = sample_entry.get("paths") if isinstance(sample_entry, dict) else None
+    summary_rel = paths.get("summary_npz") if isinstance(paths, dict) else None
+    if not summary_rel:
+        raise HTTPException(status_code=404, detail="Sample summary NPZ is missing.")
+    summary_path = project_store.resolve_path(project_id, system_id, summary_rel)
+    if not summary_path.exists():
+        raise HTTPException(status_code=404, detail="Sample summary NPZ not found on disk.")
+
+    try:
+        with np.load(summary_path, allow_pickle=True) as data:
+            def _get(name, default=None):
+                if name not in data:
+                    return default
+                value = data[name]
+                if isinstance(value, np.ndarray):
+                    return value.tolist()
+                return value
+
+            payload = {
+                "sample_id": sample_entry.get("sample_id"),
+                "sample_name": sample_entry.get("name"),
+                "sample_method": sample_entry.get("method"),
+                "model_id": sample_entry.get("model_id"),
+                "cluster_id": cluster_id,
+                "summary_keys": data.files,
+                "K": _get("K", []),
+                "edges": _get("edges", []),
+                "residue_labels": _get("residue_labels", []),
+                "md_source_ids": _get("md_source_ids", []),
+                "md_source_labels": _get("md_source_labels", []),
+                "md_source_types": _get("md_source_types", []),
+                "md_source_counts": _get("md_source_counts", []),
+                "sample_source_ids": _get("sample_source_ids", []),
+                "sample_source_labels": _get("sample_source_labels", []),
+                "sample_source_types": _get("sample_source_types", []),
+                "sample_source_counts": _get("sample_source_counts", []),
+                "js_md_sample": _get("js_md_sample", []),
+                "js2_md_sample": _get("js2_md_sample", []),
+                "edge_strength": _get("edge_strength", []),
+                "energy_bins": _get("energy_bins", []),
+                "energy_hist_md": _get("energy_hist_md", []),
+                "energy_hist_sample": _get("energy_hist_sample", []),
+                "xlik_delta_active": _get("xlik_delta_active", []),
+                "xlik_delta_inactive": _get("xlik_delta_inactive", []),
+                "xlik_auc": _get("xlik_auc", []),
+                "xlik_active_state_labels": _get("xlik_active_state_labels", []),
+                "xlik_inactive_state_labels": _get("xlik_inactive_state_labels", []),
+                "xlik_other_state_labels": _get("xlik_other_state_labels", []),
+                "beta_eff_grid": _get("beta_eff_grid", []),
+                "beta_eff_distances_by_schedule": _get("beta_eff_distances_by_schedule", []),
+                "sa_schedule_labels": _get("sa_schedule_labels", []),
+                "beta_eff": _get("beta_eff", []),
+            }
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to load sampling summary: {exc}") from exc
+
+    try:
+        state_label_map = {sid: state.name for sid, state in system_meta.states.items()}
+        meta_label_map = {str(m.get("metastable_id")): m.get("name") for m in system_meta.metastable_states or []}
+        md_source_ids = payload.get("md_source_ids") or []
+        md_source_labels = payload.get("md_source_labels") or []
+        normalized = []
+        for idx, src_id in enumerate(md_source_ids):
+            label = md_source_labels[idx] if idx < len(md_source_labels) else str(src_id)
+            if isinstance(src_id, str) and src_id.startswith("state:"):
+                state_id = src_id.split(":", 1)[-1]
+                label = state_label_map.get(state_id, label)
+            elif isinstance(src_id, str) and src_id.startswith("meta:"):
+                meta_id = src_id.split(":", 1)[-1]
+                label = meta_label_map.get(meta_id, label)
+            normalized.append(label)
+        payload["md_source_labels"] = normalized
+    except Exception:
+        pass
+
+    return payload
+
+
+@router.get(
+    "/projects/{project_id}/systems/{system_id}/metastable/clusters/{cluster_id}/samples/{sample_id}/artifacts/{artifact}",
+    summary="Download a sampling artifact from a cluster sample",
+)
+async def download_sampling_artifact(
+    project_id: str,
+    system_id: str,
+    cluster_id: str,
+    sample_id: str,
+    artifact: str,
+):
+    try:
+        system_meta = project_store.get_system(project_id, system_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="System not found.")
+
+    entry = get_cluster_entry(system_meta, cluster_id)
+    samples = entry.get("samples") if isinstance(entry, dict) else None
+    if not isinstance(samples, list):
+        raise HTTPException(status_code=404, detail="No samples recorded for this cluster.")
+    sample_entry = next((s for s in samples if isinstance(s, dict) and s.get("sample_id") == sample_id), None)
+    if not sample_entry:
+        raise HTTPException(status_code=404, detail="Sample not found in cluster metadata.")
+
+    key_map = {
+        "summary_npz": "summary_npz",
+        "metadata_json": "metadata_json",
+        "marginals_plot": "marginals_plot",
+        "sampling_report": "sampling_report",
+        "cross_likelihood_report": "cross_likelihood_report",
+        "beta_scan_plot": "beta_scan_plot",
+    }
+    artifact_key = key_map.get(artifact)
+    if not artifact_key:
+        raise HTTPException(status_code=404, detail="Unknown artifact.")
+
+    paths = sample_entry.get("paths") if isinstance(sample_entry, dict) else None
+    rel_path = paths.get(artifact_key) if isinstance(paths, dict) else None
+    if not rel_path:
+        raise HTTPException(status_code=404, detail="Artifact not available for this sample.")
+    artifact_path = project_store.resolve_path(project_id, system_id, rel_path)
+    if not artifact_path.exists():
+        raise HTTPException(status_code=404, detail="Artifact file not found on disk.")
+
+    media_type = _artifact_media_type(artifact_path)
+    headers = {}
+    if media_type == "text/html":
+        headers["Content-Disposition"] = f"inline; filename={artifact_path.name}"
+    return FileResponse(artifact_path, filename=artifact_path.name, media_type=media_type, headers=headers)
+
+
+@router.delete(
+    "/projects/{project_id}/systems/{system_id}/metastable/clusters/{cluster_id}/samples/{sample_id}",
+    summary="Delete a sampling sample and its artifacts",
+)
+async def delete_sampling_sample(
+    project_id: str,
+    system_id: str,
+    cluster_id: str,
+    sample_id: str,
+):
+    try:
+        system_meta = project_store.get_system(project_id, system_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="System not found.")
+
+    entry = get_cluster_entry(system_meta, cluster_id)
+    samples = entry.get("samples") if isinstance(entry, dict) else None
+    if not isinstance(samples, list):
+        raise HTTPException(status_code=404, detail="No samples recorded for this cluster.")
+
+    sample_entry = next((s for s in samples if isinstance(s, dict) and s.get("sample_id") == sample_id), None)
+    if not sample_entry:
+        raise HTTPException(status_code=404, detail="Sample not found in cluster metadata.")
+
+    cluster_dirs = project_store.ensure_cluster_directories(project_id, system_id, cluster_id)
+    sample_dir = cluster_dirs["samples_dir"] / sample_id
+    if sample_dir.exists():
+        shutil.rmtree(sample_dir, ignore_errors=True)
+
+    paths = sample_entry.get("paths") if isinstance(sample_entry, dict) else None
+    if isinstance(paths, dict):
+        for rel_path in paths.values():
+            if not rel_path:
+                continue
+            path = project_store.resolve_path(project_id, system_id, rel_path)
+            if path.exists() and path.is_file():
+                try:
+                    path.unlink()
+                except Exception:
+                    pass
+
+    entry["samples"] = [s for s in samples if not (isinstance(s, dict) and s.get("sample_id") == sample_id)]
+    project_store.save_system(system_meta)
+    return {"status": "deleted", "sample_id": sample_id}
 
 
 def _parse_cluster_payload(payload: Dict[str, Any]) -> Dict[str, Any]:

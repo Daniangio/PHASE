@@ -464,6 +464,7 @@ def run_simulation_job(
         results_dir = sample_dir
 
         sim_params = dict(params or {})
+        sampling_method = sim_params.get("sampling_method") or "gibbs"
         model_rel = None
         model_id = None
         if sim_params.get("use_potts_model", True):
@@ -539,6 +540,8 @@ def run_simulation_job(
             str(results_dir),
             "--gibbs-method",
             gibbs_method,
+            "--sampling-method",
+            str(sampling_method),
             "--estimate-beta-eff",
         ]
         if beta_override is not None:
@@ -683,21 +686,18 @@ def run_simulation_job(
         beta_scan_path = _coerce_path(run_result.get("beta_scan_path"))
         model_artifact = _coerce_path(run_result.get("model_path"))
 
-        potts_model_rel = None
-        if model_artifact and model_artifact.exists():
-            if model_path and model_path.exists() and model_artifact.resolve() == model_path.resolve():
-                potts_model_rel = str(model_rel)
-            else:
-                potts_model_rel = _persist_potts_model(
-                    project_id,
-                    system_id,
-                    cluster_id,
-                    model_artifact,
-                    params,
-                    source="simulation",
-                    model_id=str(uuid.uuid4()),
-                    model_name=None,
-                )
+        potts_model_rel = str(model_rel) if model_rel else None
+        if not model_rel and model_artifact and model_artifact.exists():
+            potts_model_rel = _persist_potts_model(
+                project_id,
+                system_id,
+                cluster_id,
+                model_artifact,
+                params,
+                source="simulation",
+                model_id=str(uuid.uuid4()),
+                model_name=None,
+            )
 
         cluster_name = entry.get("name") if isinstance(entry, dict) else None
         if cluster_name:
@@ -723,11 +723,14 @@ def run_simulation_job(
                 except Exception:
                     sample_paths[key] = str(dest)
 
+        sample_label = sim_params.get("sample_name")
+        if isinstance(sample_label, str):
+            sample_label = sample_label.strip() or None
         sample_entry = {
             "sample_id": sample_id,
-            "name": f"Sampling {datetime.utcnow().strftime('%Y%m%d %H:%M')}",
+            "name": sample_label or f"Sampling {datetime.utcnow().strftime('%Y%m%d %H:%M')}",
             "type": "potts_sampling",
-            "method": gibbs_method,
+            "method": "sa" if sampling_method == "sa" else "gibbs",
             "model_id": model_id,
             "created_at": datetime.utcnow().isoformat(),
             "paths": sample_paths,

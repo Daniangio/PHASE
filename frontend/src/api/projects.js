@@ -109,6 +109,19 @@ export function fetchSystem(projectId, systemId) {
   return requestJSON(`/projects/${projectId}/systems/${systemId}`);
 }
 
+export function fetchSamplingSummary(projectId, systemId, clusterId, sampleId) {
+  return requestJSON(
+    `/projects/${projectId}/systems/${systemId}/metastable/clusters/${clusterId}/samples/${sampleId}/summary`
+  );
+}
+
+export function deleteSamplingSample(projectId, systemId, clusterId, sampleId) {
+  return requestJSON(
+    `/projects/${projectId}/systems/${systemId}/metastable/clusters/${clusterId}/samples/${sampleId}`,
+    { method: 'DELETE' }
+  );
+}
+
 export function downloadStructure(projectId, systemId, stateId) {
   return requestBlob(`/projects/${projectId}/systems/${systemId}/structures/${stateId}`);
 }

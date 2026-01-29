@@ -43,6 +43,19 @@ export default function SystemDetailSidebar({
         <Eye className="h-4 w-4" />
         Visualize descriptors
       </button>
+      <button
+        type="button"
+        onClick={() => {
+          const params = new URLSearchParams();
+          if (selectedClusterId) params.set('cluster_id', selectedClusterId);
+          const suffix = params.toString() ? `?${params.toString()}` : '';
+          navigate(`/projects/${projectId}/systems/${systemId}/sampling/visualize${suffix}`);
+        }}
+        className="w-full text-xs px-3 py-2 rounded-md border border-gray-600 text-gray-200 hover:bg-gray-700/40 inline-flex items-center justify-center gap-2"
+      >
+        <Eye className="h-4 w-4" />
+        Sampling explorer
+      </button>
       <div className="space-y-2">
         {states.map((state) => {
           const metaForState = metastableStates.filter((m) => m.macro_state_id === state.state_id);

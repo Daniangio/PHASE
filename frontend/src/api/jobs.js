@@ -62,7 +62,9 @@ export function uploadSimulationResults(
   clusterId,
   compareClusterIds,
   summaryFile,
-  modelFile,
+  pottsModelId,
+  sampleName,
+  samplingMethod,
   options = {}
 ) {
   const { onUploadProgress } = options;
@@ -127,7 +129,9 @@ export function uploadSimulationResults(
       });
     }
     payload.append('summary_npz', summaryFile);
-    payload.append('potts_model', modelFile);
+    if (pottsModelId) payload.append('potts_model_id', pottsModelId);
+    if (sampleName) payload.append('sample_name', sampleName);
+    if (samplingMethod) payload.append('sampling_method', samplingMethod);
     xhr.send(payload);
   });
 }

@@ -5,7 +5,9 @@ export default function SimulationUploadForm({ clusterRuns, onSubmit, isBusy = f
   const [clusterId, setClusterId] = useState('');
   const [compareClusterIds, setCompareClusterIds] = useState([]);
   const [summaryFile, setSummaryFile] = useState(null);
-  const [modelFile, setModelFile] = useState(null);
+  const [pottsModelId, setPottsModelId] = useState('');
+  const [sampleName, setSampleName] = useState('');
+  const [samplingMethod, setSamplingMethod] = useState('gibbs');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState(null);
   const busy = isBusy || isSubmitting;
@@ -19,6 +21,7 @@ export default function SimulationUploadForm({ clusterRuns, onSubmit, isBusy = f
     () => clusterOptions.find((run) => run.cluster_id === clusterId),
     [clusterOptions, clusterId]
   );
+  const pottsModels = useMemo(() => selectedCluster?.potts_models || [], [selectedCluster]);
 
   useEffect(() => {
     if (!clusterOptions.length) {
@@ -30,6 +33,17 @@ export default function SimulationUploadForm({ clusterRuns, onSubmit, isBusy = f
       setClusterId(clusterOptions[clusterOptions.length - 1].cluster_id);
     }
   }, [clusterOptions, clusterId]);
+
+  useEffect(() => {
+    if (!pottsModels.length) {
+      setPottsModelId('');
+      return;
+    }
+    const exists = pottsModels.some((model) => model.model_id === pottsModelId);
+    if (!pottsModelId || !exists) {
+      setPottsModelId(pottsModels[0].model_id);
+    }
+  }, [pottsModels, pottsModelId]);
 
   useEffect(() => {
     if (!compareClusterIds.length) return;
@@ -51,18 +65,22 @@ export default function SimulationUploadForm({ clusterRuns, onSubmit, isBusy = f
       if (!summaryFile) {
         throw new Error('Upload the sampling summary NPZ (run_summary.npz).');
       }
-      if (!modelFile) {
-        throw new Error('Upload the Potts model NPZ used for sampling.');
+      if (!pottsModelId) {
+        throw new Error('Select the Potts model used for sampling.');
       }
       await onSubmit({
         cluster_id: clusterId,
         compare_cluster_ids: compareClusterIds,
         summaryFile,
-        modelFile,
+        pottsModelId,
+        sampleName,
+        samplingMethod,
       });
       setCompareClusterIds([]);
       setSummaryFile(null);
-      setModelFile(null);
+      setPottsModelId('');
+      setSampleName('');
+      setSamplingMethod('gibbs');
     } catch (err) {
       setError(err.message || 'Failed to upload sampling results.');
     } finally {
@@ -139,6 +157,33 @@ export default function SimulationUploadForm({ clusterRuns, onSubmit, isBusy = f
       </div>
 
       <div>
+        <label className="block text-sm text-gray-300 mb-1">Sampling method</label>
+        <select
+          value={samplingMethod}
+          onChange={(event) => setSamplingMethod(event.target.value)}
+          disabled={busy}
+          className="w-full bg-gray-900 border border-gray-700 rounded-md px-3 py-2 text-white focus:ring-cyan-500"
+        >
+          <option value="gibbs">Gibbs</option>
+          <option value="sa">SA</option>
+        </select>
+        <p className="text-xs text-gray-500 mt-1">Choose the sampler used to generate this summary.</p>
+      </div>
+
+      <div>
+        <label className="block text-sm text-gray-300 mb-1">Sampling name (optional)</label>
+        <input
+          type="text"
+          value={sampleName}
+          onChange={(event) => setSampleName(event.target.value)}
+          disabled={busy}
+          placeholder="e.g., Gibbs β=1.0, 10k samples"
+          className="w-full bg-gray-900 border border-gray-700 rounded-md px-3 py-2 text-white placeholder:text-gray-500 focus:ring-cyan-500"
+        />
+        <p className="text-xs text-gray-500 mt-1">Used in UI lists and legends.</p>
+      </div>
+
+      <div>
         <label className="block text-sm text-gray-300 mb-1">Sampling summary (NPZ)</label>
         <input
           type="file"
@@ -151,15 +196,21 @@ export default function SimulationUploadForm({ clusterRuns, onSubmit, isBusy = f
       </div>
 
       <div>
-        <label className="block text-sm text-gray-300 mb-1">Potts model (NPZ)</label>
-        <input
-          type="file"
-          accept=".npz"
-          onChange={(event) => setModelFile(event.target.files?.[0] || null)}
-          disabled={busy}
-          className="w-full text-sm text-gray-300 file:mr-3 file:py-2 file:px-3 file:rounded-md file:border-0 file:bg-gray-700 file:text-gray-100 hover:file:bg-gray-600"
-        />
-        <p className="text-xs text-gray-500 mt-1">Upload the `potts_model.npz` used during sampling.</p>
+        <label className="block text-sm text-gray-300 mb-1">Potts model used for sampling</label>
+        <select
+          value={pottsModelId}
+          onChange={(event) => setPottsModelId(event.target.value)}
+          disabled={busy || !pottsModels.length}
+          className="w-full bg-gray-900 border border-gray-700 rounded-md px-3 py-2 text-white focus:ring-cyan-500 disabled:opacity-60"
+        >
+          {pottsModels.length === 0 && <option value="">No Potts models available</option>}
+          {pottsModels.map((model) => (
+            <option key={model.model_id} value={model.model_id}>
+              {model.name || model.model_id}
+            </option>
+          ))}
+        </select>
+        <p className="text-xs text-gray-500 mt-1">Choose the Potts model that generated the uploaded samples.</p>
       </div>
 
       <ErrorMessage message={error} />
