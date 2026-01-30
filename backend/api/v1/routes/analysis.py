@@ -193,7 +193,6 @@ async def submit_simulation_job(
     }
 
     params = payload.dict(exclude_none=True, exclude={"project_id", "system_id", "cluster_id"})
-    params["fit_mode"] = fit_mode
 
     try:
         job_uuid = str(uuid.uuid4())

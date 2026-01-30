@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from phase.simulation import main as sim_main
+from phase.simulation import pipeline as sim_main
 
 
 def main(argv: list[str] | None = None) -> int:

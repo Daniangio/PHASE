@@ -17,9 +17,9 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from phase.pipeline.runner import run_analysis
-from phase.simulation.main import parse_args as parse_simulation_args
-from phase.simulation.main import run_pipeline as run_simulation_pipeline
-from phase.simulation import main as sim_main
+from phase.simulation.pipeline import parse_args as parse_simulation_args
+from phase.simulation.pipeline import run_pipeline as run_simulation_pipeline
+from phase.simulation import pipeline as sim_main
 from phase.simulation import delta_fit as delta_fit_main
 from backend.services.metastable_clusters import (
     generate_metastable_cluster_npz,

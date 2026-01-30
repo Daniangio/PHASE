@@ -140,7 +140,7 @@ def _augment_sampling_summary(
 ) -> None:
     from phase.io.data import load_npz
     from phase.simulation.metrics import per_edge_js_from_padded, per_residue_js_from_padded, marginals, pairwise_joints_padded
-    from phase.simulation.main import (
+    from phase.simulation.pipeline import (
         _build_md_sources,
         _build_sample_sources,
         _pad_marginals_for_save,
