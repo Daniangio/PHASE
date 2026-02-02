@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from backend.services.metastable_clusters import evaluate_state_with_models
+from phase.workflows.clustering import evaluate_state_with_models
 from phase.services.project_store import ProjectStore
 
 

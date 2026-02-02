@@ -11,8 +11,8 @@ from backend.api.v1.common import (
     project_store,
     serialize_system,
 )
-from backend.services.metastable import recompute_metastable_states
-from backend.services.state_utils import build_analysis_states
+from phase.workflows.metastable import recompute_metastable_states
+from phase.services.state_utils import build_analysis_states
 
 
 router = APIRouter()
@@ -181,6 +181,28 @@ async def confirm_metastable_states(project_id: str, system_id: str):
 
     system_meta.metastable_locked = True
     system_meta.analysis_mode = "metastable"
+    project_store.save_system(system_meta)
+    return serialize_system(system_meta)
+
+
+@router.post(
+    "/projects/{project_id}/systems/{system_id}/analysis/macro",
+    summary="Select macro-only analysis without clearing metastable data",
+)
+async def set_macro_only_analysis(project_id: str, system_id: str):
+    try:
+        system_meta = project_store.get_system(project_id, system_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"System '{system_id}' not found.")
+
+    if not system_meta.states:
+        raise HTTPException(status_code=400, detail="Add at least one state before selecting macro-only analysis.")
+
+    if not getattr(system_meta, "macro_locked", False):
+        system_meta.macro_locked = True
+
+    system_meta.analysis_mode = "macro"
+    system_meta.metastable_locked = False
     project_store.save_system(system_meta)
     return serialize_system(system_meta)
 

@@ -2,13 +2,15 @@ from datetime import datetime
 from pathlib import Path
 import re
 import shutil
+import uuid
+import zipfile
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, File, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse
 
 from backend.api.v1.schemas import ProjectCreateRequest
-from backend.api.v1.common import DATA_ROOT, project_store, serialize_project, serialize_system
+from backend.api.v1.common import DATA_ROOT, project_store, serialize_project, serialize_system, stream_upload
 
 
 router = APIRouter()
@@ -67,6 +69,66 @@ async def dump_projects():
         base_dir=projects_dir.name,
     )
     return FileResponse(archive_path, filename=Path(archive_path).name, media_type="application/zip")
+
+
+def _safe_extract_zip(zip_path: Path, dest_dir: Path) -> None:
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(zip_path) as zf:
+        for member in zf.infolist():
+            member_path = dest_dir / member.filename
+            if not str(member_path.resolve()).startswith(str(dest_dir.resolve())):
+                raise ValueError(f"Invalid archive entry: {member.filename}")
+        zf.extractall(dest_dir)
+
+
+@router.post("/projects/restore", summary="Upload a zip with projects and restore them (overwriting on conflict)")
+async def restore_projects(archive: UploadFile = File(...)):
+    if not archive.filename or not archive.filename.lower().endswith(".zip"):
+        raise HTTPException(status_code=400, detail="Archive upload must be a .zip file.")
+
+    tmp_dir = DATA_ROOT / "tmp"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    upload_path = tmp_dir / f"projects_restore_{uuid.uuid4().hex}.zip"
+    extract_dir = tmp_dir / f"projects_restore_{uuid.uuid4().hex}"
+
+    try:
+        await stream_upload(archive, upload_path)
+        try:
+            await run_in_threadpool(_safe_extract_zip, upload_path, extract_dir)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        source_root = extract_dir / "projects"
+        if not source_root.exists():
+            source_root = extract_dir
+        if not source_root.exists():
+            raise HTTPException(status_code=400, detail="Archive does not contain a projects directory.")
+
+        project_dirs = [p for p in source_root.iterdir() if p.is_dir() and (p / "project.json").exists()]
+        if not project_dirs:
+            raise HTTPException(status_code=400, detail="No valid projects found in the uploaded archive.")
+
+        dest_root = project_store.base_dir
+        dest_root.mkdir(parents=True, exist_ok=True)
+        restored = []
+        for proj_dir in project_dirs:
+            dest = dest_root / proj_dir.name
+            if dest.exists():
+                shutil.rmtree(dest)
+            shutil.copytree(proj_dir, dest)
+            restored.append(proj_dir.name)
+        return {"status": "restored", "projects": restored}
+    finally:
+        try:
+            if upload_path.exists():
+                upload_path.unlink()
+        except Exception:
+            pass
+        try:
+            if extract_dir.exists():
+                shutil.rmtree(extract_dir)
+        except Exception:
+            pass
 
 
 @router.get("/projects/{project_id}", summary="Project detail including systems")

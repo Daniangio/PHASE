@@ -2,10 +2,10 @@ from __future__ import annotations
 
 """Thin CLI wrapper around the simulation pipeline.
 
-The full pipeline implementation lives in phase.simulation.pipeline.
+The full pipeline implementation lives in phase.potts.pipeline.
 """
 
-from phase.simulation.pipeline import _build_arg_parser, parse_args, run_pipeline
+from phase.potts.pipeline import _build_arg_parser, parse_args, run_pipeline
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -8,6 +8,15 @@ export function downloadProjectsDump() {
   return requestBlob('/projects/dump');
 }
 
+export function restoreProjectsArchive(file) {
+  const formData = new FormData();
+  formData.append('archive', file);
+  return requestJSON('/projects/restore', {
+    method: 'POST',
+    body: formData,
+  });
+}
+
 export function fetchProject(projectId) {
   return requestJSON(`/projects/${projectId}`);
 }
@@ -280,6 +289,12 @@ export function recomputeMetastableStates(projectId, systemId, params = {}) {
 
 export function clearMetastableStates(projectId, systemId) {
   return requestJSON(`/projects/${projectId}/systems/${systemId}/metastable/clear`, {
+    method: 'POST',
+  });
+}
+
+export function setMacroOnlyAnalysis(projectId, systemId) {
+  return requestJSON(`/projects/${projectId}/systems/${systemId}/analysis/macro`, {
     method: 'POST',
   });
 }

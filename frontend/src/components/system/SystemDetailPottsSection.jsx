@@ -18,6 +18,12 @@ export default function SystemDetailPottsSection(props) {
     setPottsFitMode,
     pottsFitKind,
     setPottsFitKind,
+    pottsFitStartMode,
+    setPottsFitStartMode,
+    pottsFitBaseModelId,
+    setPottsFitBaseModelId,
+    pottsFitExistingMode,
+    setPottsFitExistingMode,
     pottsDeltaBaseModelId,
     setPottsDeltaBaseModelId,
     pottsDeltaStateIds,
@@ -595,16 +601,18 @@ export default function SystemDetailPottsSection(props) {
                     Delta fit
                   </button>
                 </div>
-                <div>
-                  <label className="block text-sm text-gray-300 mb-1">Potts model name</label>
-                  <input
-                    type="text"
-                    value={pottsModelName}
-                    onChange={(event) => setPottsModelName(event.target.value)}
-                    placeholder="e.g. Active+Inactive Potts"
-                    className="w-full bg-gray-800 border border-gray-700 rounded-md px-3 py-2 text-white focus:ring-cyan-500"
-                  />
-                </div>
+                {(pottsFitKind === 'delta' || pottsFitStartMode !== 'existing' || pottsFitExistingMode !== 'resume') && (
+                  <div>
+                    <label className="block text-sm text-gray-300 mb-1">Potts model name</label>
+                    <input
+                      type="text"
+                      value={pottsModelName}
+                      onChange={(event) => setPottsModelName(event.target.value)}
+                      placeholder="e.g. Active+Inactive Potts"
+                      className="w-full bg-gray-800 border border-gray-700 rounded-md px-3 py-2 text-white focus:ring-cyan-500"
+                    />
+                  </div>
+                )}
                 {pottsFitKind === 'delta' && (
                   <div className="space-y-3">
                     <div>
@@ -663,10 +671,56 @@ export default function SystemDetailPottsSection(props) {
                 {pottsFitKind !== 'delta' && (
                   <>
                     <div>
+                      <label className="block text-sm text-gray-300 mb-1">Starting point</label>
+                      <select
+                        value={pottsFitStartMode}
+                        onChange={(event) => setPottsFitStartMode(event.target.value)}
+                        className="w-full bg-gray-800 border border-gray-700 rounded-md px-3 py-2 text-white focus:ring-cyan-500"
+                      >
+                        <option value="scratch">Fit from scratch</option>
+                        <option value="existing">Start from existing model</option>
+                      </select>
+                    </div>
+                    {pottsFitStartMode === 'existing' && (
+                      <div className="space-y-2 text-sm">
+                        <label className="space-y-1">
+                          <span className="text-xs text-gray-400">Base model</span>
+                          <select
+                            value={pottsFitBaseModelId}
+                            onChange={(event) => setPottsFitBaseModelId(event.target.value)}
+                            disabled={!pottsModels.length}
+                            className="w-full bg-gray-800 border border-gray-700 rounded-md px-3 py-2 text-white focus:ring-cyan-500 disabled:opacity-60"
+                          >
+                            {!pottsModels.length && <option value="">No models available</option>}
+                            {pottsModels.map((model) => (
+                              <option key={model.model_id} value={model.model_id}>
+                                {formatPottsModelName(model)}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        <label className="space-y-1">
+                          <span className="text-xs text-gray-400">Action</span>
+                          <select
+                            value={pottsFitExistingMode}
+                            onChange={(event) => setPottsFitExistingMode(event.target.value)}
+                            className="w-full bg-gray-800 border border-gray-700 rounded-md px-3 py-2 text-white focus:ring-cyan-500"
+                          >
+                            <option value="resume">Improve this model</option>
+                            <option value="init">New model initialized from it</option>
+                          </select>
+                        </label>
+                        <p className="text-xs text-gray-500">
+                          Contact edges will be reused from the selected model.
+                        </p>
+                      </div>
+                    )}
+                    <div>
                       <label className="block text-sm text-gray-300 mb-1">Fit method</label>
                       <select
                         value={pottsFitMethod}
                         onChange={(event) => setPottsFitMethod(event.target.value)}
+                        disabled={pottsFitStartMode === 'existing'}
                         className="w-full bg-gray-800 border border-gray-700 rounded-md px-3 py-2 text-white focus:ring-cyan-500"
                       >
                         <option value="pmi+plm">PMI + PLM</option>
@@ -680,6 +734,7 @@ export default function SystemDetailPottsSection(props) {
                         <select
                           value={pottsFitContactMode}
                           onChange={(event) => setPottsFitContactMode(event.target.value)}
+                          disabled={pottsFitStartMode === 'existing'}
                           className="w-full bg-gray-800 border border-gray-700 rounded-md px-3 py-2 text-white focus:ring-cyan-500"
                         >
                           <option value="CA">CA</option>
@@ -696,6 +751,7 @@ export default function SystemDetailPottsSection(props) {
                           onChange={(event) =>
                             setPottsFitContactCutoff(Math.max(0.1, Number(event.target.value) || 0))
                           }
+                          disabled={pottsFitStartMode === 'existing'}
                           className="w-full bg-gray-800 border border-gray-700 rounded-md px-3 py-2 text-white focus:ring-cyan-500"
                         />
                       </label>
@@ -711,47 +767,123 @@ export default function SystemDetailPottsSection(props) {
                   {pottsFitAdvanced ? 'Hide' : 'Show'} {pottsFitKind === 'delta' ? 'delta' : 'fit'} hyperparams
                 </button>
                 {pottsFitAdvanced && pottsFitKind !== 'delta' && (
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
-                    {[
-                      { key: 'plm_epochs', label: 'PLM epochs', placeholder: '200' },
-                      { key: 'plm_lr', label: 'PLM lr', placeholder: '1e-3' },
-                      { key: 'plm_lr_min', label: 'PLM lr min', placeholder: '1e-4' },
-                      { key: 'plm_l2', label: 'PLM L2', placeholder: '1e-5' },
-                      { key: 'plm_batch_size', label: 'Batch size', placeholder: '512' },
-                      { key: 'plm_progress_every', label: 'Progress every', placeholder: '10' },
-                    ].map((field) => (
-                      <label key={field.key} className="space-y-1">
-                        <span className="text-xs text-gray-400">{field.label}</span>
-                        <input
-                          type="text"
-                          placeholder={field.placeholder}
-                          value={pottsFitParams[field.key]}
+                  <div className="space-y-3">
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
+                      {[
+                        { key: 'plm_epochs', label: 'PLM epochs', placeholder: '200' },
+                        { key: 'plm_lr', label: 'PLM lr', placeholder: '1e-3' },
+                        { key: 'plm_lr_min', label: 'PLM lr min', placeholder: '1e-4' },
+                        { key: 'plm_l2', label: 'PLM L2', placeholder: '1e-5' },
+                        { key: 'plm_batch_size', label: 'Batch size', placeholder: '512' },
+                        { key: 'plm_progress_every', label: 'Progress every', placeholder: '10' },
+                      ].map((field) => (
+                        <label key={field.key} className="space-y-1">
+                          <span className="text-xs text-gray-400">{field.label}</span>
+                          <input
+                            type="text"
+                            placeholder={field.placeholder}
+                            value={pottsFitParams[field.key]}
+                            onChange={(event) =>
+                              setPottsFitParams((prev) => ({
+                                ...prev,
+                                [field.key]: event.target.value,
+                              }))
+                            }
+                            className="w-full bg-gray-800 border border-gray-700 rounded-md px-3 py-2 text-white focus:ring-cyan-500"
+                          />
+                        </label>
+                      ))}
+                      <label className="space-y-1">
+                        <span className="text-xs text-gray-400">LR schedule</span>
+                        <select
+                          value={pottsFitParams.plm_lr_schedule}
                           onChange={(event) =>
                             setPottsFitParams((prev) => ({
                               ...prev,
-                              [field.key]: event.target.value,
+                              plm_lr_schedule: event.target.value,
                             }))
                           }
                           className="w-full bg-gray-800 border border-gray-700 rounded-md px-3 py-2 text-white focus:ring-cyan-500"
-                        />
+                        >
+                          <option value="cosine">Cosine</option>
+                          <option value="none">None</option>
+                        </select>
                       </label>
-                    ))}
-                    <label className="space-y-1">
-                      <span className="text-xs text-gray-400">LR schedule</span>
-                      <select
-                        value={pottsFitParams.plm_lr_schedule}
-                        onChange={(event) =>
-                          setPottsFitParams((prev) => ({
-                            ...prev,
-                            plm_lr_schedule: event.target.value,
-                          }))
-                        }
-                        className="w-full bg-gray-800 border border-gray-700 rounded-md px-3 py-2 text-white focus:ring-cyan-500"
-                      >
-                        <option value="cosine">Cosine</option>
-                        <option value="none">None</option>
-                      </select>
-                    </label>
+                    </div>
+                    {pottsFitMethod !== 'pmi' && pottsFitStartMode !== 'existing' && (
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
+                        <label className="space-y-1">
+                          <span className="text-xs text-gray-400">PLM init</span>
+                          <select
+                            value={pottsFitParams.plm_init}
+                            onChange={(event) =>
+                              setPottsFitParams((prev) => ({
+                                ...prev,
+                                plm_init: event.target.value,
+                              }))
+                            }
+                            className="w-full bg-gray-800 border border-gray-700 rounded-md px-3 py-2 text-white focus:ring-cyan-500"
+                          >
+                            <option value="pmi">PMI</option>
+                            <option value="zero">Zero</option>
+                            <option value="model">Model</option>
+                          </select>
+                        </label>
+                        <label className="space-y-1">
+                          <span className="text-xs text-gray-400">Resume model path</span>
+                          <input
+                            type="text"
+                            placeholder="path/to/model.npz"
+                            value={pottsFitParams.plm_resume_model}
+                            onChange={(event) => {
+                              const value = event.target.value;
+                              setPottsFitParams((prev) => ({
+                                ...prev,
+                                plm_resume_model: value,
+                                plm_init: value ? 'model' : prev.plm_init,
+                              }));
+                            }}
+                            className="w-full bg-gray-800 border border-gray-700 rounded-md px-3 py-2 text-white focus:ring-cyan-500"
+                          />
+                        </label>
+                        {pottsFitParams.plm_init === 'model' && !pottsFitParams.plm_resume_model && (
+                          <label className="space-y-1">
+                            <span className="text-xs text-gray-400">Init model path</span>
+                            <input
+                              type="text"
+                              placeholder="path/to/model.npz"
+                              value={pottsFitParams.plm_init_model}
+                              onChange={(event) =>
+                                setPottsFitParams((prev) => ({
+                                  ...prev,
+                                  plm_init_model: event.target.value,
+                                }))
+                              }
+                              className="w-full bg-gray-800 border border-gray-700 rounded-md px-3 py-2 text-white focus:ring-cyan-500"
+                            />
+                          </label>
+                        )}
+                      </div>
+                    )}
+                    {(pottsFitMethod !== 'pmi' || pottsFitStartMode === 'existing') && (
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
+                        <label className="space-y-1">
+                          <span className="text-xs text-gray-400">Val fraction</span>
+                          <input
+                            type="text"
+                            placeholder="0"
+                            value={pottsFitParams.plm_val_frac}
+                            onChange={(event) =>
+                              setPottsFitParams((prev) => ({
+                                ...prev,
+                                plm_val_frac: event.target.value,
+                              }))
+                            }
+                            className="w-full bg-gray-800 border border-gray-700 rounded-md px-3 py-2 text-white focus:ring-cyan-500"
+                          />
+                        </label>
+                      </div>
+                    )}
                   </div>
                 )}
                 {pottsFitAdvanced && pottsFitKind === 'delta' && (

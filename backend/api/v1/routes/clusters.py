@@ -14,7 +14,7 @@ from fastapi.responses import FileResponse
 import numpy as np
 
 from backend.api.v1.common import DATA_ROOT, get_queue, project_store, stream_upload, get_cluster_entry
-from backend.services.metastable_clusters import (
+from phase.workflows.clustering import (
     generate_metastable_cluster_npz,
     assign_cluster_labels_to_states,
     update_cluster_metadata_with_assignments,
@@ -23,7 +23,7 @@ from backend.services.metastable_clusters import (
     _slug,
     evaluate_state_with_models,
 )
-from backend.services.backmapping_npz import build_backmapping_npz
+from phase.workflows.backmapping import build_backmapping_npz
 from backend.tasks import run_cluster_job, run_backmapping_job
 
 

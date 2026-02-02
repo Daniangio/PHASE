@@ -41,6 +41,7 @@ PYTHON_BIN="${VENV_DIR}/bin/python"
 OFFLINE_ROOT=""
 OFFLINE_PROJECT_ID=""
 OFFLINE_SYSTEM_ID=""
+MAX_CLUSTER_FRAMES=""
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -50,6 +51,8 @@ while [ "$#" -gt 0 ]; do
       OFFLINE_PROJECT_ID="$2"; shift 2 ;;
     --system-id)
       OFFLINE_SYSTEM_ID="$2"; shift 2 ;;
+    --max-cluster-frames)
+      MAX_CLUSTER_FRAMES="$2"; shift 2 ;;
     *)
       echo "Unknown argument: $1" >&2
       exit 1 ;;
@@ -79,6 +82,9 @@ STATE_IDS="$(printf "%s\n" "$STATE_ROWS" | awk -F'|' '{print $1}' | paste -sd, -
 CLUSTER_NAME="$(prompt "Cluster name" "cluster_${OFFLINE_SYSTEM_ID}")"
 N_JOBS="$(prompt "Worker processes (0 = all cpus)" "1")"
 DENSITY_Z="$(prompt "Density z (auto or float)" "auto")"
+if [ -z "$MAX_CLUSTER_FRAMES" ]; then
+  MAX_CLUSTER_FRAMES="$(prompt "Max cluster frames (blank = no limit)" "")"
+fi
 
 CMD=(
   "$PYTHON_BIN" -m phase.scripts.cluster_npz
@@ -89,6 +95,9 @@ CMD=(
   --n-jobs "$N_JOBS"
   --density-z "$DENSITY_Z"
 )
+if [ -n "$MAX_CLUSTER_FRAMES" ]; then
+  CMD+=(--max-cluster-frames "$MAX_CLUSTER_FRAMES")
+fi
 
 echo "Running clustering..."
 PYTHONPATH="${ROOT_DIR}:${PYTHONPATH:-}" "${CMD[@]}"

@@ -112,6 +112,10 @@ python main.py \
 * `--fit-only`: fit and save `potts_model.npz` then exit
 * `--model-npz`: reuse a pre-fit Potts model and skip fitting (repeat or comma-separate to combine models)
 * `--plm-device`: device for PLM training (`auto`, `cpu`, `cuda`, or torch device string)
+* `--plm-init`: PLM initialization (`pmi` | `zero` | `model`)
+* `--plm-init-model`: Potts model NPZ used when `--plm-init=model`
+* `--plm-resume-model`: resume PLM from a saved model (uses stored best loss if available)
+* `--plm-val-frac`: fraction of frames reserved for validation during PLM
 
 ### Local fitting
 

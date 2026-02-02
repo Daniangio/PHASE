@@ -14,10 +14,11 @@ from typing import Any, Dict, List, Optional, Tuple
 from fastapi import HTTPException, Request, UploadFile
 from fastapi.concurrency import run_in_threadpool
 
-from backend.services.descriptors import save_descriptor_npz
-from backend.services.preprocessing import DescriptorPreprocessor
-from backend.services.selection_utils import build_residue_selection_config
-from backend.services.state_utils import build_analysis_states
+from phase.workflows.macro_states import (
+    build_state_descriptors as build_state_descriptors_sync,
+    refresh_system_metadata,
+    update_system_status,
+)
 from backend.services.project_store import (
     DescriptorState,
     ProjectMetadata,
@@ -100,30 +101,6 @@ def get_state_or_404(system_meta: SystemMetadata, state_id: str) -> DescriptorSt
     return state
 
 
-def update_system_status(system_meta: SystemMetadata) -> None:
-    descriptors_ready = [s for s in system_meta.states.values() if s.descriptor_file]
-    trajectories_uploaded = [s for s in system_meta.states.values() if s.trajectory_file]
-    if len(descriptors_ready) >= 2:
-        system_meta.status = "ready"
-    elif descriptors_ready:
-        system_meta.status = "single-ready"
-    elif trajectories_uploaded:
-        system_meta.status = "awaiting-descriptor"
-    elif system_meta.states:
-        system_meta.status = "pdb-only"
-    else:
-        system_meta.status = "empty"
-
-
-def refresh_system_metadata(system_meta: SystemMetadata) -> None:
-    all_keys = set()
-    for state in system_meta.states.values():
-        all_keys.update(state.residue_keys or [])
-    system_meta.descriptor_keys = sorted(all_keys)
-    system_meta.analysis_states = build_analysis_states(system_meta)
-    update_system_status(system_meta)
-
-
 def ensure_not_macro_locked(system_meta: SystemMetadata):
     if getattr(system_meta, "macro_locked", False):
         raise HTTPException(status_code=400, detail="System macro-states are locked; no further edits allowed.")
@@ -134,32 +111,6 @@ def ensure_not_metastable_locked(system_meta: SystemMetadata):
         raise HTTPException(status_code=400, detail="Metastable states are locked; recomputation is disabled.")
 
 
-def _build_state_artifacts(
-    preprocessor: DescriptorPreprocessor,
-    *,
-    traj_path: Path,
-    pdb_path: Path,
-    descriptors_dir: Path,
-    slice_spec: Optional[str],
-    state_id: str,
-    selection_used: str,
-) -> Tuple[Any, Dict[str, Path]]:
-    build_result = preprocessor.build_single(str(traj_path), str(pdb_path), slice_spec)
-    artifact_paths = {
-        "npz": descriptors_dir / f"{state_id}_descriptors.npz",
-        "metadata": descriptors_dir / f"{state_id}_descriptor_metadata.json",
-    }
-    save_descriptor_npz(artifact_paths["npz"], build_result.features)
-    metadata_payload = {
-        "descriptor_keys": build_result.residue_keys,
-        "residue_mapping": build_result.residue_mapping,
-        "n_frames": build_result.n_frames,
-        "residue_selection": selection_used,
-    }
-    artifact_paths["metadata"].write_text(json.dumps(metadata_payload, indent=2))
-    return build_result, artifact_paths
-
-
 async def build_state_descriptors(
     project_id: str,
     system_meta: SystemMetadata,
@@ -168,64 +119,22 @@ async def build_state_descriptors(
     residue_filter: Optional[str] = None,
     traj_path_override: Optional[Path] = None,
 ) -> SystemMetadata:
-    if not state_meta.trajectory_file and traj_path_override is None:
-        raise HTTPException(status_code=400, detail="No trajectory uploaded for this state.")
-    if not state_meta.pdb_file:
-        raise HTTPException(status_code=400, detail="No PDB stored for this state.")
-
-    dirs = project_store.ensure_directories(project_id, system_meta.system_id)
-    system_dir = dirs["system_dir"]
-    descriptors_dir = dirs["descriptors_dir"]
-
-    if traj_path_override is not None:
-        traj_path = traj_path_override
-    else:
-        traj_path = project_store.resolve_path(project_id, system_meta.system_id, state_meta.trajectory_file)
-    pdb_path = project_store.resolve_path(project_id, system_meta.system_id, state_meta.pdb_file)
-
-    if not traj_path.exists():
-        raise HTTPException(status_code=404, detail="Stored trajectory file missing on disk.")
-    if not pdb_path.exists():
-        raise HTTPException(status_code=404, detail="Stored PDB file missing on disk.")
-
-    selection_used = "protein"
-    if residue_filter is not None and residue_filter.strip():
-        selection_used = f"protein and ({residue_filter.strip()})"
-    elif system_meta.residue_selections:
-        selection_used = "system_selections"
-    selections_config = build_residue_selection_config(
-        base_selections=system_meta.residue_selections,
-        residue_filter=residue_filter,
-    )
-    preprocessor = DescriptorPreprocessor(residue_selections=selections_config)
-    print(f"[state-update] Building descriptors for state={state_meta.state_id} system={system_meta.system_id}")
-    build_result, artifact_paths = await run_in_threadpool(
-        functools.partial(
-            _build_state_artifacts,
-            preprocessor,
-            traj_path=traj_path,
-            pdb_path=pdb_path,
-            descriptors_dir=descriptors_dir,
-            slice_spec=state_meta.slice_spec,
-            state_id=state_meta.state_id,
-            selection_used=selection_used,
+    try:
+        return await run_in_threadpool(
+            functools.partial(
+                build_state_descriptors_sync,
+                project_store,
+                project_id,
+                system_meta,
+                state_meta,
+                residue_filter=residue_filter,
+                traj_path_override=traj_path_override,
+            )
         )
-    )
-
-    rel_npz = str(artifact_paths["npz"].relative_to(system_dir))
-    rel_meta = str(artifact_paths["metadata"].relative_to(system_dir))
-
-    state_meta.descriptor_file = rel_npz
-    state_meta.descriptor_metadata_file = rel_meta
-    state_meta.n_frames = build_result.n_frames
-    state_meta.residue_keys = build_result.residue_keys
-    state_meta.residue_mapping = build_result.residue_mapping
-    state_meta.residue_selection = residue_filter.strip() if residue_filter else None
-
-    refresh_system_metadata(system_meta)
-
-    project_store.save_system(system_meta)
-    return system_meta
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 def pick_state_pair(system_meta: SystemMetadata, state_a_id: Optional[str], state_b_id: Optional[str]):

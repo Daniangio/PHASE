@@ -29,7 +29,7 @@ import {
   uploadMetastableClusterNp,
   confirmMacroStates,
   confirmMetastableStates,
-  clearMetastableStates,
+  setMacroOnlyAnalysis,
   downloadSavedCluster,
   downloadBackmappingCluster,
   submitBackmappingClusterJob,
@@ -113,6 +113,9 @@ export default function SystemDetailPage() {
   const [pottsFitAdvanced, setPottsFitAdvanced] = useState(false);
   const [pottsFitMode, setPottsFitMode] = useState('run');
   const [pottsFitKind, setPottsFitKind] = useState('standard');
+  const [pottsFitStartMode, setPottsFitStartMode] = useState('scratch');
+  const [pottsFitBaseModelId, setPottsFitBaseModelId] = useState('');
+  const [pottsFitExistingMode, setPottsFitExistingMode] = useState('resume');
   const [pottsDeltaBaseModelId, setPottsDeltaBaseModelId] = useState('');
   const [pottsDeltaStateIds, setPottsDeltaStateIds] = useState([]);
   const [pottsModelName, setPottsModelName] = useState('');
@@ -124,6 +127,10 @@ export default function SystemDetailPage() {
     plm_l2: '',
     plm_batch_size: '',
     plm_progress_every: '',
+    plm_init: 'pmi',
+    plm_init_model: '',
+    plm_resume_model: '',
+    plm_val_frac: '',
   });
   const [pottsDeltaParams, setPottsDeltaParams] = useState({
     delta_epochs: '',
@@ -213,6 +220,23 @@ export default function SystemDetailPage() {
     const models = selectedCluster.potts_models || [];
     return models.map((model) => ({ ...model, cluster_id: selectedCluster.cluster_id }));
   }, [selectedCluster]);
+
+  useEffect(() => {
+    if (pottsFitStartMode !== 'existing') {
+      setPottsFitBaseModelId('');
+      return;
+    }
+    if (pottsFitMethod !== 'plm') {
+      setPottsFitMethod('plm');
+    }
+    if (!pottsModels.length) {
+      setPottsFitBaseModelId('');
+      return;
+    }
+    if (!pottsFitBaseModelId || !pottsModels.some((model) => model.model_id === pottsFitBaseModelId)) {
+      setPottsFitBaseModelId(pottsModels[0].model_id);
+    }
+  }, [pottsFitStartMode, pottsModels, pottsFitBaseModelId]);
   const selectedClusterName = useMemo(() => {
     if (!pottsFitClusterId) return null;
     return clusterNameById.get(pottsFitClusterId) || pottsFitClusterId;
@@ -623,7 +647,14 @@ export default function SystemDetailPage() {
         cluster_id: pottsFitClusterId,
         fit_mode: pottsFitKind === 'delta' ? 'delta' : 'standard',
       };
-      if (pottsModelName.trim()) payload.model_name = pottsModelName.trim();
+      const shouldRequestName = !(
+        pottsFitKind !== 'delta' &&
+        pottsFitStartMode === 'existing' &&
+        pottsFitExistingMode === 'resume'
+      );
+      if (shouldRequestName && pottsModelName.trim()) {
+        payload.model_name = pottsModelName.trim();
+      }
       if (pottsFitKind === 'delta') {
         if (!pottsDeltaBaseModelId) {
           setPottsFitError('Select a base Potts model to fit a delta.');
@@ -661,9 +692,26 @@ export default function SystemDetailPage() {
           payload[key] = value;
         });
       } else {
-        payload.fit_method = pottsFitMethod;
-        payload.contact_atom_mode = pottsFitContactMode;
-        payload.contact_cutoff = pottsFitContactCutoff;
+        const useExistingModel = pottsFitStartMode === 'existing';
+        if (useExistingModel) {
+          const baseModel = pottsModels.find((model) => model.model_id === pottsFitBaseModelId);
+          if (!baseModel?.path) {
+            setPottsFitError('Select an existing Potts model to start from.');
+            setPottsFitSubmitting(false);
+            return;
+          }
+          payload.fit_method = 'plm';
+          if (pottsFitExistingMode === 'resume') {
+            payload.plm_resume_model = baseModel.path;
+          } else {
+            payload.plm_init = 'model';
+            payload.plm_init_model = baseModel.path;
+          }
+        } else {
+          payload.fit_method = pottsFitMethod;
+          payload.contact_atom_mode = pottsFitContactMode;
+          payload.contact_cutoff = pottsFitContactCutoff;
+        }
         const numericKeys = new Set([
           'plm_epochs',
           'plm_lr',
@@ -671,12 +719,16 @@ export default function SystemDetailPage() {
           'plm_l2',
           'plm_batch_size',
           'plm_progress_every',
+          'plm_val_frac',
         ]);
         Object.entries(pottsFitParams).forEach(([key, value]) => {
           if (value === '' || value === null || value === undefined) return;
           if (numericKeys.has(key)) {
             const num = Number(value);
             if (Number.isFinite(num)) payload[key] = num;
+            return;
+          }
+          if (useExistingModel && (key === 'plm_init' || key === 'plm_init_model' || key === 'plm_resume_model')) {
             return;
           }
           payload[key] = value;
@@ -933,7 +985,7 @@ export default function SystemDetailPage() {
     setMetaActionError(null);
     setMacroChoiceLoading(true);
     try {
-      await clearMetastableStates(projectId, systemId);
+      await setMacroOnlyAnalysis(projectId, systemId);
       setMetaChoice('macro');
       await refreshSystem();
       await loadMetastable();
@@ -1304,8 +1356,8 @@ export default function SystemDetailPage() {
           </div>
           <div className="rounded-lg border border-gray-700 bg-gray-900/60 p-4 space-y-3">
             <p className="text-xs text-gray-400">
-              If you prefer to skip metastable discovery, confirm macro-only. Any existing metastable results will be
-              discarded.
+              If you prefer to skip metastable discovery, confirm macro-only. Existing metastable data will be kept
+              but ignored in analyses.
             </p>
             <button
               type="button"
@@ -1439,6 +1491,12 @@ export default function SystemDetailPage() {
               setPottsFitMode={setPottsFitMode}
               pottsFitKind={pottsFitKind}
               setPottsFitKind={setPottsFitKind}
+              pottsFitStartMode={pottsFitStartMode}
+              setPottsFitStartMode={setPottsFitStartMode}
+              pottsFitBaseModelId={pottsFitBaseModelId}
+              setPottsFitBaseModelId={setPottsFitBaseModelId}
+              pottsFitExistingMode={pottsFitExistingMode}
+              setPottsFitExistingMode={setPottsFitExistingMode}
               pottsDeltaBaseModelId={pottsDeltaBaseModelId}
               setPottsDeltaBaseModelId={setPottsDeltaBaseModelId}
               pottsDeltaStateIds={pottsDeltaStateIds}

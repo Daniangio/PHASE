@@ -21,6 +21,10 @@ The edge list comes from `contact_edge_index` in the NPZ file.
 - `plm-l2`: L2 regularization on parameters.
 - `plm-batch-size`: minibatch size for pseudolikelihood.
 - `plm-device`: device for PLM training (`auto`, `cpu`, `cuda`, or any torch device string).
+- `plm-init`: PLM initialization (`pmi`, `zero`, or `model`).
+- `plm-init-model`: path to a Potts model NPZ used when `plm-init=model`.
+- `plm-resume-model`: resume PLM from a saved model (keeps stored best loss if available).
+- `plm-val-frac`: fraction of frames reserved for validation during PLM.
 - `unassigned-policy`: how to handle -1 labels in the input.
 
 ## Fit-only mode
@@ -34,6 +38,7 @@ Use `--model-npz` in a later run to reuse a pre-fit model and skip fitting. You 
 - PLM requires PyTorch; GPU is used automatically when available.
 - Use `--plm-device cuda` (or `cpu`) to override device selection.
 - PMI is useful as a quick baseline or as initialization for PLM.
+- PLM saves the best-loss checkpoint as it improves, so an interrupted run still leaves a usable model.
 
 ## Local fitting
 To fit on a separate machine, run the setup once, then activate the venv and use the

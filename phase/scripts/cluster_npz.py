@@ -85,7 +85,7 @@ def main(argv: list[str] | None = None) -> int:
 
     labels = _parse_paths(args.labels) if args.labels else None
     eval_descriptor_paths = _parse_paths(args.eval_descriptors) if args.eval_descriptors else []
-    from backend.services.metastable_clusters import generate_cluster_npz_from_descriptors
+    from phase.workflows.clustering import generate_cluster_npz_from_descriptors
     if args.n_jobs is None or int(args.n_jobs) <= 0:
         n_jobs = os.cpu_count() or 1
     else:
@@ -113,7 +113,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         if args.project_id and args.system_id and args.state_ids:
-            from backend.services.metastable_clusters import (
+            from phase.workflows.clustering import (
                 generate_metastable_cluster_npz,
                 build_cluster_output_path,
                 assign_cluster_labels_to_states,

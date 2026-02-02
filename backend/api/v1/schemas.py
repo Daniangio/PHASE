@@ -76,6 +76,10 @@ class SimulationJobRequest(BaseModel):
     plm_batch_size: Optional[int] = None
     plm_progress_every: Optional[int] = None
     plm_device: Optional[str] = None
+    plm_init: Optional[str] = None
+    plm_init_model: Optional[str] = None
+    plm_resume_model: Optional[str] = None
+    plm_val_frac: Optional[float] = None
 
 
 class PottsFitJobRequest(BaseModel):
@@ -114,3 +118,7 @@ class PottsFitJobRequest(BaseModel):
     plm_batch_size: Optional[int] = None
     plm_progress_every: Optional[int] = None
     plm_device: Optional[str] = None
+    plm_init: Optional[str] = None
+    plm_init_model: Optional[str] = None
+    plm_resume_model: Optional[str] = None
+    plm_val_frac: Optional[float] = None

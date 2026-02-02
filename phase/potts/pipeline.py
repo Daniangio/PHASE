@@ -10,25 +10,27 @@ from typing import Sequence
 
 import numpy as np
 
+from phase.common.runtime import RuntimePolicy
 from phase.io.data import load_npz
-from phase.simulation.potts_model import (
+from phase.potts.potts_model import (
     PottsModel,
     add_potts_models,
     compute_pseudolikelihood_loss_torch,
     compute_pseudolikelihood_scores,
     fit_potts_pmi,
     fit_potts_pseudolikelihood_torch,
+    load_potts_model_metadata,
     load_potts_model,
     save_potts_model,
 )
-from phase.simulation.qubo import potts_to_qubo_onehot, decode_onehot, encode_onehot
-from phase.simulation.sampling import (
+from phase.potts.qubo import potts_to_qubo_onehot, decode_onehot, encode_onehot
+from phase.potts.sampling import (
     gibbs_sample_potts,
     make_beta_ladder,
     replica_exchange_gibbs_potts,
     sa_sample_qubo_neal,
 )
-from phase.simulation.metrics import (
+from phase.potts.metrics import (
     marginals,
     pairwise_joints_on_edges,
     per_residue_js,
@@ -37,7 +39,7 @@ from phase.simulation.metrics import (
     per_residue_js_from_padded,
     per_edge_js_from_padded,
 )
-from phase.simulation.plotting import (
+from phase.potts.plotting import (
     plot_cross_likelihood_report_from_npz,
     plot_marginal_summary_from_npz,
     plot_sampling_report_from_npz,
@@ -1080,6 +1082,31 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         default="auto",
         help="Device for PLM training (auto/cpu/cuda or torch device string).",
     )
+    ap.add_argument(
+        "--plm-init",
+        type=str,
+        default="pmi",
+        choices=["pmi", "zero", "model"],
+        help="Initialize PLM from pmi (default), zero (uninitialized), or a saved model.",
+    )
+    ap.add_argument(
+        "--plm-init-model",
+        type=str,
+        default="",
+        help="Path to a Potts model NPZ used when --plm-init=model.",
+    )
+    ap.add_argument(
+        "--plm-resume-model",
+        type=str,
+        default="",
+        help="Resume PLM from a saved model (uses stored best loss if available).",
+    )
+    ap.add_argument(
+        "--plm-val-frac",
+        type=float,
+        default=0.0,
+        help="Fraction of frames reserved for PLM validation (0 disables validation).",
+    )
 
     ap.add_argument(
         "--sampling-method",
@@ -1243,7 +1270,10 @@ def run_pipeline(
     *,
     parser: argparse.ArgumentParser | None = None,
     progress_callback=None,
+    runtime: RuntimePolicy | None = None,
 ) -> dict[str, object]:
+    if runtime is not None:
+        runtime.apply_to_potts_args(args)
     callbacks = _normalize_callbacks(progress_callback)
     def report(message: str, progress: float) -> None:
         if not callbacks:
@@ -1254,6 +1284,11 @@ def run_pipeline(
                 cb(message, pct)
             except Exception:
                 pass
+    def _coerce_float(value) -> float | None:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
 
     results_dir = _ensure_results_dir(args.results_dir)
     report("Initializing", 0)
@@ -1300,6 +1335,26 @@ def run_pipeline(
     if args.fit_only and model_npz_list:
         raise ValueError("Use --fit-only without --model-npz.")
 
+    plm_init = (args.plm_init or "pmi").strip().lower()
+    plm_init_model = (args.plm_init_model or "").strip()
+    plm_resume_model = (args.plm_resume_model or "").strip()
+    if plm_init_model and plm_init != "model":
+        plm_init = "model"
+    if plm_resume_model:
+        if plm_init_model:
+            raise ValueError("Use either --plm-resume-model or --plm-init-model, not both.")
+        plm_init = "model"
+        plm_init_model = plm_resume_model
+        if args.fit != "plm":
+            print("[fit] overriding --fit to plm for resume.")
+            args.fit = "plm"
+        if not args.model_out:
+            model_out_path = Path(plm_resume_model)
+    if model_npz_list and (plm_init_model or plm_resume_model):
+        raise ValueError("Use --model-npz without PLM init/resume flags.")
+    if plm_init == "model" and not plm_init_model:
+        raise ValueError("--plm-init=model requires --plm-init-model (or --plm-resume-model).")
+
     ds = load_npz(
         args.npz,
         unassigned_policy=args.unassigned_policy,
@@ -1340,35 +1395,98 @@ def run_pipeline(
         plm_device = ""
     plm_device = plm_device or None
 
+    labels_train = labels
+    val_labels = None
+    plm_val_frac = float(args.plm_val_frac or 0.0)
+    if plm_val_frac < 0 or plm_val_frac >= 1:
+        raise ValueError("--plm-val-frac must be in [0, 1).")
+    will_fit_plm = (not model_npz_list) and (args.fit in ("plm", "pmi+plm"))
+    if will_fit_plm and plm_val_frac > 0:
+        n_frames = labels.shape[0]
+        if n_frames < 2:
+            print("[plm] warning: not enough frames for validation; using full dataset.")
+        else:
+            rng = np.random.default_rng(args.seed)
+            idx = np.arange(n_frames)
+            rng.shuffle(idx)
+            n_val = int(round(plm_val_frac * n_frames))
+            n_val = max(1, min(n_frames - 1, n_val))
+            val_idx = idx[:n_val]
+            train_idx = idx[n_val:]
+            labels_train = labels[train_idx]
+            val_labels = labels[val_idx]
+            print(f"[plm] train_frames={labels_train.shape[0]} val_frames={val_labels.shape[0]} (val_frac={plm_val_frac:.3f})")
+
     # Fit model(s)
     model = None
     model_pmi = None
+    model_plm = None
     pmi_loss = None
+    init_model = None
+    resume_meta = None
+    start_best_loss = None
+    start_best_val_loss = None
+    best_plm_loss = None
+    best_plm_val_loss = None
+    best_plm_epoch = None
+    last_plm_loss = None
+    last_plm_val_loss = None
     if model_npz_list:
         report("Loading Potts model", 15)
         model = load_potts_model(model_npz_list[0])
         for extra_path in model_npz_list[1:]:
             model = add_potts_models(model, load_potts_model(extra_path))
     else:
-        if args.fit in ("pmi", "pmi+plm", "plm"):
+        if plm_init == "model":
+            init_model = load_potts_model(plm_init_model)
+            if plm_resume_model:
+                resume_meta = load_potts_model_metadata(plm_init_model)
+                if resume_meta:
+                    start_best_loss = _coerce_float(resume_meta.get("plm_best_loss"))
+                    start_best_val_loss = _coerce_float(resume_meta.get("plm_best_val_loss"))
+            if init_model.edges:
+                edges = list(init_model.edges)
+                print("[fit] using edges from init model.")
+
+        do_pmi = args.fit == "pmi" or (args.fit == "pmi+plm" and plm_init == "pmi")
+        if do_pmi:
             report("Fitting Potts model (PMI)", 15)
-            model_pmi = fit_potts_pmi(labels, K, edges)
+            model_pmi = fit_potts_pmi(labels_train, K, edges)
             model = model_pmi if args.fit == "pmi" else None
             try:
                 pmi_loss = compute_pseudolikelihood_loss_torch(
                     model_pmi,
-                    labels,
+                    labels_train,
                     batch_size=args.plm_batch_size,
                     device=plm_device,
                 )
                 print(f"[pmi] avg_pseudolikelihood_loss={pmi_loss:.6f}")
             except RuntimeError:
                 print("[pmi] pseudolikelihood loss unavailable (torch missing).")
+        elif args.fit == "pmi+plm" and plm_init != "pmi":
+            print("[fit] skipping PMI because --plm-init is not pmi.")
         if args.fit in ("plm", "pmi+plm"):
             try:
                 show_batch_progress = not callbacks and (args.progress or sys.stdout.isatty())
                 plm_batch_progress = None
                 report_init_loss = pmi_loss is None
+                init_from_pmi = plm_init == "pmi"
+                plm_init_model_obj = None
+                if plm_init == "model":
+                    plm_init_model_obj = init_model
+                elif plm_init == "pmi":
+                    plm_init_model_obj = model_pmi
+
+                base_metadata = {
+                    "data_npz": args.npz,
+                    "fit_method": args.fit,
+                    "source_model": model_npz_list if model_npz_list else None,
+                    "plm_init": plm_init,
+                    "plm_init_model": plm_init_model or None,
+                    "plm_resume_model": plm_resume_model or None,
+                    "plm_val_frac": float(plm_val_frac),
+                }
+                best_model_path = model_out_path
                 if show_batch_progress:
                     last_epoch = {"val": None}
 
@@ -1398,7 +1516,7 @@ def run_pipeline(
                         print(f"[plm] epoch {ep}/{total} avg_loss={avg_loss:.6f}")
 
                 model_plm = fit_potts_pseudolikelihood_torch(
-                    labels,
+                    labels_train,
                     K,
                     edges,
                     l2=args.plm_l2,
@@ -1410,45 +1528,92 @@ def run_pipeline(
                     batch_size=args.plm_batch_size,
                     seed=args.seed,
                     verbose=not show_batch_progress,
-                    init_model=model_pmi,
+                    init_from_pmi=init_from_pmi,
+                    init_model=plm_init_model_obj,
                     report_init_loss=report_init_loss,
+                    val_labels=val_labels,
+                    start_best_loss=start_best_loss,
+                    start_best_val_loss=start_best_val_loss,
+                    best_model_path=str(best_model_path) if best_model_path else None,
+                    best_model_metadata=base_metadata,
                     device=plm_device,
                     progress_callback=_plm_progress,
                     progress_every=args.plm_progress_every,
                     batch_progress_callback=plm_batch_progress,
                 )
                 model = model_plm
+                best_plm_loss = getattr(model_plm, "best_plm_loss", None)
+                best_plm_val_loss = getattr(model_plm, "best_plm_val_loss", None)
+                best_plm_epoch = getattr(model_plm, "best_plm_epoch", None)
+                last_plm_loss = getattr(model_plm, "last_plm_loss", None)
+                last_plm_val_loss = getattr(model_plm, "last_plm_val_loss", None)
+                if best_model_path:
+                    best_metric = best_plm_val_loss if val_labels is not None else best_plm_loss
+                    last_metric = last_plm_val_loss if val_labels is not None else last_plm_loss
+                    if best_metric is not None and last_metric is not None and best_metric < last_metric:
+                        try:
+                            model = load_potts_model(best_model_path)
+                        except Exception as exc:
+                            print(f"[plm] warning: failed to load best model: {exc}")
             except RuntimeError as exc:
                 if "PyTorch is required" not in str(exc):
                     raise
                 if model_pmi is None:
-                    model_pmi = fit_potts_pmi(labels, K, edges)
+                    model_pmi = fit_potts_pmi(labels_train, K, edges)
                 model = model_pmi
                 args.fit = "pmi"
                 print("[fit] warning: PyTorch missing; falling back to PMI fit.")
                 report("PyTorch missing; falling back to PMI fit", 35)
 
     assert model is not None
+    metadata = {
+        "data_npz": args.npz,
+        "fit_method": args.fit,
+        "source_model": model_npz_list if model_npz_list else None,
+        "plm_init": plm_init,
+        "plm_init_model": plm_init_model or None,
+        "plm_resume_model": plm_resume_model or None,
+        "plm_val_frac": float(plm_val_frac),
+    }
+    if best_plm_loss is not None:
+        metadata["plm_best_loss"] = float(best_plm_loss)
+    if best_plm_val_loss is not None:
+        metadata["plm_best_val_loss"] = float(best_plm_val_loss)
+    if best_plm_epoch is not None:
+        metadata["plm_best_epoch"] = int(best_plm_epoch)
+    if last_plm_loss is not None:
+        metadata["plm_last_loss"] = float(last_plm_loss)
+    if last_plm_val_loss is not None:
+        metadata["plm_last_val_loss"] = float(last_plm_val_loss)
     save_potts_model(
         model,
         model_out_path,
-        metadata={
-            "data_npz": args.npz,
-            "fit_method": args.fit,
-            "source_model": model_npz_list if model_npz_list else None,
-        },
+        metadata=metadata,
     )
     report("Potts model fit complete", 40)
 
     if args.fit_only:
         meta_path = results_dir / "potts_model_metadata.json"
+        fit_meta = {
+            "args": vars(args),
+            "model_file": model_out_path.name,
+            "data_npz": args.npz,
+        }
+        if metadata.get("plm_best_loss") is not None:
+            fit_meta["plm_best_loss"] = metadata["plm_best_loss"]
+        if metadata.get("plm_best_val_loss") is not None:
+            fit_meta["plm_best_val_loss"] = metadata["plm_best_val_loss"]
+        if metadata.get("plm_best_epoch") is not None:
+            fit_meta["plm_best_epoch"] = metadata["plm_best_epoch"]
+        if metadata.get("plm_last_loss") is not None:
+            fit_meta["plm_last_loss"] = metadata["plm_last_loss"]
+        if metadata.get("plm_last_val_loss") is not None:
+            fit_meta["plm_last_val_loss"] = metadata["plm_last_val_loss"]
+        if metadata.get("plm_val_frac") is not None:
+            fit_meta["plm_val_frac"] = metadata["plm_val_frac"]
         meta_path.write_text(
             json.dumps(
-                {
-                    "args": vars(args),
-                    "model_file": model_out_path.name,
-                    "data_npz": args.npz,
-                },
+                fit_meta,
                 indent=2,
             )
         )
@@ -2172,7 +2337,7 @@ def run_pipeline(
         beta_eff_distances_result = distances_by_schedule[0] if distances_by_schedule else []
         beta_eff_value = beta_eff_by_schedule[0] if beta_eff_by_schedule else None
 
-        from phase.simulation.plotting import plot_beta_scan_curve
+        from phase.potts.plotting import plot_beta_scan_curve
         outp = plot_beta_scan_curve(
             betas=grid,
             distances=distances_by_schedule,

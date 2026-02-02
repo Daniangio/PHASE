@@ -17,11 +17,12 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from phase.pipeline.runner import run_analysis
-from phase.simulation.pipeline import parse_args as parse_simulation_args
-from phase.simulation.pipeline import run_pipeline as run_simulation_pipeline
-from phase.simulation import pipeline as sim_main
-from phase.simulation import delta_fit as delta_fit_main
-from backend.services.metastable_clusters import (
+from phase.potts.pipeline import parse_args as parse_simulation_args
+from phase.potts.pipeline import run_pipeline as run_simulation_pipeline
+from phase.common.runtime import RuntimePolicy
+from phase.potts import pipeline as sim_main
+from phase.potts import delta_fit as delta_fit_main
+from phase.workflows.clustering import (
     generate_metastable_cluster_npz,
     prepare_cluster_workspace,
     reduce_cluster_workspace,
@@ -30,7 +31,7 @@ from backend.services.metastable_clusters import (
     update_cluster_metadata_with_assignments,
     build_cluster_output_path,
 )
-from backend.services.backmapping_npz import build_backmapping_npz
+from phase.workflows.backmapping import build_backmapping_npz
 from backend.services.project_store import ProjectStore
 
 # Define the persistent data root (aligned with PHASE_DATA_ROOT).
@@ -745,6 +746,21 @@ def run_simulation_job(
         plm_progress_every = sim_params.get("plm_progress_every")
         if plm_progress_every is not None:
             args_list += ["--plm-progress-every", str(int(plm_progress_every))]
+        plm_device = sim_params.get("plm_device")
+        if plm_device is not None:
+            args_list += ["--plm-device", str(plm_device)]
+        plm_init = sim_params.get("plm_init")
+        if plm_init is not None:
+            args_list += ["--plm-init", str(plm_init)]
+        plm_init_model = sim_params.get("plm_init_model")
+        if plm_init_model is not None:
+            args_list += ["--plm-init-model", str(plm_init_model)]
+        plm_resume_model = sim_params.get("plm_resume_model")
+        if plm_resume_model is not None:
+            args_list += ["--plm-resume-model", str(plm_resume_model)]
+        plm_val_frac = sim_params.get("plm_val_frac")
+        if plm_val_frac is not None:
+            args_list += ["--plm-val-frac", str(float(plm_val_frac))]
 
         save_progress("Running Potts simulation", 20)
         try:
@@ -752,7 +768,11 @@ def run_simulation_job(
         except SystemExit as exc:
             raise ValueError("Invalid simulation arguments.") from exc
 
-        run_result = run_simulation_pipeline(sim_args, progress_callback=save_progress)
+        run_result = run_simulation_pipeline(
+            sim_args,
+            progress_callback=save_progress,
+            runtime=RuntimePolicy(allow_multiprocessing=False),
+        )
 
         def _coerce_path(value: object) -> Path | None:
             if value is None:
@@ -1136,20 +1156,42 @@ def run_potts_fit_job(
                 "metadata_json": meta_rel,
             }
         else:
-            model_id = str(uuid.uuid4())
-            display_name = None
-            if isinstance(model_name, str) and model_name.strip():
-                display_name = model_name.strip()
-            elif isinstance(entry, dict):
-                cluster_name = entry.get("name")
-                if isinstance(cluster_name, str) and cluster_name.strip():
-                    display_name = f"{cluster_name} Potts Model"
-            if not display_name:
-                display_name = f"{cluster_id} Potts Model"
-            cluster_dirs = project_store.ensure_cluster_directories(project_id, system_id, cluster_id)
-            model_dir = cluster_dirs["potts_models_dir"] / model_id
-            model_dir.mkdir(parents=True, exist_ok=True)
-            model_path = model_dir / f"{_sanitize_model_filename(display_name)}.npz"
+            def _resolve_potts_model_path(value: object) -> str | None:
+                if not value:
+                    return None
+                raw = str(value)
+                if isinstance(entry, dict):
+                    models = entry.get("potts_models") or []
+                    match = next((m for m in models if m.get("model_id") == raw), None)
+                    if match and match.get("path"):
+                        raw = str(match.get("path"))
+                path_obj = Path(raw)
+                if not path_obj.is_absolute():
+                    path_obj = project_store.resolve_path(project_id, system_id, raw)
+                return str(path_obj)
+
+            resolved_resume_model = _resolve_potts_model_path(fit_params.get("plm_resume_model"))
+            resume_in_place = bool(resolved_resume_model)
+
+            if resume_in_place:
+                model_path = Path(resolved_resume_model)
+                model_dir = model_path.parent
+                model_id = None
+            else:
+                model_id = str(uuid.uuid4())
+                display_name = None
+                if isinstance(model_name, str) and model_name.strip():
+                    display_name = model_name.strip()
+                elif isinstance(entry, dict):
+                    cluster_name = entry.get("name")
+                    if isinstance(cluster_name, str) and cluster_name.strip():
+                        display_name = f"{cluster_name} Potts Model"
+                if not display_name:
+                    display_name = f"{cluster_id} Potts Model"
+                cluster_dirs = project_store.ensure_cluster_directories(project_id, system_id, cluster_id)
+                model_dir = cluster_dirs["potts_models_dir"] / model_id
+                model_dir.mkdir(parents=True, exist_ok=True)
+                model_path = model_dir / f"{_sanitize_model_filename(display_name)}.npz"
 
             args_list = [
                 "--npz",
@@ -1164,35 +1206,45 @@ def run_potts_fit_job(
             fit_method = fit_params.get("fit_method")
             if fit_method is not None:
                 args_list += ["--fit", str(fit_method)]
+            plm_init_model = fit_params.get("plm_init_model")
+            plm_resume_model = fit_params.get("plm_resume_model")
+            resolved_init = _resolve_potts_model_path(plm_init_model)
+            resolved_resume = _resolve_potts_model_path(plm_resume_model)
+            if resolved_init:
+                fit_params["plm_init_model"] = resolved_init
+            if resolved_resume:
+                fit_params["plm_resume_model"] = resolved_resume
+            using_existing_model = bool(resolved_init or resolved_resume)
 
-            contact_mode = fit_params.get("contact_atom_mode") or fit_params.get("contact_mode") or "CA"
-            contact_cutoff = fit_params.get("contact_cutoff") or 10.0
-            contact_pdbs = _resolve_contact_pdbs(
-                project_id,
-                system_id,
-                _collect_contact_pdbs(
-                    system_meta,
-                    entry.get("state_ids") or entry.get("metastable_ids") or [],
-                    system_meta.analysis_mode,
-                ),
-            )
-            if contact_pdbs:
-                pdb_flag = None
-                if _supports_sim_arg("--pdbs"):
-                    pdb_flag = "--pdbs"
-                elif _supports_sim_arg("--contact-pdb"):
-                    pdb_flag = "--contact-pdb"
-                if pdb_flag:
-                    args_list += [
-                        pdb_flag,
-                        ",".join(str(p) for p in contact_pdbs),
-                        "--contact-cutoff",
-                        str(float(contact_cutoff)),
-                        "--contact-atom-mode",
-                        str(contact_mode),
-                    ]
-                else:
-                    print("[potts-sample] warning: simulation args do not support contact PDBs; skipping edge build.")
+            if not using_existing_model:
+                contact_mode = fit_params.get("contact_atom_mode") or fit_params.get("contact_mode") or "CA"
+                contact_cutoff = fit_params.get("contact_cutoff") or 10.0
+                contact_pdbs = _resolve_contact_pdbs(
+                    project_id,
+                    system_id,
+                    _collect_contact_pdbs(
+                        system_meta,
+                        entry.get("state_ids") or entry.get("metastable_ids") or [],
+                        system_meta.analysis_mode,
+                    ),
+                )
+                if contact_pdbs:
+                    pdb_flag = None
+                    if _supports_sim_arg("--pdbs"):
+                        pdb_flag = "--pdbs"
+                    elif _supports_sim_arg("--contact-pdb"):
+                        pdb_flag = "--contact-pdb"
+                    if pdb_flag:
+                        args_list += [
+                            pdb_flag,
+                            ",".join(str(p) for p in contact_pdbs),
+                            "--contact-cutoff",
+                            str(float(contact_cutoff)),
+                            "--contact-atom-mode",
+                            str(contact_mode),
+                        ]
+                    else:
+                        print("[potts-sample] warning: simulation args do not support contact PDBs; skipping edge build.")
 
             for key, flag in (
                 ("plm_epochs", "--plm-epochs"),
@@ -1203,6 +1255,10 @@ def run_potts_fit_job(
                 ("plm_batch_size", "--plm-batch-size"),
                 ("plm_progress_every", "--plm-progress-every"),
                 ("plm_device", "--plm-device"),
+                ("plm_init", "--plm-init"),
+                ("plm_init_model", "--plm-init-model"),
+                ("plm_resume_model", "--plm-resume-model"),
+                ("plm_val_frac", "--plm-val-frac"),
             ):
                 val = fit_params.get(key)
                 if val is not None:
@@ -1213,18 +1269,24 @@ def run_potts_fit_job(
                 sim_args = parse_simulation_args(args_list)
             except SystemExit as exc:
                 raise ValueError("Invalid potts fit arguments.") from exc
-            run_result = run_simulation_pipeline(sim_args, progress_callback=save_progress)
-
-            potts_model_rel = _persist_potts_model(
-                project_id,
-                system_id,
-                cluster_id,
-                Path(model_path),
-                fit_params,
-                source="potts_fit",
-                model_id=model_id,
-                model_name=display_name,
+            run_result = run_simulation_pipeline(
+                sim_args,
+                progress_callback=save_progress,
+                runtime=RuntimePolicy(allow_multiprocessing=False),
             )
+            if resume_in_place:
+                potts_model_rel = _relativize_path(Path(model_path))
+            else:
+                potts_model_rel = _persist_potts_model(
+                    project_id,
+                    system_id,
+                    cluster_id,
+                    Path(model_path),
+                    fit_params,
+                    source="potts_fit",
+                    model_id=model_id,
+                    model_name=display_name,
+                )
 
             result_payload["status"] = "finished"
             result_payload["results"] = {

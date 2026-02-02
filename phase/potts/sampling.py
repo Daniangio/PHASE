@@ -5,8 +5,8 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-from phase.simulation.potts_model import PottsModel
-from phase.simulation.qubo import QUBO
+from phase.potts.potts_model import PottsModel
+from phase.potts.qubo import QUBO
 
 
 def _progress_iterator(

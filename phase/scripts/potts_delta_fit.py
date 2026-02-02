@@ -9,7 +9,7 @@ import shutil
 import uuid
 
 from phase.services.project_store import ProjectStore
-from phase.simulation import delta_fit
+from phase.potts import delta_fit
 
 
 def _sanitize_model_filename(name: str) -> str:

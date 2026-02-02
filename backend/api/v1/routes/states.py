@@ -17,8 +17,8 @@ from backend.api.v1.common import (
     stream_upload,
     stride_to_slice,
 )
-from backend.services.slice_utils import parse_slice_spec
-from backend.services.project_store import DescriptorState
+from phase.workflows.macro_states import register_state_from_pdb
+from phase.common.slice_utils import parse_slice_spec
 
 
 router = APIRouter()
@@ -121,14 +121,15 @@ async def add_system_state(
             raise HTTPException(status_code=404, detail="Source PDB file missing on disk.")
         shutil.copy(source_path, pdb_path)
 
-    system_meta.states[state_id] = DescriptorState(
+    register_state_from_pdb(
+        project_store,
+        project_id,
+        system_meta,
         state_id=state_id,
         name=state_name,
-        pdb_file=str(pdb_path.relative_to(system_dir)),
+        pdb_path=pdb_path,
         stride=1,
     )
-    refresh_system_metadata(system_meta)
-    project_store.save_system(system_meta)
     return serialize_system(system_meta)
 
 

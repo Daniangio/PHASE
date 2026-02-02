@@ -27,7 +27,7 @@ logits_r(k) = h_r(k) + sum_{s in neighbors(r)} J_rs(k, x_s)
 This avoids the full partition function and is robust for larger systems.
 
 ## Implementation sketch (PHASE)
-The PLM fit in `phase/simulation/potts_model.py` is a symmetric global fit:
+The PLM fit in `phase/potts/potts_model.py` is a symmetric global fit:
 
 1) Build neighbor lists from the contact edges.
 2) Initialize h and J from PMI (optional).

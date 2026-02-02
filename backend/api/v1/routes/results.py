@@ -11,7 +11,7 @@ from fastapi import APIRouter, HTTPException, Query, Response, UploadFile, File,
 from fastapi.responses import FileResponse
 
 from backend.api.v1.common import DATA_ROOT, get_cluster_entry, project_store, stream_upload
-from backend.services.metastable_clusters import (
+from phase.workflows.clustering import (
     assign_cluster_labels_to_states,
     update_cluster_metadata_with_assignments,
 )
@@ -139,8 +139,8 @@ def _augment_sampling_summary(
     system_id: str,
 ) -> None:
     from phase.io.data import load_npz
-    from phase.simulation.metrics import per_edge_js_from_padded, per_residue_js_from_padded, marginals, pairwise_joints_padded
-    from phase.simulation.pipeline import (
+    from phase.potts.metrics import per_edge_js_from_padded, per_residue_js_from_padded, marginals, pairwise_joints_padded
+    from phase.potts.pipeline import (
         _build_md_sources,
         _build_sample_sources,
         _pad_marginals_for_save,
@@ -148,7 +148,7 @@ def _augment_sampling_summary(
         _compute_energy_histograms,
         _compute_nn_cdfs,
     )
-    from phase.simulation.potts_model import load_potts_model
+    from phase.potts.potts_model import load_potts_model
 
     assignments = assign_cluster_labels_to_states(base_cluster_path, project_id, system_id)
     update_cluster_metadata_with_assignments(base_cluster_path, assignments)

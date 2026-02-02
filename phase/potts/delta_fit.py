@@ -8,7 +8,7 @@ from typing import Optional
 import numpy as np
 
 from phase.io.data import load_npz
-from phase.simulation.potts_model import (
+from phase.potts.potts_model import (
     add_potts_models,
     fit_potts_delta_pseudolikelihood_torch,
     load_potts_model,

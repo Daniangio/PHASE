@@ -95,6 +95,41 @@ print_sample_list() {
   set -e
 }
 
+export_projects_zip() {
+  if [ -z "${OFFLINE_ROOT:-}" ]; then
+    echo "Offline root not set."
+    return 1
+  fi
+  local projects_dir="${OFFLINE_ROOT}/projects"
+  if [ ! -d "$projects_dir" ]; then
+    echo "Projects directory not found at: ${projects_dir}"
+    return 1
+  fi
+  local ts
+  ts="$(date +%Y%m%d_%H%M%S)"
+  local default_path="${OFFLINE_ROOT}/projects_dump_${ts}.zip"
+  local out_path
+  out_path="$(prompt "Export zip path" "$default_path")"
+  out_path="$(trim "$out_path")"
+  if [ -z "$out_path" ]; then
+    echo "Export canceled."
+    return 0
+  fi
+  python - <<PY
+import pathlib
+import shutil
+
+root = pathlib.Path(r"$OFFLINE_ROOT")
+out_path = pathlib.Path(r"$out_path")
+base_name = out_path
+if out_path.suffix.lower() == ".zip":
+    base_name = out_path.with_suffix("")
+base_name.parent.mkdir(parents=True, exist_ok=True)
+archive = shutil.make_archive(str(base_name), "zip", root_dir=str(root), base_dir="projects")
+print(f"Projects archive saved to: {archive}")
+PY
+}
+
 pause() {
   read -r -p "Press Enter to continue..." _ || true
 }
@@ -105,7 +140,7 @@ project_menu() {
     echo "Projects:"
     python -m phase.scripts.offline_browser --root "$OFFLINE_ROOT" list-projects || true
     echo ""
-    ACTION_LINES=$'open|Open project\nnew|Create project\nmigrate|Migrate IDs to name slugs\nrefresh|Refresh list\nquit|Quit'
+    ACTION_LINES=$'open|Open project\nnew|Create project\nmigrate|Migrate IDs to name slugs\nexport|Export projects zip\nrefresh|Refresh list\nquit|Quit'
     ACTION_ROW="$(offline_choose_one "Project actions:" "$ACTION_LINES")"
     ACTION="$(printf "%s" "$ACTION_ROW" | awk -F'|' '{print $1}')"
     case "$ACTION" in
@@ -133,6 +168,10 @@ project_menu() {
         else
           echo "No changes made."
         fi
+        ;;
+      export)
+        export_projects_zip
+        pause
         ;;
       refresh) ;;
       quit|"")

@@ -6,7 +6,7 @@ import numpy as np
 from fastapi import APIRouter, HTTPException, Query
 
 from backend.api.v1.common import get_state_or_404, project_store
-from backend.services.descriptors import load_descriptor_npz
+from phase.io.descriptors import load_descriptor_npz
 
 
 router = APIRouter()

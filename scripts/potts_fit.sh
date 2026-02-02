@@ -105,25 +105,54 @@ fi
 SYSTEM_DIR="${OFFLINE_ROOT}/projects/${OFFLINE_PROJECT_ID}/systems/${OFFLINE_SYSTEM_ID}"
 RESULTS_DIR="${SYSTEM_DIR}/tmp/potts_fit_${TIMESTAMP}"
 
-FIT_METHOD="$(prompt "Fit method (pmi/plm/pmi+plm)" "pmi+plm")"
-MODEL_NAME="$(prompt "Model name" "")"
+MODEL_NAME=""
+
+USE_EXISTING_MODEL="false"
+SELECTED_MODEL_PATH=""
+SELECTED_MODEL_NAME=""
+RESUME_IN_PLACE="false"
+MODEL_LINES="$(python -m phase.scripts.offline_browser --root "$OFFLINE_ROOT" list-models --project-id "$OFFLINE_PROJECT_ID" --system-id "$OFFLINE_SYSTEM_ID" || true)"
+MODEL_LINES="$(printf "%s\n" "$MODEL_LINES" | awk -F'|' -v cid="$CLUSTER_ID" '$4==cid')"
+if [ -n "$MODEL_LINES" ] && prompt_bool "Start from existing model? (y/N)" "N"; then
+  MODEL_ROW="$(offline_choose_one "Available Potts models:" "$MODEL_LINES")"
+  SELECTED_MODEL_PATH="$(printf "%s" "$MODEL_ROW" | awk -F'|' '{print $3}')"
+  SELECTED_MODEL_NAME="$(printf "%s" "$MODEL_ROW" | awk -F'|' '{print $2}')"
+  if [ -z "$SELECTED_MODEL_PATH" ]; then
+    echo "No model selected."
+    exit 1
+  fi
+  USE_EXISTING_MODEL="true"
+fi
+
+if [ "$USE_EXISTING_MODEL" = "true" ]; then
+  FIT_METHOD="plm"
+else
+  FIT_METHOD="$(prompt "Fit method (pmi/plm/pmi+plm)" "pmi+plm")"
+fi
+if [ "$USE_EXISTING_MODEL" = "false" ]; then
+  MODEL_NAME="$(prompt "Model name" "")"
+fi
 
 CONTACT_ALL="false"
 CONTACT_PDBS=""
 CONTACT_MODE="CA"
 CONTACT_CUTOFF="10.0"
-if prompt_bool "Use all-vs-all edges? (y/N)" "N"; then
-  CONTACT_ALL="true"
-else
-  PDB_ROWS="$(offline_select_pdbs)"
-  if [ -z "$PDB_ROWS" ]; then
-    echo "Select at least one PDB unless using all-vs-all."
-    exit 1
+if [ "$USE_EXISTING_MODEL" = "false" ]; then
+  if prompt_bool "Use all-vs-all edges? (y/N)" "N"; then
+    CONTACT_ALL="true"
+  else
+    PDB_ROWS="$(offline_select_pdbs)"
+    if [ -z "$PDB_ROWS" ]; then
+      echo "Select at least one PDB unless using all-vs-all."
+      exit 1
+    fi
+    CONTACT_PDBS="$(printf "%s\n" "$PDB_ROWS" | awk -F'|' '{print $3}' | paste -sd, -)"
+    CONTACT_MODE="$(prompt "Contact mode (CA/CM)" "CA")"
+    CONTACT_MODE="$(printf "%s" "$CONTACT_MODE" | tr '[:lower:]' '[:upper:]')"
+    CONTACT_CUTOFF="$(prompt "Contact cutoff (A)" "10.0")"
   fi
-  CONTACT_PDBS="$(printf "%s\n" "$PDB_ROWS" | awk -F'|' '{print $3}' | paste -sd, -)"
-  CONTACT_MODE="$(prompt "Contact mode (CA/CM)" "CA")"
-  CONTACT_MODE="$(printf "%s" "$CONTACT_MODE" | tr '[:lower:]' '[:upper:]')"
-  CONTACT_CUTOFF="$(prompt "Contact cutoff (A)" "10.0")"
+else
+  echo "Using contact edges from existing model: ${SELECTED_MODEL_NAME:-$SELECTED_MODEL_PATH}"
 fi
 
 PLM_DEVICE=""
@@ -134,6 +163,10 @@ PLM_LR_SCHEDULE=""
 PLM_L2=""
 PLM_BATCH_SIZE=""
 PLM_PROGRESS_EVERY=""
+PLM_INIT="pmi"
+PLM_INIT_MODEL=""
+PLM_RESUME_MODEL=""
+PLM_VAL_FRAC="0"
 if [ "$FIT_METHOD" != "pmi" ]; then
   PLM_DEVICE="$(prompt "PLM device (auto/cuda/cpu)" "auto")"
   PLM_DEVICE="$(printf "%s" "$PLM_DEVICE" | tr '[:upper:]' '[:lower:]')"
@@ -147,6 +180,32 @@ if [ "$FIT_METHOD" != "pmi" ]; then
   PLM_L2="$(prompt "PLM L2" "1e-5")"
   PLM_BATCH_SIZE="$(prompt "PLM batch size" "512")"
   PLM_PROGRESS_EVERY="$(prompt "PLM progress every" "10")"
+  if [ "$USE_EXISTING_MODEL" = "true" ]; then
+    MODE_CHOICE="$(prompt "Use selected model to (resume/init)" "resume")"
+    MODE_CHOICE="$(printf "%s" "$MODE_CHOICE" | tr '[:upper:]' '[:lower:]')"
+    if [ "$MODE_CHOICE" = "init" ]; then
+      if [ -z "$MODEL_NAME" ]; then
+        MODEL_NAME="$(prompt "Model name" "")"
+      fi
+      PLM_INIT="model"
+      PLM_INIT_MODEL="$SELECTED_MODEL_PATH"
+    else
+      PLM_INIT="model"
+      PLM_RESUME_MODEL="$SELECTED_MODEL_PATH"
+      RESUME_IN_PLACE="true"
+    fi
+  else
+    PLM_RESUME_MODEL="$(prompt "PLM resume model path (blank to skip)" "")"
+    if [ -z "$PLM_RESUME_MODEL" ]; then
+      PLM_INIT="$(prompt "PLM init (pmi/zero/model)" "pmi")"
+      if [ "$PLM_INIT" = "model" ]; then
+        PLM_INIT_MODEL="$(prompt "PLM init model path" "")"
+      fi
+    else
+      PLM_INIT="model"
+    fi
+  fi
+  PLM_VAL_FRAC="$(prompt "PLM validation fraction" "0")"
 fi
 
 CMD=(
@@ -162,13 +221,18 @@ CMD=(
 if [ -n "$MODEL_NAME" ]; then
   CMD+=(--model-name "$MODEL_NAME")
 fi
-
-if [ "$CONTACT_ALL" = "true" ]; then
-  CMD+=(--contact-all-vs-all)
-else
-  CMD+=(--pdbs "$CONTACT_PDBS")
+if [ "$RESUME_IN_PLACE" = "true" ]; then
+  CMD+=(--model-out "$SELECTED_MODEL_PATH")
 fi
-CMD+=(--contact-atom-mode "$CONTACT_MODE" --contact-cutoff "$CONTACT_CUTOFF")
+
+if [ "$USE_EXISTING_MODEL" = "false" ]; then
+  if [ "$CONTACT_ALL" = "true" ]; then
+    CMD+=(--contact-all-vs-all)
+  else
+    CMD+=(--pdbs "$CONTACT_PDBS")
+  fi
+  CMD+=(--contact-atom-mode "$CONTACT_MODE" --contact-cutoff "$CONTACT_CUTOFF")
+fi
 
 if [ -n "$PLM_DEVICE" ]; then
   CMD+=(--plm-device "$PLM_DEVICE")
@@ -183,7 +247,15 @@ if [ "$FIT_METHOD" != "pmi" ]; then
     --plm-l2 "$PLM_L2"
     --plm-batch-size "$PLM_BATCH_SIZE"
     --plm-progress-every "$PLM_PROGRESS_EVERY"
+    --plm-init "$PLM_INIT"
+    --plm-val-frac "$PLM_VAL_FRAC"
   )
+  if [ -n "$PLM_INIT_MODEL" ]; then
+    CMD+=(--plm-init-model "$PLM_INIT_MODEL")
+  fi
+  if [ -n "$PLM_RESUME_MODEL" ]; then
+    CMD+=(--plm-resume-model "$PLM_RESUME_MODEL")
+  fi
 fi
 
 echo "Running Potts fit..."

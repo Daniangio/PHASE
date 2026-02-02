@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react';
-import { Download, Plus, X } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
+import { Download, Plus, Upload, X } from 'lucide-react';
 import Loader from '../components/common/Loader';
 import ErrorMessage from '../components/common/ErrorMessage';
 import ProjectForm from '../components/projects/ProjectForm';
@@ -10,6 +10,7 @@ import EmptyState from '../components/common/EmptyState';
 import {
   fetchProjects,
   downloadProjectsDump,
+  restoreProjectsArchive,
   createProject,
   listSystems,
   createSystem,
@@ -29,6 +30,9 @@ export default function ProjectsPage() {
   const [showSystemForm, setShowSystemForm] = useState(false);
   const [isDumping, setIsDumping] = useState(false);
   const [dumpError, setDumpError] = useState(null);
+  const [isRestoring, setIsRestoring] = useState(false);
+  const [restoreError, setRestoreError] = useState(null);
+  const restoreInputRef = useRef(null);
 
   useEffect(() => {
     const loadProjects = async () => {
@@ -138,6 +142,32 @@ export default function ProjectsPage() {
     }
   };
 
+  const handleRestoreClick = () => {
+    if (restoreInputRef.current) {
+      restoreInputRef.current.click();
+    }
+  };
+
+  const handleRestoreFile = async (event) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    setIsRestoring(true);
+    setRestoreError(null);
+    try {
+      await restoreProjectsArchive(file);
+      const data = await fetchProjects();
+      setProjects(data);
+      setSelectedProjectId(data.length ? data[0].project_id : null);
+      setActionMessage('Projects restored from archive.');
+      setTimeout(() => setActionMessage(null), 4000);
+    } catch (err) {
+      setRestoreError(err.message || 'Failed to restore projects.');
+    } finally {
+      setIsRestoring(false);
+      event.target.value = '';
+    }
+  };
+
   const selectedProject = projects.find((p) => p.project_id === selectedProjectId);
 
   return (
@@ -187,6 +217,22 @@ export default function ProjectsPage() {
             </p>
           </div>
           <div className="flex items-center gap-2">
+            <input
+              ref={restoreInputRef}
+              type="file"
+              accept=".zip"
+              className="hidden"
+              onChange={handleRestoreFile}
+            />
+            <button
+              type="button"
+              onClick={handleRestoreClick}
+              disabled={isRestoring}
+              className="inline-flex items-center gap-2 rounded-md border border-gray-600 text-gray-200 hover:bg-gray-700/60 px-3 py-1 text-sm disabled:opacity-60"
+            >
+              <Upload className="h-4 w-4" />
+              {isRestoring ? 'Uploading...' : 'Restore projects'}
+            </button>
             <button
               type="button"
               onClick={handleDownloadDump}
@@ -219,6 +265,7 @@ export default function ProjectsPage() {
 
         {error && <ErrorMessage message={error} />}
         {dumpError && <ErrorMessage message={dumpError} />}
+        {restoreError && <ErrorMessage message={restoreError} />}
         {actionMessage && <p className="text-sm text-emerald-400">{actionMessage}</p>}
 
         <div>

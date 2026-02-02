@@ -8,7 +8,7 @@ import shutil
 import uuid
 
 from phase.services.project_store import ProjectStore
-from phase.simulation import pipeline as sim_main
+from phase.potts import pipeline as sim_main
 
 
 def _sanitize_model_filename(name: str) -> str:

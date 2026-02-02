@@ -89,6 +89,19 @@ def save_potts_model(
     np.savez_compressed(path, **payload)
 
 
+def load_potts_model_metadata(path: str | "os.PathLike[str]") -> Optional[dict]:
+    """Load metadata_json from a Potts model NPZ, if present."""
+    npz = np.load(path, allow_pickle=False)
+    if "metadata_json" not in npz:
+        return None
+    raw = npz["metadata_json"]
+    try:
+        payload = raw.item() if hasattr(raw, "item") else raw
+        return json.loads(str(payload))
+    except Exception:
+        return None
+
+
 def load_potts_model(path: str | "os.PathLike[str]") -> PottsModel:
     """
     Load a PottsModel from NPZ saved by save_potts_model.
@@ -182,6 +195,11 @@ def fit_potts_pseudolikelihood_torch(
     init_from_pmi: bool = True,
     init_model: "PottsModel | None" = None,
     report_init_loss: bool = True,
+    val_labels: Optional[np.ndarray] = None,
+    start_best_loss: Optional[float] = None,
+    start_best_val_loss: Optional[float] = None,
+    best_model_path: str | "os.PathLike[str]" | None = None,
+    best_model_metadata: Optional[dict] = None,
     progress_callback: "callable | None" = None,
     progress_every: int = 10,
     batch_progress_callback: "callable | None" = None,
@@ -240,6 +258,12 @@ def fit_potts_pseudolikelihood_torch(
         J_params[key] = torch.nn.Parameter(torch.tensor(init_val, dtype=torch.float32, device=torch_device))
 
     X = torch.tensor(labels, dtype=torch.long, device=torch_device)  # (T,N)
+    X_val = None
+    if val_labels is not None:
+        val_labels = np.asarray(val_labels, dtype=int)
+        if val_labels.ndim != 2 or val_labels.shape[1] != N:
+            raise ValueError("val_labels must match shape (T_val, N).")
+        X_val = torch.tensor(val_labels, dtype=torch.long, device=torch_device)
 
     opt = torch.optim.Adam(list(h_params) + list(J_params.values()), lr=lr, weight_decay=l2)
     schedule = lr_schedule.lower() if lr_schedule else "none"
@@ -319,26 +343,65 @@ def fit_potts_pseudolikelihood_torch(
     progress_every = max(1, int(progress_every))
     total_batches = max(1, (T + batch_size - 1) // batch_size)
 
-    def _evaluate_avg_loss() -> float:
+    def _evaluate_avg_loss(X_eval: "torch.Tensor") -> float:
         total = 0.0
         nobs = 0
         with torch.no_grad():
-            for start in range(0, T, batch_size):
-                bidx = idx[start:start + batch_size]
-                xb = X[bidx]
+            n_eval = X_eval.shape[0]
+            for start in range(0, n_eval, batch_size):
+                xb = X_eval[start:start + batch_size]
                 loss = 0.0
                 for r in range(N):
                     logits = _logits_for_residue(xb, r)
                     y = xb[:, r]
                     loss = loss + loss_fn(logits, y)
-                total += float(loss.item()) * len(bidx)
-                nobs += len(bidx)
+                total += float(loss.item()) * xb.shape[0]
+                nobs += xb.shape[0]
         return total / max(1, nobs)
 
     if verbose and report_init_loss:
-        init_loss = _evaluate_avg_loss()
+        init_loss = _evaluate_avg_loss(X)
         label = "PMI init" if pmi_model is not None else "init"
         print(f"[plm] {label} avg_loss={init_loss:.6f}")
+        if X_val is not None:
+            init_val_loss = _evaluate_avg_loss(X_val)
+            print(f"[plm] {label} val_loss={init_val_loss:.6f}")
+
+    best_metric = start_best_val_loss if X_val is not None else start_best_loss
+    best_loss = start_best_loss
+    best_val_loss = start_best_val_loss
+    best_epoch = None
+    last_loss = None
+    last_val_loss = None
+
+    def _export_model() -> PottsModel:
+        h = [-hp.detach().cpu().numpy().astype(float) for hp in h_params]
+        J: Dict[Tuple[int, int], np.ndarray] = {}
+        for r, s in edges:
+            key = f"{r}_{s}"
+            J[(r, s)] = -J_params[key].detach().cpu().numpy().astype(float)
+        return PottsModel(h=h, J=J, edges=list(edges))
+
+    def _maybe_save_best(ep: int, train_loss: float, val_loss: Optional[float]) -> None:
+        nonlocal best_metric, best_loss, best_val_loss, best_epoch
+        metric = val_loss if X_val is not None else train_loss
+        if metric is None:
+            return
+        if best_metric is None or metric < best_metric:
+            best_metric = metric
+            best_loss = train_loss
+            best_val_loss = val_loss
+            best_epoch = ep
+            if best_model_path is not None:
+                meta = dict(best_model_metadata or {})
+                meta.update(
+                    {
+                        "plm_best_loss": best_loss,
+                        "plm_best_val_loss": best_val_loss,
+                        "plm_best_epoch": best_epoch,
+                    }
+                )
+                save_potts_model(_export_model(), best_model_path, metadata=meta)
 
     for ep in range(1, epochs + 1):
         rng.shuffle(idx)
@@ -378,21 +441,26 @@ def fit_potts_pseudolikelihood_torch(
                 batch_progress_callback(ep, epochs, batch_num, total_batches)
 
         avg_loss = total / max(1, nobs)
+        last_loss = float(avg_loss)
+        val_loss = None
+        if X_val is not None:
+            val_loss = float(_evaluate_avg_loss(X_val))
+            last_val_loss = val_loss
         if verbose and (ep == 1 or ep % max(1, epochs // 10) == 0):
             print(f"[plm] epoch {ep:4d}/{epochs}  avg_loss={avg_loss:.6f}")
         if progress_callback and (ep == 1 or ep == epochs or ep % progress_every == 0):
             progress_callback(ep, epochs, float(avg_loss))
+        _maybe_save_best(ep, float(avg_loss), val_loss)
         if scheduler is not None:
             scheduler.step()
 
-    # Export to numpy PottsModel (store couplings consistently as (r<s))
-    h = [-hp.detach().cpu().numpy().astype(float) for hp in h_params]
-    J = {}
-    for r, s in edges:
-        key = f"{r}_{s}"
-        J[(r, s)] = -J_params[key].detach().cpu().numpy().astype(float)
-
-    return PottsModel(h=h, J=J, edges=list(edges))
+    model = _export_model()
+    setattr(model, "best_plm_loss", best_loss)
+    setattr(model, "best_plm_val_loss", best_val_loss)
+    setattr(model, "best_plm_epoch", best_epoch)
+    setattr(model, "last_plm_loss", last_loss)
+    setattr(model, "last_plm_val_loss", last_val_loss)
+    return model
 
 
 def add_potts_models(base: PottsModel, delta: PottsModel) -> PottsModel:

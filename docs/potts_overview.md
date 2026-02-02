@@ -26,7 +26,7 @@ This page summarizes the reduced-state Potts pipeline used by the Potts analysis
 You can fit a Potts model offline (e.g., with CUDA) and then reuse it for sampling.
 
 ```bash
-python -m phase.simulation.main \\
+python -m phase.potts.main \\
   --npz path/to/cluster.npz \\
   --results-dir results/potts_fit \\
   --fit-only \\

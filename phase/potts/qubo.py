@@ -5,7 +5,7 @@ from typing import Dict, List, Sequence, Tuple
 
 import numpy as np
 
-from phase.simulation.potts_model import PottsModel
+from phase.potts.potts_model import PottsModel
 
 
 @dataclass(frozen=True)
