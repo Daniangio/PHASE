@@ -287,6 +287,24 @@ def _cluster_residue_worker(
     return col, labels_halo, labels_assigned, k
 
 
+def _cluster_residue_worker_with_models(
+    col: int,
+    samples: np.ndarray,
+    density_maxk: int,
+    density_z: float | str,
+    max_cluster_frames: Optional[int],
+    subsample_indices: Optional[np.ndarray],
+) -> Tuple[int, np.ndarray, np.ndarray, int, Data, Data]:
+    labels_halo, labels_assigned, k, _, _, dp_data_halo, dp_data_assigned = _cluster_with_subsample(
+        samples,
+        density_maxk=density_maxk,
+        density_z=density_z,
+        max_cluster_frames=max_cluster_frames,
+        subsample_indices=subsample_indices,
+    )
+    return col, labels_halo, labels_assigned, k, dp_data_halo, dp_data_assigned
+
+
 def _resolve_states_for_meta(meta: Dict[str, Any], system: SystemMetadata) -> List[DescriptorState]:
     """Return all states contributing to a metastable macro-state."""
     macro_state_id = meta.get("macro_state_id")
@@ -1125,6 +1143,7 @@ def generate_metastable_cluster_npz(
     cluster_algorithm: str = "density_peaks",
     density_maxk: Optional[int] = 100,
     density_z: float | str | None = None,
+    n_jobs: int | None = None,
     persist_models: bool = True,
     progress_callback: Optional[Callable[[str, int, int], None]] = None,
 ) -> Tuple[Path, Dict[str, Any]]:
@@ -1195,39 +1214,80 @@ def generate_metastable_cluster_npz(
         merged_subsample_indices.size if merged_subsample_indices is not None else merged_frame_count
     )
 
-    dp_models_halo: List[Data] = []
-    dp_models_assigned: List[Data] = []
+    dp_models_halo: List[Data] = [None] * len(residue_keys)
+    dp_models_assigned: List[Data] = [None] * len(residue_keys)
 
-    for col, samples in enumerate(merged_angles_per_residue):
-        sample_arr = np.asarray(samples, dtype=float)
-        if sample_arr.shape[0] != merged_frame_count:
-            raise ValueError("Merged residue samples have inconsistent frame counts.")
-        labels_halo, labels_assigned, k, diag, _, dp_data_halo, dp_data_assigned = _cluster_with_subsample(
-            sample_arr,
-            density_maxk=density_maxk_val,
-            density_z=density_z_val,
-            max_cluster_frames=max_cluster_frames_val,
-            subsample_indices=merged_subsample_indices,
-        )
-        if labels_halo.size == 0:
-            merged_labels_halo[:, col] = -1
-            merged_labels_assigned[:, col] = -1
-            merged_counts[col] = 0
-        else:
-            merged_labels_halo[:, col] = labels_halo
-            merged_labels_assigned[:, col] = labels_assigned
-            if np.any(labels_assigned >= 0):
-                k = max(k, int(labels_assigned.max()) + 1)
-            merged_counts[col] = k
-        dp_models_halo.append(dp_data_halo)
-        dp_models_assigned.append(dp_data_assigned)
-        if progress_callback and total_residue_jobs:
-            completed_residue_jobs += 1
-            progress_callback(
-                f"Clustering residues: {completed_residue_jobs}/{total_residue_jobs}",
-                completed_residue_jobs,
-                total_residue_jobs,
+    use_processes = n_jobs is not None and int(n_jobs) > 1
+    if use_processes:
+        with ProcessPoolExecutor(max_workers=int(n_jobs)) as executor:
+            futures = []
+            for col, samples in enumerate(merged_angles_per_residue):
+                sample_arr = np.asarray(samples, dtype=float)
+                if sample_arr.shape[0] != merged_frame_count:
+                    raise ValueError("Merged residue samples have inconsistent frame counts.")
+                futures.append(
+                    executor.submit(
+                        _cluster_residue_worker_with_models,
+                        col,
+                        sample_arr,
+                        density_maxk_val,
+                        density_z_val,
+                        max_cluster_frames_val,
+                        merged_subsample_indices,
+                    )
+                )
+            for fut in as_completed(futures):
+                col, labels_halo, labels_assigned, k, dp_data_halo, dp_data_assigned = fut.result()
+                if labels_halo.size == 0:
+                    merged_labels_halo[:, col] = -1
+                    merged_labels_assigned[:, col] = -1
+                    merged_counts[col] = 0
+                else:
+                    merged_labels_halo[:, col] = labels_halo
+                    merged_labels_assigned[:, col] = labels_assigned
+                    if np.any(labels_assigned >= 0):
+                        k = max(k, int(labels_assigned.max()) + 1)
+                    merged_counts[col] = k
+                dp_models_halo[col] = dp_data_halo
+                dp_models_assigned[col] = dp_data_assigned
+                if progress_callback and total_residue_jobs:
+                    completed_residue_jobs += 1
+                    progress_callback(
+                        f"Clustering residues: {completed_residue_jobs}/{total_residue_jobs}",
+                        completed_residue_jobs,
+                        total_residue_jobs,
+                    )
+    else:
+        for col, samples in enumerate(merged_angles_per_residue):
+            sample_arr = np.asarray(samples, dtype=float)
+            if sample_arr.shape[0] != merged_frame_count:
+                raise ValueError("Merged residue samples have inconsistent frame counts.")
+            labels_halo, labels_assigned, k, _, _, dp_data_halo, dp_data_assigned = _cluster_with_subsample(
+                sample_arr,
+                density_maxk=density_maxk_val,
+                density_z=density_z_val,
+                max_cluster_frames=max_cluster_frames_val,
+                subsample_indices=merged_subsample_indices,
             )
+            if labels_halo.size == 0:
+                merged_labels_halo[:, col] = -1
+                merged_labels_assigned[:, col] = -1
+                merged_counts[col] = 0
+            else:
+                merged_labels_halo[:, col] = labels_halo
+                merged_labels_assigned[:, col] = labels_assigned
+                if np.any(labels_assigned >= 0):
+                    k = max(k, int(labels_assigned.max()) + 1)
+                merged_counts[col] = k
+            dp_models_halo[col] = dp_data_halo
+            dp_models_assigned[col] = dp_data_assigned
+            if progress_callback and total_residue_jobs:
+                completed_residue_jobs += 1
+                progress_callback(
+                    f"Clustering residues: {completed_residue_jobs}/{total_residue_jobs}",
+                    completed_residue_jobs,
+                    total_residue_jobs,
+                )
 
     condition_payload, predictions_meta, extra_meta = _build_condition_predictions(
         project_id=project_id,
