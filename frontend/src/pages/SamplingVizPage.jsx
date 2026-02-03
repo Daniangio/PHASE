@@ -375,6 +375,7 @@ export default function SamplingVizPage() {
   const [pairSourceB, setPairSourceB] = useState('');
   const [overlayPlot, setOverlayPlot] = useState(null);
   const [showPlotDoc, setShowPlotDoc] = useState(false);
+  const [infoSampleId, setInfoSampleId] = useState('');
 
   const clusterOptions = useMemo(
     () => (system?.metastable_clusters || []).filter((run) => run.path && run.status !== 'failed'),
@@ -526,6 +527,20 @@ export default function SamplingVizPage() {
     });
     return map;
   }, [summaryEntries]);
+
+  const infoSample = useMemo(() => {
+    if (!infoSampleId) return null;
+    return sampleEntries.find((s) => s.sample_id === infoSampleId) || null;
+  }, [infoSampleId, sampleEntries]);
+
+  const infoSummary = useMemo(() => {
+    if (!infoSample) return null;
+    return infoSample.summary || infoSample.params || null;
+  }, [infoSample]);
+
+  const toggleInfo = useCallback((sampleId) => {
+    setInfoSampleId((prev) => (prev === sampleId ? '' : sampleId));
+  }, []);
   const baseSummary = summaryEntries[0]?.summary || null;
 
   const handleDeleteSample = useCallback(
@@ -1011,7 +1026,17 @@ export default function SamplingVizPage() {
             <div className="space-y-1 mt-2 text-xs text-gray-300">
               {mdSamples.length === 0 && <p className="text-gray-500">None</p>}
               {mdSamples.map((s) => (
-                <div key={s.sample_id} className="truncate">{s.name || s.sample_id}</div>
+                <div key={s.sample_id} className="flex items-center justify-between gap-2">
+                  <span className="truncate">{s.name || s.sample_id}</span>
+                  <button
+                    type="button"
+                    onClick={() => toggleInfo(s.sample_id)}
+                    className="text-gray-400 hover:text-gray-200"
+                    aria-label={`Show info for ${s.name || s.sample_id}`}
+                  >
+                    ℹ
+                  </button>
+                </div>
               ))}
             </div>
           </div>
@@ -1023,15 +1048,25 @@ export default function SamplingVizPage() {
               {gibbsSamples.map((s) => (
                 <div key={s.sample_id} className="flex items-center justify-between gap-2">
                   <span className="truncate">{s.name || s.sample_id}</span>
-                  <button
-                    type="button"
-                    onClick={() => handleDeleteSample(s.sample_id)}
-                    className="text-gray-400 hover:text-red-300"
-                    aria-label={`Delete ${s.name || s.sample_id}`}
-                    disabled={deleteBusyId === s.sample_id}
-                  >
-                    <Trash2 className="h-3.5 w-3.5" />
-                  </button>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => toggleInfo(s.sample_id)}
+                      className="text-gray-400 hover:text-gray-200"
+                      aria-label={`Show info for ${s.name || s.sample_id}`}
+                    >
+                      ℹ
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleDeleteSample(s.sample_id)}
+                      className="text-gray-400 hover:text-red-300"
+                      aria-label={`Delete ${s.name || s.sample_id}`}
+                      disabled={deleteBusyId === s.sample_id}
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
                 </div>
               ))}
             </div>
@@ -1044,19 +1079,68 @@ export default function SamplingVizPage() {
               {saSamples.map((s) => (
                 <div key={s.sample_id} className="flex items-center justify-between gap-2">
                   <span className="truncate">{s.name || s.sample_id}</span>
-                  <button
-                    type="button"
-                    onClick={() => handleDeleteSample(s.sample_id)}
-                    className="text-gray-400 hover:text-red-300"
-                    aria-label={`Delete ${s.name || s.sample_id}`}
-                    disabled={deleteBusyId === s.sample_id}
-                  >
-                    <Trash2 className="h-3.5 w-3.5" />
-                  </button>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => toggleInfo(s.sample_id)}
+                      className="text-gray-400 hover:text-gray-200"
+                      aria-label={`Show info for ${s.name || s.sample_id}`}
+                    >
+                      ℹ
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleDeleteSample(s.sample_id)}
+                      className="text-gray-400 hover:text-red-300"
+                      aria-label={`Delete ${s.name || s.sample_id}`}
+                      disabled={deleteBusyId === s.sample_id}
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
                 </div>
               ))}
             </div>
           </div>
+
+          {infoSample && (
+            <div className="bg-gray-900 border border-gray-800 rounded-lg p-3 text-xs text-gray-300 space-y-2">
+              <div className="flex items-start justify-between gap-2">
+                <div>
+                  <p className="text-sm font-semibold text-white">{infoSample.name || infoSample.sample_id}</p>
+                  <p className="text-[11px] text-gray-400">Sample info</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setInfoSampleId('')}
+                  className="text-gray-400 hover:text-gray-200"
+                  aria-label="Close sample info"
+                >
+                  ✕
+                </button>
+              </div>
+              <div className="space-y-1">
+                <div><span className="text-gray-400">id:</span> {infoSample.sample_id}</div>
+                {infoSample.created_at && <div><span className="text-gray-400">created:</span> {infoSample.created_at}</div>}
+                {infoSample.method && <div><span className="text-gray-400">method:</span> {infoSample.method}</div>}
+                {infoSample.model_names && infoSample.model_names.length > 0 && (
+                  <div><span className="text-gray-400">models:</span> {infoSample.model_names.join(', ')}</div>
+                )}
+                {infoSample.model_id && !infoSample.model_names && (
+                  <div><span className="text-gray-400">model id:</span> {infoSample.model_id}</div>
+                )}
+                {infoSample.path && <div><span className="text-gray-400">path:</span> {infoSample.path}</div>}
+              </div>
+              {infoSummary && (
+                <details className="text-xs text-gray-300">
+                  <summary className="cursor-pointer text-gray-200">Run details</summary>
+                  <pre className="mt-2 max-h-64 overflow-auto rounded bg-gray-950 p-2 text-[11px] text-gray-300">
+                    {JSON.stringify(infoSummary, null, 2)}
+                  </pre>
+                </details>
+              )}
+            </div>
+          )}
         </aside>
 
         <main className="space-y-6">

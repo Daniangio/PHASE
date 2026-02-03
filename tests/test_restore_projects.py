@@ -40,30 +40,9 @@ def test_restore_projects_preserves_system_json(tmp_path: Path, monkeypatch):
         "analysis_mode": "macro",
         "residue_selections": None,
         "residue_selections_mapping": {},
-        "descriptor_keys": [],
         "descriptor_metadata_file": None,
         "metastable_model_dir": None,
         "metastable_states": [],
-        "metastable_clusters": [
-            {
-                "cluster_id": "c1",
-                "name": "cluster_one",
-                "status": "finished",
-                "progress": 100,
-                "status_message": "Complete",
-                "job_id": None,
-                "created_at": "2026-02-02T00:10:00",
-                "path": "clusters/c1/cluster.npz",
-                "state_ids": ["A", "B"],
-                "metastable_ids": ["A", "B"],
-                "potts_models": [],
-                "samples": [],
-            }
-        ],
-        "analysis_states": [
-            {"state_id": "A", "name": "A", "kind": "macro"},
-            {"state_id": "B", "name": "B", "kind": "macro"},
-        ],
         "states": {},
     }
 
@@ -79,6 +58,4 @@ def test_restore_projects_preserves_system_json(tmp_path: Path, monkeypatch):
     restored_path = data_root / "projects" / project_id / "systems" / system_id / "system.json"
     assert restored_path.exists(), "system.json missing after restore"
     restored = json.loads(restored_path.read_text())
-    assert restored.get("metastable_clusters"), "metastable_clusters should be preserved"
-    assert restored.get("analysis_states"), "analysis_states should be preserved"
     assert restored == system_payload

@@ -15,9 +15,9 @@ from typing import Sequence
 
 import numpy as np
 
-from phase.simulation.potts_model import PottsModel
-from phase.simulation.qubo import potts_to_qubo_onehot, decode_onehot, encode_onehot
-from phase.simulation.sampling import sa_sample_qubo_neal
+from phase.potts.potts_model import PottsModel
+from phase.potts.qubo import potts_to_qubo_onehot, decode_onehot, encode_onehot
+from phase.potts.sampling import sa_sample_qubo_neal
 
 
 def build_toy_model(

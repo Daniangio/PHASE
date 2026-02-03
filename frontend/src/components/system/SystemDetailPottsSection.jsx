@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { Check, Download, Eye, Pencil, Plus, SlidersHorizontal, Trash2, UploadCloud, X } from 'lucide-react';
+import { Check, Download, Eye, Info, Pencil, Plus, SlidersHorizontal, Trash2, UploadCloud, X } from 'lucide-react';
 import ErrorMessage from '../common/ErrorMessage';
 import { AnalysisResultsList, InfoTooltip } from './SystemDetailWidgets';
 import SimulationAnalysisForm from '../analysis/SimulationAnalysisForm';
@@ -97,6 +97,7 @@ export default function SystemDetailPottsSection(props) {
   const [backmappingUploadBusy, setBackmappingUploadBusy] = useState(false);
   const [backmappingFiles, setBackmappingFiles] = useState({});
   const [renameEditingId, setRenameEditingId] = useState(null);
+  const [infoSampleId, setInfoSampleId] = useState(null);
 
   const clusterLabel =
     selectedClusterName || selectedCluster?.name || selectedCluster?.cluster_id || '';
@@ -133,6 +134,12 @@ export default function SystemDetailPottsSection(props) {
     });
     return map;
   }, [pottsModels, formatPottsModelName]);
+
+  const allSamples = useMemo(() => [...mdSamples, ...gibbsSamples, ...saSamples], [mdSamples, gibbsSamples, saSamples]);
+  const infoSample = useMemo(
+    () => allSamples.find((sample) => sample.sample_id === infoSampleId) || null,
+    [allSamples, infoSampleId]
+  );
 
   return (
     <div className="space-y-4">
@@ -413,22 +420,32 @@ export default function SystemDetailPottsSection(props) {
                         className="flex items-center justify-between gap-2 rounded-md border border-gray-800 bg-gray-950/50 px-2 py-1"
                       >
                         <span className="text-[11px] text-gray-300 truncate">{label}</span>
-                        {stateId && (
+                        <div className="flex items-center gap-2">
                           <button
                             type="button"
-                            onClick={() =>
-                              openDescriptorExplorer({
-                                clusterId: pottsFitClusterId,
-                                stateId,
-                                metastableId: sample.metastable_id || null,
-                              })
-                            }
-                            className="text-gray-400 hover:text-cyan-300"
-                            aria-label={`View ${label} in Descriptor Explorer`}
+                            onClick={() => setInfoSampleId(sample.sample_id)}
+                            className="text-gray-400 hover:text-gray-200"
+                            aria-label={`Show info for ${label}`}
                           >
-                            <Eye className="h-4 w-4" />
+                            <Info className="h-4 w-4" />
                           </button>
-                        )}
+                          {stateId && (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                openDescriptorExplorer({
+                                  clusterId: pottsFitClusterId,
+                                  stateId,
+                                  metastableId: sample.metastable_id || null,
+                                })
+                              }
+                              className="text-gray-400 hover:text-cyan-300"
+                              aria-label={`View ${label} in Descriptor Explorer`}
+                            >
+                              <Eye className="h-4 w-4" />
+                            </button>
+                          )}
+                        </div>
                       </div>
                     );
                   })}
@@ -447,6 +464,14 @@ export default function SystemDetailPottsSection(props) {
                       >
                         <span className="truncate">{sample.name || 'Gibbs sample'} • {sample.created_at || ''}</span>
                         <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => setInfoSampleId(sample.sample_id)}
+                            className="text-gray-400 hover:text-gray-200"
+                            aria-label={`Show info for ${sample.name || 'Gibbs sample'}`}
+                          >
+                            <Info className="h-4 w-4" />
+                          </button>
                           <button
                             type="button"
                             onClick={() =>
@@ -487,6 +512,14 @@ export default function SystemDetailPottsSection(props) {
                         <div className="flex items-center gap-2">
                           <button
                             type="button"
+                            onClick={() => setInfoSampleId(sample.sample_id)}
+                            className="text-gray-400 hover:text-gray-200"
+                            aria-label={`Show info for ${sample.name || 'SA sample'}`}
+                          >
+                            <Info className="h-4 w-4" />
+                          </button>
+                          <button
+                            type="button"
                             onClick={() =>
                               navigate(
                                 `/projects/${projectId}/systems/${systemId}/sampling/visualize?cluster_id=${pottsFitClusterId}&sample_id=${sample.sample_id}`
@@ -511,6 +544,42 @@ export default function SystemDetailPottsSection(props) {
                 </div>
               )}
             </div>
+
+            {infoSample && (
+              <div className="rounded-md border border-gray-800 bg-gray-950/60 p-2 text-[11px] text-gray-300 space-y-2">
+                <div className="flex items-start justify-between gap-2">
+                  <div>
+                    <p className="text-xs font-semibold text-white">{infoSample.name || infoSample.sample_id}</p>
+                    <p className="text-[10px] text-gray-500">Sample info</p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setInfoSampleId(null)}
+                    className="text-gray-400 hover:text-gray-200"
+                    aria-label="Close sample info"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+                <div className="space-y-1">
+                  <div><span className="text-gray-400">id:</span> {infoSample.sample_id}</div>
+                  {infoSample.created_at && <div><span className="text-gray-400">created:</span> {infoSample.created_at}</div>}
+                  {infoSample.method && <div><span className="text-gray-400">method:</span> {infoSample.method}</div>}
+                  {infoSample.model_names && infoSample.model_names.length > 0 && (
+                    <div><span className="text-gray-400">models:</span> {infoSample.model_names.join(', ')}</div>
+                  )}
+                  {infoSample.path && <div><span className="text-gray-400">path:</span> {infoSample.path}</div>}
+                </div>
+                {(infoSample.summary || infoSample.params) && (
+                  <details className="text-[11px] text-gray-300">
+                    <summary className="cursor-pointer text-gray-200">Run details</summary>
+                    <pre className="mt-2 max-h-56 overflow-auto rounded bg-gray-900 p-2 text-[10px] text-gray-300">
+                      {JSON.stringify(infoSample.summary || infoSample.params, null, 2)}
+                    </pre>
+                  </details>
+                )}
+              </div>
+            )}
           </div>
         </aside>
       </div>

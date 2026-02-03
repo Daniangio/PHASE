@@ -1,100 +1,52 @@
 from __future__ import annotations
 
-from datetime import datetime
 import argparse
 import os
 from pathlib import Path
-import re
-import shutil
-import uuid
 
 from phase.services.project_store import ProjectStore
 from phase.potts import delta_fit
+from phase.scripts.potts_utils import persist_model
 
 
-def _sanitize_model_filename(name: str) -> str:
-    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", name)
-    safe = safe.strip("._-")
-    return safe or "potts_model"
-
-
-def _persist_model(
+def _update_existing_model(
+    store: ProjectStore,
     *,
     project_id: str,
     system_id: str,
     cluster_id: str,
     model_path: Path,
-    model_name: str | None,
     params: dict,
-    source: str = "offline_delta_fit",
-) -> tuple[str | None, str | None]:
-    data_root = Path(os.getenv("PHASE_DATA_ROOT", "/app/data"))
-    store = ProjectStore(base_dir=data_root / "projects")
+    source: str,
+) -> bool:
     try:
         system_meta = store.get_system(project_id, system_id)
     except FileNotFoundError:
-        print(f"[potts_delta_fit] warning: system {project_id}/{system_id} not found; leaving model in place.")
-        return None, None
+        return False
 
     entry = next(
         (c for c in (system_meta.metastable_clusters or []) if c.get("cluster_id") == cluster_id),
         None,
     )
-    dirs = store.ensure_cluster_directories(project_id, system_id, cluster_id)
-    system_dir = dirs["system_dir"]
-    model_dir = dirs["potts_models_dir"]
-    model_dir.mkdir(parents=True, exist_ok=True)
-
-    display_name = model_name
-    if not display_name:
-        if isinstance(entry, dict):
-            cluster_name = entry.get("name")
-            if isinstance(cluster_name, str) and cluster_name.strip():
-                display_name = f"{cluster_name} Potts Model"
-    if not display_name:
-        display_name = f"{cluster_id} Potts Model"
-
-    model_id = str(uuid.uuid4())
-    base_name = _sanitize_model_filename(display_name)
-    filename = f"{base_name}.npz"
-    model_bucket = model_dir / model_id
-    model_bucket.mkdir(parents=True, exist_ok=True)
-    dest_path = model_bucket / filename
-    if dest_path.exists():
-        suffix = cluster_id[:8]
-        dest_path = model_bucket / f"{base_name}-{suffix}.npz"
-        counter = 2
-        while dest_path.exists():
-            dest_path = model_bucket / f"{base_name}-{suffix}-{counter}.npz"
-            counter += 1
-
-    if model_path.resolve() != dest_path.resolve():
-        shutil.copy2(model_path, dest_path)
-    try:
-        rel_path = str(dest_path.relative_to(system_dir))
-    except Exception:
-        rel_path = str(dest_path)
-
-    if isinstance(entry, dict):
-        models = entry.get("potts_models")
-        if not isinstance(models, list):
-            models = []
-        models.append(
-            {
-                "model_id": model_id,
-                "name": display_name,
-                "path": rel_path,
-                "created_at": datetime.utcnow().isoformat(),
-                "source": source,
-                "params": params,
-            }
-        )
+    if not isinstance(entry, dict):
+        return False
+    models = entry.get("potts_models") or []
+    updated = False
+    for model in models:
+        rel_path = model.get("path")
+        if not rel_path:
+            continue
+        abs_path = store.resolve_path(project_id, system_id, rel_path)
+        if abs_path.resolve() == model_path.resolve():
+            model["params"] = params
+            if source:
+                model["source"] = source
+            updated = True
+            break
+    if updated:
         entry["potts_models"] = models
         store.save_system(system_meta)
-    else:
-        print("[potts_delta_fit] warning: cluster entry not found; model copied without metadata update.")
-
-    return rel_path, model_id
+    return updated
 
 
 def _parse_args(argv: list[str] | None = None) -> tuple[argparse.Namespace, list[str]]:
@@ -122,6 +74,8 @@ def main(argv: list[str] | None = None) -> int:
     if not project_id or not system_id or not cluster_id:
         print("[potts_delta_fit] skipping metadata update (missing project/system/cluster ids).")
         return 0
+    data_root = Path(os.getenv("PHASE_DATA_ROOT", "/app/data"))
+    store = ProjectStore(base_dir=data_root / "projects")
 
     results_dir = Path(delta_args.results_dir)
     if not results_dir.exists():
@@ -140,6 +94,13 @@ def main(argv: list[str] | None = None) -> int:
     params = vars(delta_args)
     params["fit_mode"] = "delta"
 
+    resume_path = None
+    resume_raw = getattr(delta_args, "resume_model", None)
+    if resume_raw:
+        resume_path = Path(str(resume_raw))
+        if not resume_path.is_absolute():
+            resume_path = store.resolve_path(project_id, system_id, str(resume_raw))
+
     outputs = [
         ("delta_patch", results_dir / "delta_model.npz", f"{base_label} (delta)"),
         ("model_patch", results_dir / "model_combined.npz", f"{base_label} (combined)"),
@@ -154,7 +115,22 @@ def main(argv: list[str] | None = None) -> int:
             continue
         model_params = dict(params)
         model_params["delta_kind"] = kind
-        rel_path, model_id = _persist_model(
+        if resume_path and resume_path.resolve() == path.resolve():
+            updated = _update_existing_model(
+                store,
+                project_id=project_id,
+                system_id=system_id,
+                cluster_id=cluster_id,
+                model_path=path,
+                params=model_params,
+                source=args.model_source or "offline_delta_fit",
+            )
+            if updated:
+                print(f"[potts_delta_fit] updated {kind} model metadata: {path}")
+            else:
+                print("[potts_delta_fit] warning: resume model not found in metadata; skipping new entry.")
+            continue
+        rel_path, model_id = persist_model(
             project_id=project_id,
             system_id=system_id,
             cluster_id=cluster_id,

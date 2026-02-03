@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import os
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -375,7 +376,7 @@ def fit_potts_pseudolikelihood_torch(
     last_val_loss = None
 
     def _export_model() -> PottsModel:
-        h = [-hp.detach().cpu().numpy().astype(float) for hp in h_params]
+        h = [(-hp).detach().cpu().numpy().astype(float) for hp in h_params]
         J: Dict[Tuple[int, int], np.ndarray] = {}
         for r, s in edges:
             key = f"{r}_{s}"
@@ -490,6 +491,12 @@ def fit_potts_delta_pseudolikelihood_torch(
     seed: int = 0,
     verbose: bool = True,
     report_init_loss: bool = True,
+    init_model: "PottsModel | None" = None,
+    start_best_loss: Optional[float] = None,
+    best_model_path: str | "os.PathLike[str]" | None = None,
+    best_model_metadata: Optional[dict] = None,
+    best_combined_path: str | "os.PathLike[str]" | None = None,
+    best_combined_metadata: Optional[dict] = None,
     progress_callback: "callable | None" = None,
     progress_every: int = 10,
     batch_progress_callback: "callable | None" = None,
@@ -520,6 +527,13 @@ def fit_potts_delta_pseudolikelihood_torch(
     if verbose:
         print(f"[plm-delta] using device={torch_device}")
 
+    if init_model is not None:
+        if len(init_model.h) != N:
+            raise ValueError("Init delta model size does not match base model.")
+        init_edges = sorted((min(r, s), max(r, s)) for r, s in init_model.edges if r != s)
+        if init_edges != edges:
+            raise ValueError("Init delta model edges do not match base model.")
+
     neigh = [[] for _ in range(N)]
     for r, s in edges:
         neigh[r].append(s)
@@ -533,14 +547,21 @@ def fit_potts_delta_pseudolikelihood_torch(
         base_J[key] = torch.tensor(-base_model.J[(r, s)], dtype=torch.float32, device=torch_device)
 
     delta_h = torch.nn.ParameterList([
-        torch.nn.Parameter(torch.zeros(base_model.h[r].shape[0], dtype=torch.float32, device=torch_device))
+        torch.nn.Parameter(torch.tensor(
+            -init_model.h[r] if init_model is not None else np.zeros(base_model.h[r].shape[0]),
+            dtype=torch.float32,
+            device=torch_device,
+        ))
         for r in range(N)
     ])
     delta_J = torch.nn.ParameterDict()
     for r, s in edges:
         key = f"{r}_{s}"
+        init_val = np.zeros(base_model.J[(r, s)].shape)
+        if init_model is not None:
+            init_val = -init_model.coupling(r, s)
         delta_J[key] = torch.nn.Parameter(
-            torch.zeros(base_model.J[(r, s)].shape, dtype=torch.float32, device=torch_device)
+            torch.tensor(init_val, dtype=torch.float32, device=torch_device)
         )
 
     X = torch.tensor(labels, dtype=torch.long, device=torch_device)
@@ -553,6 +574,41 @@ def fit_potts_delta_pseudolikelihood_torch(
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=epochs, eta_min=lr_min)
     elif schedule != "none":
         raise ValueError(f"Unknown lr_schedule={lr_schedule!r}")
+
+    best_loss = float("inf") if start_best_loss is None else float(start_best_loss)
+    best_epoch = None
+    last_loss = None
+
+    def _export_model() -> PottsModel:
+        h = [(-hp).detach().cpu().numpy().astype(float) for hp in delta_h]
+        J: Dict[Tuple[int, int], np.ndarray] = {}
+        for r, s in edges:
+            key = f"{r}_{s}"
+            J[(r, s)] = -delta_J[key].detach().cpu().numpy().astype(float)
+        return PottsModel(h=h, J=J, edges=list(edges))
+
+    def _maybe_save_best(ep: int, train_loss: float) -> None:
+        nonlocal best_loss, best_epoch
+        if train_loss >= best_loss:
+            return
+        best_loss = float(train_loss)
+        best_epoch = int(ep)
+        delta_model = None
+        if best_model_path is not None or best_combined_path is not None:
+            delta_model = _export_model()
+        if best_model_path is not None:
+            meta = dict(best_model_metadata or {})
+            meta["delta_best_loss"] = float(best_loss)
+            meta["delta_best_epoch"] = int(best_epoch)
+            meta["delta_last_loss"] = float(train_loss)
+            save_potts_model(delta_model or _export_model(), best_model_path, metadata=meta)
+        if best_combined_path is not None:
+            combined_model = add_potts_models(base_model, delta_model or _export_model())
+            meta = dict(best_combined_metadata or {})
+            meta["delta_best_loss"] = float(best_loss)
+            meta["delta_best_epoch"] = int(best_epoch)
+            meta["delta_last_loss"] = float(train_loss)
+            save_potts_model(combined_model, best_combined_path, metadata=meta)
 
     def _logits_for_residue(x_batch: "torch.Tensor", r: int) -> "torch.Tensor":
         B = x_batch.shape[0]
@@ -640,20 +696,21 @@ def fit_potts_delta_pseudolikelihood_torch(
                 batch_progress_callback(ep, epochs, batch_num, total_batches)
 
         avg_loss = total / max(1, nobs)
+        last_loss = float(avg_loss)
         if verbose and (ep == 1 or ep % max(1, epochs // 10) == 0):
             print(f"[plm-delta] epoch {ep:4d}/{epochs}  avg_loss={avg_loss:.6f}")
         if progress_callback and (ep == 1 or ep == epochs or ep % progress_every == 0):
             progress_callback(ep, epochs, float(avg_loss))
+        _maybe_save_best(ep, float(avg_loss))
         if scheduler is not None:
             scheduler.step()
 
-    h = [-hp.detach().cpu().numpy().astype(float) for hp in delta_h]
-    J = {}
-    for r, s in edges:
-        key = f"{r}_{s}"
-        J[(r, s)] = -delta_J[key].detach().cpu().numpy().astype(float)
-
-    return PottsModel(h=h, J=J, edges=list(edges))
+    model = _export_model()
+    if best_loss != float("inf"):
+        setattr(model, "best_delta_loss", best_loss)
+    setattr(model, "best_delta_epoch", best_epoch)
+    setattr(model, "last_delta_loss", last_loss)
+    return model
 
 
 def compute_pseudolikelihood_loss_torch(

@@ -1,37 +1,10 @@
 from __future__ import annotations
 
 import argparse
-import json
 from pathlib import Path
-from typing import Iterable, List
+from typing import List
 
-from phase.services.project_store import ProjectStore, ProjectMetadata, SystemMetadata
-
-
-def _project_meta_path(root: Path, project_id: str) -> Path:
-    return root / project_id / "project.json"
-
-
-def _system_meta_path(root: Path, project_id: str, system_id: str) -> Path:
-    return root / project_id / "systems" / system_id / "system.json"
-
-
-def _load_project_meta(root: Path, project_id: str) -> ProjectMetadata:
-    path = _project_meta_path(root, project_id)
-    data = json.loads(path.read_text())
-    return ProjectMetadata(**data)
-
-
-def _load_system_meta(root: Path, project_id: str, system_id: str) -> SystemMetadata:
-    path = _system_meta_path(root, project_id, system_id)
-    data = json.loads(path.read_text())
-    return SystemMetadata(**data)
-
-
-def _iter_project_ids(root: Path) -> Iterable[str]:
-    if not root.exists():
-        return []
-    return [p.name for p in root.iterdir() if p.is_dir() and (p / "project.json").exists()]
+from phase.services.project_store import ProjectStore
 
 
 def _print_rows(rows: List[List[str]]) -> None:
@@ -40,24 +13,24 @@ def _print_rows(rows: List[List[str]]) -> None:
 
 
 def list_projects(root: Path) -> None:
+    store = ProjectStore(base_dir=root)
     rows = []
-    for project_id in _iter_project_ids(root):
-        meta = _load_project_meta(root, project_id)
-        rows.append([project_id, meta.name or project_id])
+    for meta in store.list_projects():
+        rows.append([meta.project_id, meta.name or meta.project_id])
     _print_rows(rows)
 
 
 def list_systems(root: Path, project_id: str) -> None:
-    meta = _load_project_meta(root, project_id)
+    store = ProjectStore(base_dir=root)
     rows = []
-    for system_id in meta.systems or []:
-        sys_meta = _load_system_meta(root, project_id, system_id)
-        rows.append([system_id, sys_meta.name or system_id])
+    for sys_meta in store.list_systems(project_id):
+        rows.append([sys_meta.system_id, sys_meta.name or sys_meta.system_id])
     _print_rows(rows)
 
 
 def list_states(root: Path, project_id: str, system_id: str) -> None:
-    sys_meta = _load_system_meta(root, project_id, system_id)
+    store = ProjectStore(base_dir=root)
+    sys_meta = store.get_system(project_id, system_id)
     rows = []
     for state_id, state in (sys_meta.states or {}).items():
         if isinstance(state, dict):
@@ -75,7 +48,8 @@ def list_states(root: Path, project_id: str, system_id: str) -> None:
 
 
 def list_analysis_states(root: Path, project_id: str, system_id: str) -> None:
-    sys_meta = _load_system_meta(root, project_id, system_id)
+    store = ProjectStore(base_dir=root)
+    sys_meta = store.get_system(project_id, system_id)
     rows = []
     analysis_states = getattr(sys_meta, "analysis_states", None) or sys_meta.__dict__.get("analysis_states") or []
     if not analysis_states:

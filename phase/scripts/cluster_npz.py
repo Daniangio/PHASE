@@ -58,6 +58,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--state-ids", help="Comma-separated state IDs used for clustering.")
     parser.add_argument("--cluster-name", help="Human-readable cluster name.")
     parser.add_argument(
+        "--root",
+        help="Data root containing projects/ (defaults to PHASE_DATA_ROOT).",
+    )
+    parser.add_argument(
         "--print-meta",
         action="store_true",
         help="Print the metadata JSON to stdout after clustering.",
@@ -124,15 +128,13 @@ def main(argv: list[str] | None = None) -> int:
 
             state_ids = _parse_paths(args.state_ids)
             cluster_id = str(uuid.uuid4())
+            data_root = Path(args.root) if args.root else Path(os.getenv("PHASE_DATA_ROOT", "/app/data"))
+            store = ProjectStore(base_dir=data_root / "projects")
             output_path = (
                 Path(args.output)
                 if args.output
-                else build_cluster_output_path(
-                    args.project_id,
-                    args.system_id,
-                    cluster_id=cluster_id,
-                    cluster_name=args.cluster_name,
-                )
+                else store.ensure_cluster_directories(args.project_id, args.system_id, cluster_id)["cluster_dir"]
+                / "cluster.npz"
             )
             npz_path, metadata = generate_metastable_cluster_npz(
                 args.project_id,
@@ -147,7 +149,6 @@ def main(argv: list[str] | None = None) -> int:
                 n_jobs=n_jobs,
                 progress_callback=progress_callback,
             )
-            store = ProjectStore()
             cluster_dirs = store.ensure_cluster_directories(args.project_id, args.system_id, cluster_id)
             assignments = assign_cluster_labels_to_states(
                 npz_path,

@@ -7,6 +7,17 @@ from typing import Iterable, List, Sequence
 import numpy as np
 
 
+def _plotly_script_tag(offline: bool) -> str:
+    """Return a Plotly <script> tag; inline JS for offline usage, CDN otherwise."""
+    if not offline:
+        return '<script src="https://cdn.plot.ly/plotly-2.30.0.min.js"></script>'
+    try:
+        from plotly.io._html import get_plotlyjs  # plotly is already installed in your env
+        return f"<script>{get_plotlyjs()}</script>"
+    except Exception:
+        return '<script src="https://cdn.plot.ly/plotly-2.30.0.min.js"></script>'
+
+
 def _to_matrix(marginals: Sequence[np.ndarray]) -> np.ndarray:
     """
     Pads a list of 1D marginal arrays into a 2D matrix (residues x states).
@@ -36,7 +47,7 @@ def _ensure_matrix(marginals: Sequence[np.ndarray] | np.ndarray) -> np.ndarray:
     return _to_matrix(marginals)
 
 
-def _html_template(fig_layout: str, payload: str, div_id: str = "marginal-fig") -> str:
+def _html_template(fig_layout: str, payload: str, div_id: str = "marginal-fig", offline: bool = False) -> str:
     """
     Compose an interactive HTML page with a residue selector that updates Plotly subplots.
     """
@@ -45,7 +56,7 @@ def _html_template(fig_layout: str, payload: str, div_id: str = "marginal-fig") 
 <head>
   <meta charset="utf-8" />
   <title>Marginal comparison</title>
-  <script src="https://cdn.plot.ly/plotly-2.26.0.min.js"></script>
+  __PLOTLY_TAG__
   <style>
     body { font-family: Arial, sans-serif; margin: 0; padding: 0; }
     .wrap { display: flex; flex-direction: row; height: 100vh; }
@@ -261,16 +272,22 @@ def _html_template(fig_layout: str, payload: str, div_id: str = "marginal-fig") 
 </body>
 </html>
 """
-    return template.replace("__DIV_ID__", div_id).replace("__PAYLOAD__", payload).replace("__LAYOUT__", fig_layout)
+    plotly_tag = _plotly_script_tag(offline)
+    return (template
+            .replace("__DIV_ID__", div_id)
+            .replace("__PAYLOAD__", payload)
+            .replace("__LAYOUT__", fig_layout)
+            .replace("__PLOTLY_TAG__", plotly_tag))
+    # return template.replace("__DIV_ID__", div_id).replace("__PAYLOAD__", payload).replace("__LAYOUT__", fig_layout)
 
 
-def _html_template_multi(fig_layout: str, payload: str, div_id: str = "marginal-fig") -> str:
+def _html_template_multi(fig_layout: str, payload: str, div_id: str = "marginal-fig", offline: bool = False) -> str:
     template = """<!doctype html>
 <html>
 <head>
   <meta charset="utf-8" />
   <title>Marginal comparison</title>
-  <script src="https://cdn.plot.ly/plotly-2.26.0.min.js"></script>
+  __PLOTLY_TAG__
   <style>
     body { font-family: Arial, sans-serif; margin: 0; padding: 0; }
     .wrap { display: flex; flex-direction: row; height: 100vh; }
@@ -528,7 +545,13 @@ def _html_template_multi(fig_layout: str, payload: str, div_id: str = "marginal-
 </body>
 </html>
 """
-    return template.replace("__DIV_ID__", div_id).replace("__PAYLOAD__", payload).replace("__LAYOUT__", fig_layout)
+    plotly_tag = _plotly_script_tag(offline)
+    return (template
+            .replace("__DIV_ID__", div_id)
+            .replace("__PAYLOAD__", payload)
+            .replace("__LAYOUT__", fig_layout)
+            .replace("__PLOTLY_TAG__", plotly_tag))
+    # return template.replace("__DIV_ID__", div_id).replace("__PAYLOAD__", payload).replace("__LAYOUT__", fig_layout)
 
 
 def plot_marginal_summary(
@@ -680,6 +703,8 @@ def plot_marginal_summary(
 
     html = _html_template(fig_layout=json.dumps(layout), payload=json.dumps(payload))
 
+    plotly_tag = _plotly_script_tag(False)
+    html = html.replace("__PLOTLY_TAG__", plotly_tag)
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(html, encoding="utf-8")
@@ -747,6 +772,154 @@ def plot_marginal_dashboard(
     out_path.write_text(html, encoding="utf-8")
     return out_path
 
+
+def plot_delta_terms_report_from_models(
+    *,
+    summary_path: str | Path,
+    model_paths: Sequence[str],
+    out_path: str | Path,
+    top_res: int = 40,
+    top_edges: int = 60,
+    offline: bool = False,
+) -> Path:
+    """
+    Experiment C: visualize per-residue and per-edge delta magnitudes.
+
+    Pass model_paths as [base, delta1, delta2, ...]. We plot the delta components (1..end).
+    If you pass only one path, we plot that single component.
+
+    Residue metric: ||Δh_i||_2
+    Edge metric: ||ΔJ_ij||_F (edges from run_summary.npz)
+
+    This is diagnostic: it should reveal whether only a small subset of residues/edges
+    accounts for condition-specific differences.
+    """
+    from phase.potts.potts_model import load_potts_model
+
+    summary_path = Path(summary_path)
+    data = np.load(summary_path, allow_pickle=True)
+    residue_labels = data["residue_labels"].astype(str) if "residue_labels" in data else np.array([], dtype=str)
+    edges = data["edges"].astype(int) if "edges" in data else np.zeros((0, 2), dtype=int)
+
+    models = [load_potts_model(p) for p in model_paths]
+    comp_models = models[1:] if len(models) >= 2 else models
+    comp_names = [Path(p).stem for p in (model_paths[1:] if len(model_paths) >= 2 else model_paths)]
+
+    if residue_labels.size == 0:
+        N = len(comp_models[0].h)
+        residue_labels = np.array([str(i) for i in range(N)], dtype=str)
+
+    def _top(values: np.ndarray, k: int) -> list[int]:
+        k = int(max(1, min(k, values.size)))
+        return np.argsort(values)[::-1][:k].tolist()
+
+    components = []
+    for name, model in zip(comp_names, comp_models):
+        h_norm = np.array([float(np.linalg.norm(np.asarray(model.h[i]).ravel(), ord=2)) for i in range(len(model.h))], dtype=float)
+
+        J_norm = np.zeros((edges.shape[0],), dtype=float)
+        for e_idx, (a, b) in enumerate(edges.tolist()):
+            a = int(a); b = int(b)
+            key = (a, b) if (a, b) in model.J else (b, a)
+            mat = model.J.get(key)
+            J_norm[e_idx] = 0.0 if mat is None else float(np.linalg.norm(np.asarray(mat), ord="fro"))
+
+        idx_r = _top(h_norm, top_res)
+        idx_e = _top(J_norm, top_edges)
+
+        components.append(
+            {
+                "name": name,
+                "res_labels": [str(residue_labels[i]) for i in idx_r],
+                "res_vals": h_norm[idx_r].tolist(),
+                "edge_labels": [f"{int(edges[i,0])}-{int(edges[i,1])}" for i in idx_e] if edges.size else [],
+                "edge_vals": J_norm[idx_e].tolist() if edges.size else [],
+                "res_hist": h_norm.tolist(),
+                "edge_hist": J_norm.tolist() if edges.size else [],
+            }
+        )
+
+    payload = {"components": components, "top_res": int(top_res), "top_edges": int(top_edges)}
+
+    plotly_tag = _plotly_script_tag(bool(offline))
+    html = f"""<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Experiment C — delta term magnitudes</title>
+  __PLOTLY_TAG__
+  <style>
+    body {{ font-family: Arial, sans-serif; margin: 0; padding: 0; }}
+    .wrap {{ padding: 14px; }}
+    #plot {{ width: 100%; height: 760px; }}
+    .row {{ display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }}
+    select {{ padding: 6px; }}
+    .note {{ color: #444; font-size: 13px; margin-top: 6px; }}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h2>Experiment C: delta term magnitudes</h2>
+    <div class="row">
+      <label for="comp">Component:</label>
+      <select id="comp"></select>
+    </div>
+    <div class="note">
+      Residues: <b>||Δhᵢ||₂</b> (top). Edges: <b>||ΔJᵢⱼ||<sub>F</sub></b> (top). Histograms show global distribution.
+    </div>
+    <div id="plot"></div>
+  </div>
+
+  <script>
+    const payload = {json.dumps(payload)};
+    const sel = document.getElementById('comp');
+    payload.components.forEach((c, i) => {{
+      const opt = document.createElement('option');
+      opt.value = i.toString();
+      opt.textContent = c.name;
+      if (i === 0) opt.selected = true;
+      sel.appendChild(opt);
+    }});
+
+    function makeTraces(comp) {{
+      return [
+        {{type:'bar', x: comp.res_labels, y: comp.res_vals, name:'||Δhᵢ||₂ (top)', xaxis:'x1', yaxis:'y1'}},
+        {{type:'bar', x: comp.edge_labels, y: comp.edge_vals, name:'||ΔJᵢⱼ||_F (top)', xaxis:'x2', yaxis:'y2'}},
+        {{type:'histogram', x: comp.res_hist, name:'||Δhᵢ||₂ (all)', xaxis:'x3', yaxis:'y3'}},
+        {{type:'histogram', x: comp.edge_hist, name:'||ΔJᵢⱼ||_F (all)', xaxis:'x4', yaxis:'y4'}},
+      ];
+    }}
+
+    const layout = {{
+      grid: {{rows: 2, columns: 2, pattern: 'independent'}},
+      margin: {{l: 60, r: 20, t: 40, b: 60}},
+      xaxis: {{title: 'Residue (top)', automargin: true}},
+      yaxis: {{title: '||Δhᵢ||₂'}},
+      xaxis2: {{title: 'Edge (top)', automargin: true}},
+      yaxis2: {{title: '||ΔJᵢⱼ||_F'}},
+      xaxis3: {{title: '||Δhᵢ||₂'}},
+      yaxis3: {{title: 'count'}},
+      xaxis4: {{title: '||ΔJᵢⱼ||_F'}},
+      yaxis4: {{title: 'count'}},
+      legend: {{orientation: 'h'}},
+    }};
+
+    function redraw(i) {{
+      const comp = payload.components[i];
+      Plotly.react('plot', makeTraces(comp), layout, {{responsive:true, displaylogo:false}});
+    }}
+
+    sel.addEventListener('change', () => redraw(parseInt(sel.value || '0', 10)));
+    redraw(0);
+  </script>
+</body>
+</html>
+"""
+    html = html.replace("__PLOTLY_TAG__", plotly_tag)
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(html, encoding="utf-8")
+    return out_path
 
 
 def plot_marginal_summary_from_npz(
@@ -862,6 +1035,7 @@ def plot_sampling_report_from_npz(
     *,
     summary_path: str | Path,
     out_path: str | Path,
+    offline: bool = False,
 ) -> Path:
     with np.load(summary_path, allow_pickle=False) as data:
         residue_labels = data["residue_labels"] if "residue_labels" in data else np.array([])
@@ -1006,7 +1180,7 @@ def plot_sampling_report_from_npz(
 <head>
   <meta charset="utf-8" />
   <title>Potts sampling report</title>
-  <script src="https://cdn.plot.ly/plotly-2.30.0.min.js"></script>
+  __PLOTLY_TAG__
   <style>
     body { font-family: Arial, sans-serif; margin: 0; padding: 0; background: #0f172a; color: #e2e8f0; }
     .wrap { padding: 18px 20px 32px; }
@@ -1794,7 +1968,8 @@ def plot_sampling_report_from_npz(
 </html>
 """
 
-    html = html.replace("__PAYLOAD__", json.dumps(payload))
+    plotly_tag = _plotly_script_tag(offline)
+    html = html.replace("__PAYLOAD__", json.dumps(payload)).replace("__PLOTLY_TAG__", plotly_tag)
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(html, encoding="utf-8")
@@ -1805,6 +1980,7 @@ def plot_cross_likelihood_report_from_npz(
     *,
     summary_path: str | Path,
     out_path: str | Path,
+    offline: bool = False,
 ) -> Path:
     with np.load(summary_path, allow_pickle=False) as data:
         xlik_delta_active = data["xlik_delta_active"] if "xlik_delta_active" in data else np.array([], dtype=float)
@@ -1862,7 +2038,7 @@ def plot_cross_likelihood_report_from_npz(
 <head>
   <meta charset="utf-8" />
   <title>Cross-likelihood classification</title>
-  <script src="https://cdn.plot.ly/plotly-2.30.0.min.js"></script>
+  __PLOTLY_TAG__
   <style>
     body { font-family: Arial, sans-serif; margin: 0; padding: 0; background: #0f172a; color: #e2e8f0; }
     .wrap { padding: 18px 20px 32px; }
@@ -2100,7 +2276,8 @@ def plot_cross_likelihood_report_from_npz(
 </html>
 """
 
-    html = html.replace("__PAYLOAD__", json.dumps(payload))
+    plotly_tag = _plotly_script_tag(offline)
+    html = html.replace("__PAYLOAD__", json.dumps(payload)).replace("__PLOTLY_TAG__", plotly_tag)
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(html, encoding="utf-8")
@@ -2114,6 +2291,7 @@ def plot_beta_scan_curve(
     out_path: str | Path,
     title: str = "Effective temperature calibration: distance vs beta",
     labels: Sequence[str] | None = None,
+    offline: bool = False,
 ) -> Path:
     """
     Save a small interactive HTML plot of D(beta), used to pick beta_eff.
@@ -2145,7 +2323,7 @@ def plot_beta_scan_curve(
 <head>
   <meta charset="utf-8" />
   <title>{title}</title>
-  <script src="https://cdn.plot.ly/plotly-2.30.0.min.js"></script>
+  __PLOTLY_TAG__
   <style>
     body {{ font-family: sans-serif; margin: 0; padding: 0; }}
     .wrap {{ padding: 12px; }}
@@ -2182,6 +2360,8 @@ def plot_beta_scan_curve(
 </html>
 """
 
+    plotly_tag = _plotly_script_tag(offline)
+    html = html.replace("__PLOTLY_TAG__", plotly_tag)
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(html, encoding="utf-8")

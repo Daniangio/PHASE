@@ -11,7 +11,8 @@ else
   DEFAULT_ENV="${ROOT_DIR}/.venv-potts-fit"
 fi
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
-DEFAULT_RESULTS="${ROOT_DIR}/results/potts_delta_fit_${TIMESTAMP}"
+DEFAULT_RESULTS=""
+DEFAULT_ROOT="${PHASE_DATA_ROOT:-${ROOT_DIR}/data}"
 
 prompt() {
   local label="$1"
@@ -42,6 +43,27 @@ trim() {
   printf "%s" "$1" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'
 }
 
+OFFLINE_ROOT=""
+OFFLINE_PROJECT_ID=""
+OFFLINE_SYSTEM_ID=""
+CLUSTER_ID=""
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --root)
+      OFFLINE_ROOT="$2"; shift 2 ;;
+    --project-id)
+      OFFLINE_PROJECT_ID="$2"; shift 2 ;;
+    --system-id)
+      OFFLINE_SYSTEM_ID="$2"; shift 2 ;;
+    --cluster-id)
+      CLUSTER_ID="$2"; shift 2 ;;
+    *)
+      echo "Unknown argument: $1" >&2
+      exit 1 ;;
+  esac
+done
+
 if [ -n "${VIRTUAL_ENV:-}" ] && [ -x "${VIRTUAL_ENV}/bin/python" ]; then
   VENV_DIR="${VIRTUAL_ENV}"
   echo "Using active virtual environment at: ${VENV_DIR}"
@@ -57,15 +79,42 @@ fi
 
 PYTHON_BIN="${VENV_DIR}/bin/python"
 
-offline_prompt_root "${ROOT_DIR}/data"
-offline_select_project
-offline_select_system
+if [ -z "$OFFLINE_ROOT" ]; then
+  offline_prompt_root "${DEFAULT_ROOT}"
+else
+  OFFLINE_ROOT="$(trim "$OFFLINE_ROOT")"
+  export PHASE_DATA_ROOT="$OFFLINE_ROOT"
+fi
+
+if [ -z "$OFFLINE_PROJECT_ID" ]; then
+  offline_select_project
+fi
+
+if [ -z "$OFFLINE_SYSTEM_ID" ]; then
+  offline_select_system
+fi
 MODEL_ROW="$(offline_select_model)"
 BASE_MODEL="$(printf "%s" "$MODEL_ROW" | awk -F'|' '{print $3}')"
-CLUSTER_ID="$(printf "%s" "$MODEL_ROW" | awk -F'|' '{print $4}')"
+if [ -z "$CLUSTER_ID" ]; then
+  CLUSTER_ID="$(printf "%s" "$MODEL_ROW" | awk -F'|' '{print $4}')"
+fi
 if [ -z "$BASE_MODEL" ] || [ ! -f "$BASE_MODEL" ]; then
   echo "Base model not found: $BASE_MODEL"
   exit 1
+fi
+
+DEFAULT_RESULTS="${OFFLINE_ROOT}/projects/${OFFLINE_PROJECT_ID}/systems/${OFFLINE_SYSTEM_ID}/clusters/${CLUSTER_ID}/potts_models/delta_fit_${TIMESTAMP}"
+
+RESUME_MODEL=""
+MODEL_LINES="$(python -m phase.scripts.offline_browser --root "$OFFLINE_ROOT" list-models --project-id "$OFFLINE_PROJECT_ID" --system-id "$OFFLINE_SYSTEM_ID" || true)"
+MODEL_LINES="$(printf "%s\n" "$MODEL_LINES" | awk -F'|' -v cid="$CLUSTER_ID" '$4==cid')"
+if [ -n "$MODEL_LINES" ] && prompt_bool "Resume from existing delta model? (y/N)" "N"; then
+  RESUME_ROW="$(offline_choose_one "Available Potts models:" "$MODEL_LINES")"
+  RESUME_MODEL="$(printf "%s" "$RESUME_ROW" | awk -F'|' '{print $3}')"
+  if [ -z "$RESUME_MODEL" ]; then
+    echo "No resume model selected."
+    exit 1
+  fi
 fi
 
 RESULTS_DIR="$(prompt "Results directory" "${DEFAULT_RESULTS}")"
@@ -94,16 +143,16 @@ fi
 
 EPOCHS="$(prompt "Epochs" "200")"
 LR="$(prompt "Learning rate" "1e-3")"
-LR_MIN="$(prompt "Learning rate min" "1e-3")"
+LR_MIN="$(prompt "Learning rate min" "1e-5")"
 LR_SCHEDULE="$(prompt "Learning rate schedule (cosine/none)" "cosine")"
-BATCH_SIZE="$(prompt "Batch size" "512")"
+BATCH_SIZE="$(prompt "Batch size" "1024")"
 SEED="$(prompt "Random seed" "0")"
 DEVICE="$(prompt "Device (auto/cuda/cpu)" "auto")"
 DEVICE="$(printf "%s" "$DEVICE" | tr '[:upper:]' '[:lower:]')"
 
-DELTA_L2="$(prompt "Delta L2 weight" "0.0")"
-DELTA_GROUP_H="$(prompt "Delta group sparsity (fields)" "0.0")"
-DELTA_GROUP_J="$(prompt "Delta group sparsity (couplings)" "0.0")"
+DELTA_L2="$(prompt "Delta L2 weight" "1e-5")"
+DELTA_GROUP_H="$(prompt "Delta group sparsity (fields)" "1e-3")"
+DELTA_GROUP_J="$(prompt "Delta group sparsity (couplings)" "1e-3")"
 
 CMD=(
   "$PYTHON_BIN" -m phase.scripts.potts_delta_fit
@@ -125,6 +174,10 @@ CMD=(
 
 if [ -n "$MODEL_NAME" ]; then
   CMD+=(--model-name "$MODEL_NAME")
+fi
+
+if [ -n "$RESUME_MODEL" ]; then
+  CMD+=(--resume-model "$RESUME_MODEL")
 fi
 
 if [ "$DEVICE" != "auto" ] && [ -n "$DEVICE" ]; then

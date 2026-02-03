@@ -20,6 +20,16 @@ This repository contains:
   - Static reporters (information imbalance, per-residue signals).
   - Potts sampling + replica exchange / SA-QUBO.
 
+## Metadata Layout
+
+Metadata is stored alongside the artifact it describes (system, clusters, models, samples).
+Schemas are documented in `docs/metadata/`:
+- `docs/metadata/system.md`
+- `docs/metadata/descriptors.md`
+- `docs/metadata/cluster.md`
+- `docs/metadata/potts_model.md`
+- `docs/metadata/sample.md`
+
 ## Typical Workflow (Web Server)
 
 1. **Create a project**
@@ -53,6 +63,17 @@ Services:
 - Frontend: `http://localhost:3000`
 
 Data is stored under the Docker volume mapped to `PHASE_DATA_ROOT` (default in compose: `/data/phase`).
+
+## Shared Data Root
+
+If you want to run local CLI scripts against the same datasets used by the webserver, point `PHASE_DATA_ROOT` to the host path that is mounted into Docker (default: `/scratch/docker/phase-data`). The compose file runs containers as your UID/GID, so both Docker and local scripts can read/write the same files.
+
+```bash
+export PHASE_DATA_ROOT=/scratch/docker/phase-data
+export UID="$(id -u)"
+export GID="$(id -g)"
+docker compose up --build
+```
 
 ### Multiple Workers
 

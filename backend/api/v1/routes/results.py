@@ -879,12 +879,14 @@ async def upload_simulation_result(
 
     model_path = None
     model_id = None
+    model_name = None
     if potts_model_id:
         models = entry.get("potts_models") or []
         match = next((m for m in models if m.get("model_id") == potts_model_id), None)
         if not match:
             raise HTTPException(status_code=404, detail=f"Potts model '{potts_model_id}' not found for this cluster.")
         model_id = potts_model_id
+        model_name = match.get("name") or model_name
         model_rel = match.get("path")
         if not model_rel:
             raise HTTPException(status_code=404, detail="Selected Potts model is missing a stored path.")
@@ -917,6 +919,7 @@ async def upload_simulation_result(
             }
         )
         entry["potts_models"] = models
+        model_name = Path(model_filename).stem
     else:
         raise HTTPException(status_code=400, detail="Select an existing Potts model to attach to this sampling run.")
     sample_paths = {"summary_npz": str(summary_path.relative_to(system_dir))}
@@ -935,8 +938,13 @@ async def upload_simulation_result(
             "type": "potts_sampling",
             "method": method_label,
             "model_id": model_id,
+            "model_ids": [model_id] if model_id else None,
+            "model_names": [model_name] if model_name else None,
             "created_at": datetime.utcnow().isoformat(),
+            "path": sample_paths.get("summary_npz"),
             "paths": sample_paths,
+            "params": {"sampling_method": method_label, "source": "upload"},
+            "summary": {"sampling_method": method_label, "source": "upload"},
         }
     )
     entry["samples"] = samples

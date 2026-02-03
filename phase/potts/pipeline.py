@@ -1044,6 +1044,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--results-dir", required=True, help="Directory where summaries/plots are stored.")
     ap.add_argument("--plot-only", action="store_true", help="Skip sampling; load run_summary.npz from results-dir (or --summary-file) and emit plots.")
     ap.add_argument("--summary-file", default="", help="Optional explicit path to a summary npz (defaults to results-dir/run_summary.npz).")
+    ap.add_argument("--no-plots", action="store_true", help="Skip HTML plot generation during sampling runs.")
     ap.add_argument("--unassigned-policy", default="drop_frames", choices=["drop_frames", "treat_as_state", "error"])
     ap.add_argument("--fit-only", action="store_true", help="Fit and save the Potts model, then exit.")
     ap.add_argument(
@@ -1053,6 +1054,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Optional pre-fit Potts model npz to skip fitting. Repeat or pass comma-separated paths to combine models.",
     )
     ap.add_argument("--model-out", default="", help="Where to save potts_model.npz (defaults to results-dir/potts_model.npz).")
+    ap.add_argument("--save-model", action="store_true", help="Save a copy of the Potts model into results-dir even if --model-npz is provided.")
+    ap.add_argument("--no-save-model", action="store_true", help="Do not save potts_model.npz (sampling-only runs).")
     ap.add_argument(
         "--pdbs",
         default="",
@@ -1295,8 +1298,9 @@ def run_pipeline(
     default_summary_path = Path(args.summary_file) if args.summary_file else results_dir / "run_summary.npz"
     default_plot_path = results_dir / "marginals.html"
     beta_scan_plot_path = None
-    model_out_path = Path(args.model_out) if args.model_out else results_dir / "potts_model.npz"
+    model_out_path = Path(args.model_out) if args.model_out else None
     model_npz_list = _normalize_model_npz_list(args.model_npz)
+    no_plots = bool(getattr(args, "no_plots", False))
 
     if args.plot_only:
         if not default_summary_path.exists():
@@ -1354,6 +1358,17 @@ def run_pipeline(
         raise ValueError("Use --model-npz without PLM init/resume flags.")
     if plm_init == "model" and not plm_init_model:
         raise ValueError("--plm-init=model requires --plm-init-model (or --plm-resume-model).")
+
+    no_save_model = bool(getattr(args, "no_save_model", False))
+    if no_save_model and args.fit_only:
+        raise ValueError("--no-save-model cannot be used with --fit-only.")
+
+    should_save_model = (
+        (not no_save_model)
+        and (bool(args.model_out) or bool(args.save_model) or bool(args.fit_only) or (not model_npz_list))
+    )
+    if should_save_model and model_out_path is None:
+        model_out_path = results_dir / "potts_model.npz"
 
     ds = load_npz(
         args.npz,
@@ -1587,12 +1602,13 @@ def run_pipeline(
         metadata["plm_last_loss"] = float(last_plm_loss)
     if last_plm_val_loss is not None:
         metadata["plm_last_val_loss"] = float(last_plm_val_loss)
-    save_potts_model(
-        model,
-        model_out_path,
-        metadata=metadata,
-    )
-    report("Potts model fit complete", 40)
+    if model_out_path is not None:
+        save_potts_model(
+            model,
+            model_out_path,
+            metadata=metadata,
+        )
+        report("Potts model fit complete", 40)
 
     if args.fit_only:
         meta_path = results_dir / "potts_model_metadata.json"
@@ -2241,20 +2257,24 @@ def run_pipeline(
                 xlik_score_roc_counts=cross_likelihood["score_roc_counts"] if cross_likelihood else None,
             )
             print(f"[results] summary saved to {summary_path}")
-            out_path = plot_marginal_summary_from_npz(
-                summary_path=summary_path,
-                out_path=default_plot_path,
-                annotate=args.annotate_plots,
-            )
-            report_path = plot_sampling_report_from_npz(
-                summary_path=summary_path,
-                out_path=results_dir / "sampling_report.html",
-            )
-            cross_likelihood_report_path = plot_cross_likelihood_report_from_npz(
-                summary_path=summary_path,
-                out_path=results_dir / "cross_likelihood_report.html",
-            )
-            print(f"[plot] saved marginal comparison to {out_path}")
+            out_path = None
+            report_path = None
+            cross_likelihood_report_path = None
+            if not no_plots:
+                out_path = plot_marginal_summary_from_npz(
+                    summary_path=summary_path,
+                    out_path=default_plot_path,
+                    annotate=args.annotate_plots,
+                )
+                report_path = plot_sampling_report_from_npz(
+                    summary_path=summary_path,
+                    out_path=results_dir / "sampling_report.html",
+                )
+                cross_likelihood_report_path = plot_cross_likelihood_report_from_npz(
+                    summary_path=summary_path,
+                    out_path=results_dir / "cross_likelihood_report.html",
+                )
+                print(f"[plot] saved marginal comparison to {out_path}")
             print("[done]")
             return {
                 "summary_path": summary_path,
@@ -2339,15 +2359,16 @@ def run_pipeline(
         beta_eff_distances_result = distances_by_schedule[0] if distances_by_schedule else []
         beta_eff_value = beta_eff_by_schedule[0] if beta_eff_by_schedule else None
 
-        from phase.potts.plotting import plot_beta_scan_curve
-        outp = plot_beta_scan_curve(
-            betas=grid,
-            distances=distances_by_schedule,
-            labels=sa_schedule_labels,
-            out_path=beta_eff_plot_path,
-        )
-        print(f"[beta_eff] saved D(beta) plot to {outp}")
-        beta_scan_plot_path = outp
+        if not no_plots:
+            from phase.potts.plotting import plot_beta_scan_curve
+            outp = plot_beta_scan_curve(
+                betas=grid,
+                distances=distances_by_schedule,
+                labels=sa_schedule_labels,
+                out_path=beta_eff_plot_path,
+            )
+            print(f"[beta_eff] saved D(beta) plot to {outp}")
+            beta_scan_plot_path = outp
 
     summary_path = _save_run_summary(
         results_dir,
@@ -2441,20 +2462,24 @@ def run_pipeline(
 
     # --- Plot marginals dashboard ---
     report("Rendering plots", 95)
-    out_path = plot_marginal_summary_from_npz(
-        summary_path=summary_path,
-        out_path=default_plot_path,
-        annotate=args.annotate_plots,
-    )
-    report_path = plot_sampling_report_from_npz(
-        summary_path=summary_path,
-        out_path=results_dir / "sampling_report.html",
-    )
-    cross_likelihood_report_path = plot_cross_likelihood_report_from_npz(
-        summary_path=summary_path,
-        out_path=results_dir / "cross_likelihood_report.html",
-    )
-    print(f"[plot] saved marginal comparison to {out_path}")
+    out_path = None
+    report_path = None
+    cross_likelihood_report_path = None
+    if not no_plots:
+        out_path = plot_marginal_summary_from_npz(
+            summary_path=summary_path,
+            out_path=default_plot_path,
+            annotate=args.annotate_plots,
+        )
+        report_path = plot_sampling_report_from_npz(
+            summary_path=summary_path,
+            out_path=results_dir / "sampling_report.html",
+        )
+        cross_likelihood_report_path = plot_cross_likelihood_report_from_npz(
+            summary_path=summary_path,
+            out_path=results_dir / "cross_likelihood_report.html",
+        )
+        print(f"[plot] saved marginal comparison to {out_path}")
 
     print("[done]")
     report("Done", 100)

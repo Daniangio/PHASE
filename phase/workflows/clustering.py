@@ -181,7 +181,16 @@ def _predict_cluster_adp(
     )
     labels_assigned = result[0] if isinstance(result, tuple) else result
     labels_halo = result[1] if isinstance(result, tuple) and len(result) > 1 else labels_assigned
-    return np.asarray(labels_assigned, dtype=np.int32), np.asarray(labels_halo, dtype=np.int32)
+
+    def _coerce_labels(labels: np.ndarray) -> np.ndarray:
+        arr = np.asarray(labels, dtype=np.int32)
+        if arr.ndim > 1:
+            if arr.shape[1] == 0:
+                return arr.reshape(-1)
+            return arr[:, 0]
+        return arr
+
+    return _coerce_labels(labels_assigned), _coerce_labels(labels_halo)
 
 
 def _angles_to_periodic(samples: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -239,6 +248,13 @@ def _cluster_with_subsample(
     subsample_indices: Optional[np.ndarray] = None,
 ) -> Tuple[np.ndarray, np.ndarray, int, Dict[str, Any], int, Data]:
     """Fit ADP on a subsample if requested, then predict labels on all frames."""
+    def _coerce_1d(labels: np.ndarray) -> np.ndarray:
+        arr = np.asarray(labels, dtype=np.int32)
+        if arr.ndim > 1:
+            if arr.shape[1] == 0:
+                return arr.reshape(-1)
+            return arr[:, 0]
+        return arr
     n_frames = samples.shape[0]
     if not max_cluster_frames or max_cluster_frames <= 0 or n_frames <= max_cluster_frames:
         labels_halo, labels_assigned, k_final, diag, dp_data = _cluster_residue_samples(
@@ -246,6 +262,8 @@ def _cluster_with_subsample(
             density_maxk=density_maxk,
             density_z=density_z,
         )
+        labels_halo = _coerce_1d(labels_halo)
+        labels_assigned = _coerce_1d(labels_assigned)
         diag["subsampled"] = False
         diag["subsample_size"] = int(n_frames)
         diag["total_frames"] = int(n_frames)
@@ -268,6 +286,8 @@ def _cluster_with_subsample(
         samples,
         density_maxk=density_maxk,
     )
+    labels_halo = _coerce_1d(labels_halo)
+    labels_assigned = _coerce_1d(labels_assigned)
     diag["subsampled"] = True
     diag["subsample_size"] = int(subsample_indices.size)
     diag["total_frames"] = int(n_frames)
@@ -565,9 +585,11 @@ def assign_cluster_labels_to_states(
                 "sample_id": sample_id,
                 "name": f"MD {getattr(state, 'name', state_id)}",
                 "type": "md_eval",
+                "method": "md_eval",
                 "state_id": state_id,
                 "path": str(out_path.relative_to(cluster_path.parent)),
                 "created_at": datetime.utcnow().isoformat(),
+                "summary": {"state_id": state_id},
             }
         )
 
@@ -633,9 +655,11 @@ def assign_cluster_labels_to_states(
                 "sample_id": sample_id,
                 "name": f"MD {meta_label or meta_id}",
                 "type": "md_eval",
+                "method": "md_eval",
                 "metastable_id": str(meta_id),
                 "path": str(out_path.relative_to(cluster_path.parent)),
                 "created_at": datetime.utcnow().isoformat(),
+                "summary": {"metastable_id": str(meta_id)},
             }
         )
 
@@ -780,9 +804,11 @@ def evaluate_state_with_models(
         "sample_id": sample_id,
         "name": f"MD {state.name or state_id}",
         "type": "md_eval",
+        "method": "md_eval",
         "state_id": state_id,
         "path": rel,
         "created_at": datetime.utcnow().isoformat(),
+        "summary": {"state_id": state_id},
     }
 
 

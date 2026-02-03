@@ -11,6 +11,7 @@ else
   DEFAULT_ENV="${ROOT_DIR}/.venv-potts-fit"
 fi
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
+DEFAULT_ROOT="${PHASE_DATA_ROOT:-${ROOT_DIR}/data}"
 
 prompt() {
   local label="$1"
@@ -77,7 +78,7 @@ fi
 PYTHON_BIN="${VENV_DIR}/bin/python"
 
 if [ -z "$OFFLINE_ROOT" ]; then
-  offline_prompt_root "${ROOT_DIR}/data"
+  offline_prompt_root "${DEFAULT_ROOT}"
 else
   OFFLINE_ROOT="$(trim "$OFFLINE_ROOT")"
   export PHASE_DATA_ROOT="$OFFLINE_ROOT"
@@ -107,13 +108,17 @@ RESULTS_DIR="${SYSTEM_DIR}/tmp/potts_fit_${TIMESTAMP}"
 
 MODEL_NAME=""
 
-USE_EXISTING_MODEL="false"
+RESUME_EXISTING="false"
 SELECTED_MODEL_PATH=""
 SELECTED_MODEL_NAME=""
 RESUME_IN_PLACE="false"
 MODEL_LINES="$(python -m phase.scripts.offline_browser --root "$OFFLINE_ROOT" list-models --project-id "$OFFLINE_PROJECT_ID" --system-id "$OFFLINE_SYSTEM_ID" || true)"
 MODEL_LINES="$(printf "%s\n" "$MODEL_LINES" | awk -F'|' -v cid="$CLUSTER_ID" '$4==cid')"
-if [ -n "$MODEL_LINES" ] && prompt_bool "Start from existing model? (y/N)" "N"; then
+if prompt_bool "Resume existing model fit? (y/N)" "N"; then
+  if [ -z "$MODEL_LINES" ]; then
+    echo "No existing models found for this cluster."
+    exit 1
+  fi
   MODEL_ROW="$(offline_choose_one "Available Potts models:" "$MODEL_LINES")"
   SELECTED_MODEL_PATH="$(printf "%s" "$MODEL_ROW" | awk -F'|' '{print $3}')"
   SELECTED_MODEL_NAME="$(printf "%s" "$MODEL_ROW" | awk -F'|' '{print $2}')"
@@ -121,15 +126,11 @@ if [ -n "$MODEL_LINES" ] && prompt_bool "Start from existing model? (y/N)" "N"; 
     echo "No model selected."
     exit 1
   fi
-  USE_EXISTING_MODEL="true"
+  RESUME_EXISTING="true"
 fi
 
-if [ "$USE_EXISTING_MODEL" = "true" ]; then
-  FIT_METHOD="plm"
-else
-  FIT_METHOD="$(prompt "Fit method (pmi/plm/pmi+plm)" "pmi+plm")"
-fi
-if [ "$USE_EXISTING_MODEL" = "false" ]; then
+FIT_METHOD="plm"
+if [ "$RESUME_EXISTING" = "false" ]; then
   MODEL_NAME="$(prompt "Model name" "")"
 fi
 
@@ -137,7 +138,7 @@ CONTACT_ALL="false"
 CONTACT_PDBS=""
 CONTACT_MODE="CA"
 CONTACT_CUTOFF="10.0"
-if [ "$USE_EXISTING_MODEL" = "false" ]; then
+if [ "$RESUME_EXISTING" = "false" ]; then
   if prompt_bool "Use all-vs-all edges? (y/N)" "N"; then
     CONTACT_ALL="true"
   else
@@ -180,29 +181,14 @@ if [ "$FIT_METHOD" != "pmi" ]; then
   PLM_L2="$(prompt "PLM L2" "1e-5")"
   PLM_BATCH_SIZE="$(prompt "PLM batch size" "512")"
   PLM_PROGRESS_EVERY="$(prompt "PLM progress every" "10")"
-  if [ "$USE_EXISTING_MODEL" = "true" ]; then
-    MODE_CHOICE="$(prompt "Use selected model to (resume/init)" "resume")"
-    MODE_CHOICE="$(printf "%s" "$MODE_CHOICE" | tr '[:upper:]' '[:lower:]')"
-    if [ "$MODE_CHOICE" = "init" ]; then
-      if [ -z "$MODEL_NAME" ]; then
-        MODEL_NAME="$(prompt "Model name" "")"
-      fi
-      PLM_INIT="model"
-      PLM_INIT_MODEL="$SELECTED_MODEL_PATH"
-    else
-      PLM_INIT="model"
-      PLM_RESUME_MODEL="$SELECTED_MODEL_PATH"
-      RESUME_IN_PLACE="true"
-    fi
+  if [ "$RESUME_EXISTING" = "true" ]; then
+    PLM_INIT="model"
+    PLM_RESUME_MODEL="$SELECTED_MODEL_PATH"
+    RESUME_IN_PLACE="true"
   else
-    PLM_RESUME_MODEL="$(prompt "PLM resume model path (blank to skip)" "")"
-    if [ -z "$PLM_RESUME_MODEL" ]; then
-      PLM_INIT="$(prompt "PLM init (pmi/zero/model)" "pmi")"
-      if [ "$PLM_INIT" = "model" ]; then
-        PLM_INIT_MODEL="$(prompt "PLM init model path" "")"
-      fi
-    else
-      PLM_INIT="model"
+    PLM_INIT="$(prompt "PLM init (pmi/zero/model)" "pmi")"
+    if [ "$PLM_INIT" = "model" ]; then
+      PLM_INIT_MODEL="$(prompt "PLM init model path" "")"
     fi
   fi
   PLM_VAL_FRAC="$(prompt "PLM validation fraction" "0")"
@@ -225,7 +211,7 @@ if [ "$RESUME_IN_PLACE" = "true" ]; then
   CMD+=(--model-out "$SELECTED_MODEL_PATH")
 fi
 
-if [ "$USE_EXISTING_MODEL" = "false" ]; then
+if [ "$RESUME_EXISTING" = "false" ]; then
   if [ "$CONTACT_ALL" = "true" ]; then
     CMD+=(--contact-all-vs-all)
   else

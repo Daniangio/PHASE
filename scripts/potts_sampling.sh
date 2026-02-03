@@ -11,7 +11,12 @@ else
   DEFAULT_ENV="${ROOT_DIR}/.venv-potts-fit"
 fi
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
-DEFAULT_RESULTS="${ROOT_DIR}/results/potts_sampling_${TIMESTAMP}"
+DEFAULT_ROOT="${PHASE_DATA_ROOT:-${ROOT_DIR}/data}"
+SAMPLE_ID="$(python - <<'PY'
+import uuid
+print(uuid.uuid4())
+PY
+)"
 
 prompt() {
   local label="$1"
@@ -92,7 +97,7 @@ fi
 PYTHON_BIN="${VENV_DIR}/bin/python"
 
 if [ -z "$OFFLINE_ROOT" ]; then
-  offline_prompt_root "${ROOT_DIR}/data"
+  offline_prompt_root "${DEFAULT_ROOT}"
 else
   OFFLINE_ROOT="$(trim "$OFFLINE_ROOT")"
   export PHASE_DATA_ROOT="$OFFLINE_ROOT"
@@ -148,10 +153,13 @@ root = Path("${OFFLINE_ROOT}") / "projects"
 store = ProjectStore(base_dir=root)
 dirs = store.ensure_cluster_directories("${OFFLINE_PROJECT_ID}", "${OFFLINE_SYSTEM_ID}", "${CLUSTER_ID}")
 cluster_dir = dirs["cluster_dir"]
-out = cluster_dir / "samples" / "sampling_${TIMESTAMP}"
+out = cluster_dir / "samples" / "${SAMPLE_ID}"
+out.mkdir(parents=True, exist_ok=True)
 print(out)
 PY
 )"
+
+SAMPLE_NAME="$(prompt "Sample name" "Sampling ${TIMESTAMP}")"
 
 SAMPLING_METHOD="$(prompt "Sampling method (gibbs/sa)" "gibbs")"
 SAMPLING_METHOD="$(printf "%s" "$SAMPLING_METHOD" | tr '[:upper:]' '[:lower:]')"
@@ -227,12 +235,18 @@ fi
 
 CMD=(
   "$PYTHON_BIN" -m phase.scripts.potts_sample
+  --project-id "$OFFLINE_PROJECT_ID"
+  --system-id "$OFFLINE_SYSTEM_ID"
+  --cluster-id "$CLUSTER_ID"
+  --sample-id "$SAMPLE_ID"
+  --sample-name "$SAMPLE_NAME"
   --npz "$NPZ_PATH"
   --results-dir "$RESULTS_DIR"
   --sampling-method "$SAMPLING_METHOD"
   --gibbs-method "$GIBBS_METHOD"
   --beta "$BETA"
   --seed "$SEED"
+  --no-plots
 )
 for model_path in "${MODEL_PATHS[@]}"; do
   CMD+=(--model-npz "$model_path")
@@ -285,4 +299,4 @@ OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1
 
 echo "Done. Sampling outputs in: ${RESULTS_DIR}"
 echo "Summary: ${RESULTS_DIR}/run_summary.npz"
-echo "Model copy: ${RESULTS_DIR}/potts_model.npz"
+echo "Metadata: ${RESULTS_DIR}/run_metadata.json"

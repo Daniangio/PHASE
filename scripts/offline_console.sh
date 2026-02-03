@@ -12,6 +12,7 @@ else
   DEFAULT_ENV="${ROOT_DIR}/.venv-potts-fit"
 fi
 USE_SLUG_IDS="false"
+DEFAULT_ROOT="${PHASE_DATA_ROOT:-${ROOT_DIR}/data}"
 
 ensure_env() {
   if [ -n "${VIRTUAL_ENV:-}" ] && [ -x "${VIRTUAL_ENV}/bin/python" ]; then
@@ -220,7 +221,7 @@ cluster_menu() {
     echo "System: ${OFFLINE_SYSTEM_NAME:-$OFFLINE_SYSTEM_ID} (${OFFLINE_SYSTEM_ID})"
     echo "Cluster: ${OFFLINE_CLUSTER_NAME:-$OFFLINE_CLUSTER_ID} (${OFFLINE_CLUSTER_ID})"
     echo ""
-    ACTION_LINES=$'list-models|List Potts models\nlist-samples|List sampling runs\nfit|Fit Potts model\nsample|Run sampling\nevaluate|Evaluate state against cluster\nback|Back to systems'
+    ACTION_LINES=$'list-models|List Potts models\nlist-samples|List sampling runs\nfit|Fit Potts model\nfit-delta|Fit delta Potts model\nsample|Run sampling\nevaluate|Evaluate state against cluster\nback|Back to systems'
     ACTION_ROW="$(offline_choose_one "Cluster actions:" "$ACTION_LINES")"
     ACTION="$(printf "%s" "$ACTION_ROW" | awk -F'|' '{print $1}')"
     case "$ACTION" in
@@ -248,6 +249,14 @@ cluster_menu() {
           --system-id "$OFFLINE_SYSTEM_ID" \
           --cluster-id "$OFFLINE_CLUSTER_ID" \
           --npz "$OFFLINE_CLUSTER_PATH"
+        ;;
+      fit-delta)
+        ensure_env || return 0
+        "${ROOT_DIR}/scripts/potts_delta_fit.sh" \
+          --root "$OFFLINE_ROOT" \
+          --project-id "$OFFLINE_PROJECT_ID" \
+          --system-id "$OFFLINE_SYSTEM_ID" \
+          --cluster-id "$OFFLINE_CLUSTER_ID"
         ;;
       sample)
         ensure_env || return 0
@@ -360,6 +369,6 @@ state_menu() {
   done
 }
 
-offline_prompt_root "${ROOT_DIR}/data"
+  offline_prompt_root "${DEFAULT_ROOT}"
 USE_SLUG_IDS="true"
 project_menu

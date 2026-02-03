@@ -627,6 +627,7 @@ def run_simulation_job(
                     missing_paths.append(rel)
             if missing_paths:
                 raise FileNotFoundError(f"Potts model file(s) missing on disk: {', '.join(missing_paths)}")
+            args_list.append("--no-save-model")
         model_path = model_paths[0] if model_paths else None
 
         contact_mode = sim_params.get("contact_atom_mode") or sim_params.get("contact_mode") or "CA"
@@ -845,9 +846,46 @@ def run_simulation_job(
                 except Exception:
                     sample_paths[key] = str(dest)
 
+        primary_path = sample_paths.get("summary_npz") or sample_paths.get("metadata_json")
         sample_label = sim_params.get("sample_name")
         if isinstance(sample_label, str):
             sample_label = sample_label.strip() or None
+
+        summary = {}
+        if meta_path and meta_path.exists():
+            try:
+                meta_payload = json.loads(meta_path.read_text())
+            except Exception:
+                meta_payload = {}
+            args_payload = meta_payload.get("args") if isinstance(meta_payload, dict) else None
+            if isinstance(args_payload, dict):
+                summary = {
+                    "sampling_method": args_payload.get("sampling_method"),
+                    "gibbs_method": args_payload.get("gibbs_method"),
+                    "beta": args_payload.get("beta"),
+                    "gibbs_samples": args_payload.get("gibbs_samples"),
+                    "gibbs_burnin": args_payload.get("gibbs_burnin"),
+                    "gibbs_thin": args_payload.get("gibbs_thin"),
+                    "gibbs_chains": args_payload.get("gibbs_chains"),
+                    "rex_rounds": args_payload.get("rex_rounds"),
+                    "rex_burnin_rounds": args_payload.get("rex_burnin_rounds"),
+                    "rex_thin_rounds": args_payload.get("rex_thin_rounds"),
+                    "rex_n_replicas": args_payload.get("rex_n_replicas"),
+                    "rex_beta_min": args_payload.get("rex_beta_min"),
+                    "rex_beta_max": args_payload.get("rex_beta_max"),
+                    "rex_spacing": args_payload.get("rex_spacing"),
+                    "rex_betas": args_payload.get("rex_betas"),
+                    "sa_reads": args_payload.get("sa_reads"),
+                    "sa_sweeps": args_payload.get("sa_sweeps"),
+                    "sa_beta_hot": args_payload.get("sa_beta_hot"),
+                    "sa_beta_cold": args_payload.get("sa_beta_cold"),
+                    "sa_beta_schedule": args_payload.get("sa_beta_schedule"),
+                    "beta_eff": meta_payload.get("beta_eff"),
+                    "beta_eff_by_schedule": meta_payload.get("beta_eff_by_schedule"),
+                }
+            if isinstance(meta_payload, dict) and meta_payload.get("beta_eff") is not None:
+                summary["beta_eff"] = meta_payload.get("beta_eff")
+
         sample_entry = {
             "sample_id": sample_id,
             "name": sample_label or f"Sampling {datetime.utcnow().strftime('%Y%m%d %H:%M')}",
@@ -855,8 +893,12 @@ def run_simulation_job(
             "method": "sa" if sampling_method == "sa" else "gibbs",
             "model_id": model_id,
             "model_ids": model_ids or None,
+            "model_names": model_names or None,
             "created_at": datetime.utcnow().isoformat(),
+            "path": primary_path,
             "paths": sample_paths,
+            "params": sim_params,
+            "summary": summary,
         }
         if isinstance(entry, dict):
             samples = entry.get("samples")

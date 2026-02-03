@@ -21,6 +21,9 @@ import shutil
 DATA_ROOT = Path(os.getenv("PHASE_DATA_ROOT", "/app/data"))
 PROJECTS_DIR = DATA_ROOT / "projects"
 SelectionInput = Union[Dict[str, str], List[str]]
+CLUSTER_METADATA_FILENAME = "cluster_metadata.json"
+MODEL_METADATA_FILENAME = "model_metadata.json"
+SAMPLE_METADATA_FILENAME = "sample_metadata.json"
 
 
 def _read_json(path: Path) -> Dict[str, Any]:
@@ -177,7 +180,9 @@ class ProjectStore:
             if not meta_path.exists():
                 continue
             payload = _read_json(meta_path)
-            systems.append(self._decode_system(payload))
+            system_meta = self._decode_system(payload)
+            self._hydrate_system(system_meta)
+            systems.append(system_meta)
         return systems
 
     def get_system(self, project_id: str, system_id: str) -> SystemMetadata:
@@ -185,7 +190,9 @@ class ProjectStore:
         if not meta_path.exists():
             raise FileNotFoundError(f"System '{system_id}' not found in project '{project_id}'.")
         payload = _read_json(meta_path)
-        return self._decode_system(payload)
+        system_meta = self._decode_system(payload)
+        self._hydrate_system(system_meta)
+        return system_meta
 
     def _decode_system(self, payload: Dict[str, Any]) -> SystemMetadata:
         decoded_states: Dict[str, DescriptorState] = {}
@@ -212,6 +219,8 @@ class ProjectStore:
             state_dict["state_id"] = state_id
             encoded_states[state_id] = state_dict
         payload["states"] = encoded_states
+        for key in ("descriptor_keys", "analysis_states", "metastable_clusters"):
+            payload.pop(key, None)
         return payload
 
     def create_system(
@@ -246,6 +255,7 @@ class ProjectStore:
         return metadata
 
     def save_system(self, metadata: SystemMetadata) -> None:
+        self._sync_cluster_metadata(metadata)
         meta_path = self._system_meta_path(metadata.project_id, metadata.system_id)
         _write_json(meta_path, self._encode_system(metadata))
 
@@ -304,6 +314,220 @@ class ProjectStore:
             "potts_models_dir": potts_models_dir,
             "samples_dir": samples_dir,
         }
+
+    def _cluster_dir(self, project_id: str, system_id: str, cluster_id: str) -> Path:
+        return self._system_dir(project_id, system_id) / "clusters" / cluster_id
+
+    def _cluster_metadata_path(self, project_id: str, system_id: str, cluster_id: str) -> Path:
+        return self._cluster_dir(project_id, system_id, cluster_id) / CLUSTER_METADATA_FILENAME
+
+    def _model_metadata_path(self, project_id: str, system_id: str, cluster_id: str, model_id: str) -> Path:
+        return self._cluster_dir(project_id, system_id, cluster_id) / "potts_models" / model_id / MODEL_METADATA_FILENAME
+
+    def _sample_metadata_path(self, project_id: str, system_id: str, cluster_id: str, sample_id: str) -> Path:
+        return self._cluster_dir(project_id, system_id, cluster_id) / "samples" / sample_id / SAMPLE_METADATA_FILENAME
+
+    def list_cluster_entries(self, project_id: str, system_id: str) -> List[Dict[str, Any]]:
+        system_dir = self._system_dir(project_id, system_id)
+        clusters_dir = system_dir / "clusters"
+        if not clusters_dir.exists():
+            return []
+        entries: List[Dict[str, Any]] = []
+        for cluster_dir in sorted(p for p in clusters_dir.iterdir() if p.is_dir()):
+            meta_path = cluster_dir / CLUSTER_METADATA_FILENAME
+            if not meta_path.exists():
+                continue
+            try:
+                meta = _read_json(meta_path)
+            except Exception:
+                continue
+            cluster_id = meta.get("cluster_id") or cluster_dir.name
+            meta["cluster_id"] = cluster_id
+            if not meta.get("path"):
+                cluster_npz = cluster_dir / "cluster.npz"
+                if cluster_npz.exists():
+                    try:
+                        meta["path"] = str(cluster_npz.relative_to(system_dir))
+                    except Exception:
+                        meta["path"] = str(cluster_npz)
+            meta["potts_models"] = self.list_potts_models(project_id, system_id, cluster_id)
+            meta["samples"] = self.list_samples(project_id, system_id, cluster_id)
+            entries.append(meta)
+        return entries
+
+    def get_cluster_entry(self, project_id: str, system_id: str, cluster_id: str) -> Dict[str, Any]:
+        entries = self.list_cluster_entries(project_id, system_id)
+        entry = next((c for c in entries if c.get("cluster_id") == cluster_id), None)
+        if not entry:
+            raise FileNotFoundError(f"Cluster '{cluster_id}' not found.")
+        return entry
+
+    def list_potts_models(self, project_id: str, system_id: str, cluster_id: str) -> List[Dict[str, Any]]:
+        system_dir = self._system_dir(project_id, system_id)
+        models_dir = self._cluster_dir(project_id, system_id, cluster_id) / "potts_models"
+        if not models_dir.exists():
+            return []
+        entries: List[Dict[str, Any]] = []
+        for model_dir in sorted(p for p in models_dir.iterdir() if p.is_dir()):
+            meta_path = model_dir / MODEL_METADATA_FILENAME
+            if not meta_path.exists():
+                continue
+            try:
+                meta = _read_json(meta_path)
+            except Exception:
+                continue
+            model_id = meta.get("model_id") or model_dir.name
+            meta["model_id"] = model_id
+            if not meta.get("path"):
+                npz_files = sorted(p for p in model_dir.iterdir() if p.is_file() and p.suffix == ".npz")
+                if len(npz_files) == 1:
+                    try:
+                        meta["path"] = str(npz_files[0].relative_to(system_dir))
+                    except Exception:
+                        meta["path"] = str(npz_files[0])
+            entries.append(meta)
+        return entries
+
+    def list_samples(self, project_id: str, system_id: str, cluster_id: str) -> List[Dict[str, Any]]:
+        system_dir = self._system_dir(project_id, system_id)
+        samples_dir = self._cluster_dir(project_id, system_id, cluster_id) / "samples"
+        if not samples_dir.exists():
+            return []
+        entries: List[Dict[str, Any]] = []
+        for sample_dir in sorted(p for p in samples_dir.iterdir() if p.is_dir()):
+            meta_path = sample_dir / SAMPLE_METADATA_FILENAME
+            if not meta_path.exists():
+                continue
+            try:
+                meta = _read_json(meta_path)
+            except Exception:
+                continue
+            sample_id = meta.get("sample_id") or sample_dir.name
+            meta["sample_id"] = sample_id
+            if not meta.get("path"):
+                npz_files = sorted(p for p in sample_dir.iterdir() if p.is_file() and p.suffix == ".npz")
+                if len(npz_files) == 1:
+                    try:
+                        meta["path"] = str(npz_files[0].relative_to(system_dir))
+                    except Exception:
+                        meta["path"] = str(npz_files[0])
+            entries.append(meta)
+        return entries
+
+    def _hydrate_system(self, system_meta: SystemMetadata) -> None:
+        descriptor_keys = set()
+        for state in system_meta.states.values():
+            residue_keys = getattr(state, "residue_keys", None) or []
+            descriptor_keys.update(residue_keys)
+        system_meta.descriptor_keys = sorted(descriptor_keys)
+        try:
+            from phase.services.state_utils import build_analysis_states
+            system_meta.analysis_states = build_analysis_states(system_meta)
+        except Exception:
+            system_meta.analysis_states = []
+        try:
+            system_meta.metastable_clusters = self.list_cluster_entries(
+                system_meta.project_id,
+                system_meta.system_id,
+            )
+        except Exception:
+            system_meta.metastable_clusters = []
+
+    def _sync_cluster_metadata(self, metadata: SystemMetadata) -> None:
+        project_id = metadata.project_id
+        system_id = metadata.system_id
+        system_dir = self._system_dir(project_id, system_id)
+        clusters_dir = system_dir / "clusters"
+        clusters_dir.mkdir(parents=True, exist_ok=True)
+        clusters = metadata.metastable_clusters or []
+        expected_clusters = set()
+        for entry in clusters:
+            if not isinstance(entry, dict):
+                continue
+            cluster_id = entry.get("cluster_id") or entry.get("id")
+            if not cluster_id:
+                continue
+            expected_clusters.add(cluster_id)
+            cluster_meta = {k: v for k, v in entry.items() if k not in ("potts_models", "samples")}
+            cluster_meta["cluster_id"] = cluster_id
+            if not cluster_meta.get("path"):
+                cluster_npz = self._cluster_dir(project_id, system_id, cluster_id) / "cluster.npz"
+                if cluster_npz.exists():
+                    try:
+                        cluster_meta["path"] = str(cluster_npz.relative_to(system_dir))
+                    except Exception:
+                        cluster_meta["path"] = str(cluster_npz)
+            meta_path = self._cluster_metadata_path(project_id, system_id, cluster_id)
+            _write_json(meta_path, cluster_meta)
+
+            self._sync_model_metadata(project_id, system_id, cluster_id, entry.get("potts_models") or [])
+            self._sync_sample_metadata(project_id, system_id, cluster_id, entry.get("samples") or [])
+
+        for meta_path in clusters_dir.glob(f"*/{CLUSTER_METADATA_FILENAME}"):
+            cluster_id = meta_path.parent.name
+            if cluster_id not in expected_clusters:
+                try:
+                    meta_path.unlink()
+                except Exception:
+                    pass
+
+    def _sync_model_metadata(
+        self,
+        project_id: str,
+        system_id: str,
+        cluster_id: str,
+        models: List[Dict[str, Any]],
+    ) -> None:
+        model_root = self._cluster_dir(project_id, system_id, cluster_id) / "potts_models"
+        model_root.mkdir(parents=True, exist_ok=True)
+        expected = set()
+        for model in models:
+            if not isinstance(model, dict):
+                continue
+            model_id = model.get("model_id") or model.get("id")
+            if not model_id:
+                continue
+            expected.add(str(model_id))
+            model_meta = dict(model)
+            model_meta["model_id"] = str(model_id)
+            meta_path = self._model_metadata_path(project_id, system_id, cluster_id, str(model_id))
+            _write_json(meta_path, model_meta)
+        for meta_path in model_root.glob(f"*/{MODEL_METADATA_FILENAME}"):
+            model_id = meta_path.parent.name
+            if model_id not in expected:
+                try:
+                    meta_path.unlink()
+                except Exception:
+                    pass
+
+    def _sync_sample_metadata(
+        self,
+        project_id: str,
+        system_id: str,
+        cluster_id: str,
+        samples: List[Dict[str, Any]],
+    ) -> None:
+        sample_root = self._cluster_dir(project_id, system_id, cluster_id) / "samples"
+        sample_root.mkdir(parents=True, exist_ok=True)
+        expected = set()
+        for sample in samples:
+            if not isinstance(sample, dict):
+                continue
+            sample_id = sample.get("sample_id") or sample.get("id")
+            if not sample_id:
+                continue
+            expected.add(str(sample_id))
+            sample_meta = dict(sample)
+            sample_meta["sample_id"] = str(sample_id)
+            meta_path = self._sample_metadata_path(project_id, system_id, cluster_id, str(sample_id))
+            _write_json(meta_path, sample_meta)
+        for meta_path in sample_root.glob(f"*/{SAMPLE_METADATA_FILENAME}"):
+            sample_id = meta_path.parent.name
+            if sample_id not in expected:
+                try:
+                    meta_path.unlink()
+                except Exception:
+                    pass
 
     def ensure_results_directories(self, project_id: str, system_id: str) -> Dict[str, Path]:
         system_dir = self._system_dir(project_id, system_id)
