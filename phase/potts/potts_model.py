@@ -65,6 +65,44 @@ class PottsModel:
             return self.J[(s, r)].T
 
 
+def zero_sum_gauge_model(model: PottsModel) -> PottsModel:
+    """
+    Convert a PottsModel into a standard zero-sum gauge while preserving energies up to constants.
+
+    Practical rules enforced:
+      - For each residue i: sum_a h_i(a) = 0
+      - For each edge (i,j): sum_a J_ij(a,b)=0 for each b AND sum_b J_ij(a,b)=0 for each a
+
+    The transform is energy-preserving up to additive constants by pushing row/col means of each coupling
+    block into the corresponding fields, then centering fields.
+    """
+    N = len(model.h)
+    h_new = [np.asarray(v, dtype=float).copy() for v in model.h]
+    # Accumulate coupling means to push into fields (preserves energy).
+    h_add = [np.zeros_like(v, dtype=float) for v in h_new]
+
+    edges = [(int(r), int(s)) for r, s in (model.edges or [])]
+    edges = sorted((min(r, s), max(r, s)) for r, s in edges if r != s)
+
+    J_new: Dict[Tuple[int, int], np.ndarray] = {}
+    for r, s in edges:
+        M = np.asarray(model.J[(r, s)], dtype=float)
+        row_mean = M.mean(axis=1, keepdims=True)  # (K_r, 1)
+        col_mean = M.mean(axis=0, keepdims=True)  # (1, K_s)
+        overall = float(M.mean())
+
+        h_add[r] = h_add[r] + row_mean[:, 0]
+        h_add[s] = h_add[s] + col_mean[0, :]
+
+        J_new[(r, s)] = M - row_mean - col_mean + overall
+
+    for i in range(N):
+        h_new[i] = h_new[i] + h_add[i]
+        h_new[i] = h_new[i] - float(h_new[i].mean())
+
+    return PottsModel(h=h_new, J=J_new, edges=list(edges))
+
+
 def save_potts_model(
     model: PottsModel,
     path: str | "os.PathLike[str]",
@@ -473,6 +511,9 @@ def fit_potts_pseudolikelihood_torch(
             print(f"[plm] epoch {ep:4d}/{epochs}  avg_loss={avg_loss:.6f}")
         if progress_callback and (ep == 1 or ep == epochs or ep % progress_every == 0):
             progress_callback(ep, epochs, float(avg_loss))
+        if zero_sum_gauge:
+            # Keep a consistent gauge at epoch boundaries so checkpointed parameters are comparable.
+            _apply_zero_sum_gauge_()
         _maybe_save_best(ep, float(avg_loss), val_loss)
         if scheduler is not None:
             scheduler.step()
@@ -505,6 +546,7 @@ def fit_potts_delta_pseudolikelihood_torch(
     l2: float = 0.0,
     lambda_h: float = 0.0,
     lambda_J: float = 0.0,
+    zero_sum_gauge: bool = True,
     lr: float = 1e-3,
     lr_min: float = 1e-3,
     lr_schedule: str = "cosine",
@@ -596,6 +638,32 @@ def fit_potts_delta_pseudolikelihood_torch(
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=epochs, eta_min=lr_min)
     elif schedule != "none":
         raise ValueError(f"Unknown lr_schedule={lr_schedule!r}")
+
+    @torch.no_grad()
+    def _apply_zero_sum_gauge_() -> None:
+        """
+        Enforce zero-sum gauge on DELTA parameters (delta_h, delta_J).
+
+        This is important before comparing Δh/ΔJ across delta fits: without a fixed gauge, large apparent
+        differences can be pure gauge artifacts.
+        """
+        for (r, s) in edges:
+            key = f"{r}_{s}"
+            M = delta_J[key]  # (K_r, K_s) in logits-space
+
+            row_mean = M.mean(dim=1, keepdim=True)  # (K_r, 1)
+            col_mean = M.mean(dim=0, keepdim=True)  # (1, K_s)
+            overall = M.mean()
+
+            delta_h[r].add_(row_mean.squeeze(1))
+            delta_h[s].add_(col_mean.squeeze(0))
+
+            M.sub_(row_mean)
+            M.sub_(col_mean)
+            M.add_(overall)
+
+        for r in range(N):
+            delta_h[r].sub_(delta_h[r].mean())
 
     best_loss = float("inf") if start_best_loss is None else float(start_best_loss)
     best_epoch = None
@@ -723,6 +791,8 @@ def fit_potts_delta_pseudolikelihood_torch(
             print(f"[plm-delta] epoch {ep:4d}/{epochs}  avg_loss={avg_loss:.6f}")
         if progress_callback and (ep == 1 or ep == epochs or ep % progress_every == 0):
             progress_callback(ep, epochs, float(avg_loss))
+        if zero_sum_gauge:
+            _apply_zero_sum_gauge_()
         _maybe_save_best(ep, float(avg_loss))
         if scheduler is not None:
             scheduler.step()

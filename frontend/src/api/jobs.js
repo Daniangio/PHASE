@@ -35,6 +35,13 @@ export function submitMdSamplesRefreshJob(payload) {
   });
 }
 
+export function submitDeltaEvalJob(payload) {
+  return requestJSON('/submit/delta_eval', {
+    method: 'POST',
+    body: payload,
+  });
+}
+
 export function fetchResults() {
   return requestJSON('/results');
 }

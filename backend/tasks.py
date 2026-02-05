@@ -6,6 +6,7 @@ import shutil
 import re
 import sys
 import uuid
+import numpy as np
 from pathlib import Path
 from datetime import datetime
 from rq import Queue, Worker, get_current_job
@@ -20,7 +21,7 @@ from phase.pipeline.runner import run_analysis
 from phase.potts.pipeline import parse_args as parse_simulation_args
 from phase.potts.pipeline import run_pipeline as run_simulation_pipeline
 from phase.potts.sampling_run import run_sampling
-from phase.potts.analysis_run import analyze_cluster_samples
+from phase.potts.analysis_run import analyze_cluster_samples, compute_md_delta_preference
 from phase.common.runtime import RuntimePolicy
 from phase.potts import pipeline as sim_main
 from phase.potts import delta_fit as delta_fit_main
@@ -46,7 +47,6 @@ def _convert_nan_to_none(obj):
     """
     Recursively converts numpy.nan values in dicts and lists to None.
     """
-    import numpy as np
     if isinstance(obj, dict):
         return {k: _convert_nan_to_none(v) for k, v in obj.items()}
     elif isinstance(obj, list):
@@ -1154,6 +1154,161 @@ def run_md_samples_refresh_job(
         write_result_to_disk(sanitized_payload)
 
     save_progress("MD sample refresh completed", 100)
+    return sanitized_payload
+
+
+def run_delta_eval_job(
+    job_uuid: str,
+    dataset_ref: Dict[str, str],
+    params: Dict[str, Any],
+):
+    """
+    Compute per-residue/per-edge delta preferences on an MD sample for two selected Potts models.
+    This implements point (4) in validation_ladder2.MD.
+
+    Results are written under clusters/<cluster_id>/analyses/delta_eval/.
+    """
+    job = get_current_job()
+    start_time = datetime.utcnow()
+    rq_job_id = job.id if job else f"delta-eval-{job_uuid}"
+
+    project_id = dataset_ref.get("project_id")
+    system_id = dataset_ref.get("system_id")
+    cluster_id = dataset_ref.get("cluster_id")
+    if not project_id or not system_id or not cluster_id:
+        raise ValueError("delta_eval requires project_id/system_id/cluster_id.")
+
+    results_dirs = project_store.ensure_results_directories(project_id, system_id)
+    result_filepath = results_dirs["jobs_dir"] / f"{job_uuid}.json"
+
+    result_payload: Dict[str, Any] = {
+        "job_id": job_uuid,
+        "rq_job_id": rq_job_id,
+        "analysis_type": "delta_eval",
+        "status": "started",
+        "created_at": start_time.isoformat(),
+        "params": params,
+        "results": None,
+        "system_reference": {
+            "project_id": project_id,
+            "system_id": system_id,
+            "cluster_id": cluster_id,
+        },
+        "error": None,
+        "completed_at": None,
+    }
+
+    def save_progress(status_msg: str, progress: int):
+        if job:
+            job.meta["status"] = status_msg
+            job.meta["progress"] = progress
+            job.save_meta()
+        print(f"[DeltaEval {job_uuid}] {status_msg}")
+
+    def write_result_to_disk(payload: Dict[str, Any]):
+        try:
+            with open(result_filepath, "w") as f:
+                json.dump(payload, f, indent=2)
+        except Exception as e:
+            print(f"CRITICAL: Failed to save result file {result_filepath}: {e}")
+            payload["status"] = "failed"
+            payload["error"] = f"Failed to save result file: {e}"
+
+    try:
+        save_progress("Initializing...", 0)
+        write_result_to_disk(result_payload)
+
+        md_sample_id = str(params.get("md_sample_id") or "").strip()
+        model_a_id = str(params.get("model_a_id") or "").strip()
+        model_b_id = str(params.get("model_b_id") or "").strip()
+        if not md_sample_id or not model_a_id or not model_b_id:
+            raise ValueError("delta_eval requires md_sample_id, model_a_id, model_b_id.")
+        if model_a_id == model_b_id:
+            raise ValueError("Select two different models.")
+
+        md_label_mode = (params.get("md_label_mode") or "assigned").lower()
+        keep_invalid = bool(params.get("keep_invalid", False))
+
+        save_progress("Computing delta preferences...", 20)
+        payload = compute_md_delta_preference(
+            project_id=project_id,
+            system_id=system_id,
+            cluster_id=cluster_id,
+            md_sample_id=md_sample_id,
+            model_a_ref=model_a_id,
+            model_b_ref=model_b_id,
+            md_label_mode=md_label_mode,
+            drop_invalid=not keep_invalid,
+        )
+
+        cluster_dirs = project_store.ensure_cluster_directories(project_id, system_id, cluster_id)
+        system_dir = cluster_dirs["system_dir"]
+        analyses_dir = cluster_dirs["cluster_dir"] / "analyses" / "delta_eval"
+        analyses_dir.mkdir(parents=True, exist_ok=True)
+
+        analysis_id = str(uuid.uuid4())
+        out_dir = analyses_dir / analysis_id
+        out_dir.mkdir(parents=True, exist_ok=True)
+        npz_path = out_dir / "analysis.npz"
+        meta_path = out_dir / "analysis_metadata.json"
+
+        # Persist NPZ
+        np.savez_compressed(
+            npz_path,
+            delta_energy=np.asarray(payload["delta_energy"], dtype=float),
+            delta_residue_mean=np.asarray(payload["delta_residue_mean"], dtype=float),
+            delta_residue_std=np.asarray(payload["delta_residue_std"], dtype=float),
+            edges=np.asarray(payload["edges"], dtype=int),
+            delta_edge_mean=np.asarray(payload["delta_edge_mean"], dtype=float),
+        )
+
+        # Persist metadata (cluster-relative paths)
+        meta = {
+            "analysis_id": analysis_id,
+            "analysis_type": "delta_eval",
+            "created_at": datetime.utcnow().isoformat(),
+            "project_id": project_id,
+            "system_id": system_id,
+            "cluster_id": cluster_id,
+            "md_sample_id": md_sample_id,
+            "md_sample_name": payload.get("md_sample_name"),
+            "model_a_id": model_a_id,
+            "model_a_name": payload.get("model_a_name"),
+            "model_b_id": model_b_id,
+            "model_b_name": payload.get("model_b_name"),
+            "drop_invalid": bool(not keep_invalid),
+            "md_label_mode": md_label_mode,
+            "paths": {"analysis_npz": str(npz_path.relative_to(system_dir))},
+            "summary": {
+                "frames": int(np.asarray(payload["delta_energy"]).shape[0]),
+                "residues": int(np.asarray(payload["delta_residue_mean"]).shape[0]),
+                "edges": int(np.asarray(payload["delta_edge_mean"]).shape[0]),
+            },
+        }
+        meta_path.write_text(json.dumps(_convert_nan_to_none(meta), indent=2), encoding="utf-8")
+
+        result_payload["status"] = "finished"
+        result_payload["results"] = {
+            "analysis_type": "delta_eval",
+            "analysis_id": analysis_id,
+            "analysis_dir": _relativize_path(out_dir),
+            "analysis_npz": _relativize_path(npz_path),
+        }
+
+    except Exception as e:
+        print(f"[DeltaEval {job_uuid}] FAILED: {e}")
+        traceback.print_exc()
+        result_payload["status"] = "failed"
+        result_payload["error"] = str(e)
+        raise e
+
+    finally:
+        save_progress("Saving final result", 95)
+        result_payload["completed_at"] = datetime.utcnow().isoformat()
+        sanitized_payload = _convert_nan_to_none(result_payload)
+        write_result_to_disk(sanitized_payload)
+
+    save_progress("Delta eval completed", 100)
     return sanitized_payload
 
 

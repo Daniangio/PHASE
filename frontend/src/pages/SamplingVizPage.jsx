@@ -719,13 +719,22 @@ export default function SamplingVizPage() {
             <code>clusters/&lt;cluster_id&gt;/analyses/</code>.
           </p>
         </div>
-        <button
-          type="button"
-          onClick={() => navigate(`/projects/${projectId}/systems/${systemId}`)}
-          className="text-xs px-3 py-2 rounded-md border border-gray-700 text-gray-200 hover:border-gray-500"
-        >
-          Back to system
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => navigate(`/projects/${projectId}/systems/${systemId}/sampling/delta_eval`)}
+            className="text-xs px-3 py-2 rounded-md border border-gray-700 text-gray-200 hover:border-gray-500"
+          >
+            Delta eval
+          </button>
+          <button
+            type="button"
+            onClick={() => navigate(`/projects/${projectId}/systems/${systemId}`)}
+            className="text-xs px-3 py-2 rounded-md border border-gray-700 text-gray-200 hover:border-gray-500"
+          >
+            Back to system
+          </button>
+        </div>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-[360px_1fr] gap-4">

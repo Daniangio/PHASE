@@ -140,3 +140,14 @@ class MdSamplesRefreshJobRequest(BaseModel):
     cluster_id: str
     overwrite: Optional[bool] = True
     cleanup: Optional[bool] = True
+
+
+class DeltaEvalJobRequest(BaseModel):
+    project_id: str
+    system_id: str
+    cluster_id: str
+    md_sample_id: str
+    model_a_id: str
+    model_b_id: str
+    md_label_mode: Optional[str] = None  # assigned|halo
+    keep_invalid: Optional[bool] = None

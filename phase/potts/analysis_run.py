@@ -335,3 +335,147 @@ def analyze_cluster_samples(
         "model_id": model_id,
         "model_name": model_name,
     }
+
+
+def compute_md_delta_preference(
+    *,
+    project_id: str,
+    system_id: str,
+    cluster_id: str,
+    md_sample_id: str,
+    model_a_ref: str,
+    model_b_ref: str,
+    md_label_mode: str = "assigned",
+    drop_invalid: bool = True,
+) -> dict[str, Any]:
+    """
+    Point (4) diagnostic from validation_ladder2.MD.
+
+    Given one MD sample X (cluster labels per residue), and two Potts models A/B (typically delta patch models),
+    compute per-frame and per-residue preferences:
+
+      ΔE(t) = E_A(s_t) - E_B(s_t)
+      δ_i(t) = (h^A_i(s_{t,i}) - h^B_i(s_{t,i}))
+      δ_{ij}(t) = (J^A_{ij}(s_{t,i}, s_{t,j}) - J^B_{ij}(s_{t,i}, s_{t,j}))
+
+    Returns arrays (means) suitable for visualization:
+      - delta_energy: (T,)
+      - delta_residue_mean/std: (N,)
+      - delta_edge_mean: (E,)
+      - edges: (E,2)
+    """
+    data_root = Path(os.getenv("PHASE_DATA_ROOT", "/app/data"))
+    store = ProjectStore(base_dir=data_root / "projects")
+    cluster_dirs = store.ensure_cluster_directories(project_id, system_id, cluster_id)
+    system_dir = cluster_dirs["system_dir"]
+    cluster_dir = cluster_dirs["cluster_dir"]
+
+    samples = store.list_samples(project_id, system_id, cluster_id)
+    md_entry = next((s for s in samples if s.get("sample_id") == md_sample_id), None)
+    if not md_entry:
+        raise FileNotFoundError(f"MD sample_id not found on this cluster: {md_sample_id}")
+
+    def _resolve_sample_path(entry: dict[str, Any]) -> Path:
+        paths = entry.get("paths") or {}
+        rel = None
+        if isinstance(paths, dict):
+            rel = paths.get("summary_npz") or paths.get("path")
+        rel = rel or entry.get("path")
+        if not rel:
+            raise FileNotFoundError("Sample entry missing path.")
+        p = Path(str(rel))
+        if not p.is_absolute():
+            resolved = store.resolve_path(project_id, system_id, str(rel))
+            if not resolved.exists():
+                alt = cluster_dir / str(rel)
+                p = alt if alt.exists() else resolved
+            else:
+                p = resolved
+        return p
+
+    md_npz_path = _resolve_sample_path(md_entry)
+    sample_npz = load_sample_npz(md_npz_path)
+    X = sample_npz.labels
+    if (md_label_mode or "assigned").lower() in {"halo", "labels_halo"} and sample_npz.labels_halo is not None:
+        X = sample_npz.labels_halo
+    if drop_invalid and sample_npz.invalid_mask is not None:
+        keep = ~np.asarray(sample_npz.invalid_mask, dtype=bool)
+        if keep.shape[0] == X.shape[0]:
+            X = X[keep]
+    X = np.asarray(X, dtype=int)
+    if X.ndim != 2 or X.size == 0:
+        raise ValueError("MD sample labels are empty.")
+
+    def _resolve_model(ref: str) -> tuple[PottsModel, str | None, str | None, str]:
+        model_id = None
+        model_name = None
+        model_path = Path(ref)
+        if not model_path.suffix:
+            model_id = str(ref)
+            models = store.list_potts_models(project_id, system_id, cluster_id)
+            entry = next((m for m in models if m.get("model_id") == model_id), None)
+            if not entry or not entry.get("path"):
+                raise FileNotFoundError(f"Potts model_id not found on this cluster: {model_id}")
+            model_name = entry.get("name") or model_id
+            model_path = store.resolve_path(project_id, system_id, str(entry.get("path")))
+        else:
+            if not model_path.is_absolute():
+                model_path = store.resolve_path(project_id, system_id, str(model_path))
+            model_name = model_path.stem
+        if not model_path.exists():
+            raise FileNotFoundError(f"Potts model NPZ not found: {model_path}")
+        return load_potts_model(str(model_path)), model_id, model_name, _relativize(model_path, system_dir)
+
+    model_a, model_a_id, model_a_name, model_a_path = _resolve_model(model_a_ref)
+    model_b, model_b_id, model_b_name, model_b_path = _resolve_model(model_b_ref)
+
+    if len(model_a.h) != len(model_b.h):
+        raise ValueError("Model sizes do not match.")
+
+    # Edge set: prefer model A, require availability in model B as well.
+    edges = sorted({(min(int(r), int(s)), max(int(r), int(s))) for r, s in (model_a.edges or []) if int(r) != int(s)})
+    missing = [e for e in edges if e not in {(min(int(r), int(s)), max(int(r), int(s))) for r, s in (model_b.edges or [])}]
+    if missing:
+        # fall back to intersection to stay robust to partial models
+        edges_b = {(min(int(r), int(s)), max(int(r), int(s))) for r, s in (model_b.edges or []) if int(r) != int(s)}
+        edges = [e for e in edges if e in edges_b]
+
+    T, N = X.shape
+    if N != len(model_a.h):
+        raise ValueError("Sample labels do not match model size.")
+
+    # Per-residue contributions (store to compute mean/std cheaply).
+    delta_res = np.zeros((T, N), dtype=float)
+    for i in range(N):
+        dh = np.asarray(model_a.h[i], dtype=float) - np.asarray(model_b.h[i], dtype=float)
+        delta_res[:, i] = dh[X[:, i]]
+    delta_res_mean = np.mean(delta_res, axis=0)
+    delta_res_std = np.std(delta_res, axis=0)
+
+    # Per-edge mean and per-frame delta energy (avoid storing T*E).
+    delta_energy = np.sum(delta_res, axis=1)
+    edge_sum = np.zeros((len(edges),), dtype=float)
+    for idx, (r, s) in enumerate(edges):
+        dJ = np.asarray(model_a.coupling(r, s), dtype=float) - np.asarray(model_b.coupling(r, s), dtype=float)
+        vals = dJ[X[:, r], X[:, s]]
+        edge_sum[idx] = float(np.sum(vals))
+        delta_energy = delta_energy + vals
+    delta_edge_mean = edge_sum / float(T)
+
+    return {
+        "md_sample_id": md_sample_id,
+        "md_sample_name": md_entry.get("name"),
+        "model_a_id": model_a_id,
+        "model_a_name": model_a_name,
+        "model_a_path": model_a_path,
+        "model_b_id": model_b_id,
+        "model_b_name": model_b_name,
+        "model_b_path": model_b_path,
+        "md_label_mode": md_label_mode,
+        "drop_invalid": bool(drop_invalid),
+        "delta_energy": np.asarray(delta_energy, dtype=float),
+        "delta_residue_mean": np.asarray(delta_res_mean, dtype=float),
+        "delta_residue_std": np.asarray(delta_res_std, dtype=float),
+        "edges": np.asarray(edges, dtype=int),
+        "delta_edge_mean": np.asarray(delta_edge_mean, dtype=float),
+    }
