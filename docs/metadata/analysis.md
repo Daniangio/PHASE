@@ -30,7 +30,15 @@ Analysis NPZ schema
   - `edge_js` (E,) float (may be empty if the cluster has no edges)
 - `model_energy`:
   - `energies` (T,) float
+- `lambda_sweep`:
+  - `lambdas` (M,) float
+  - `node_js_mean` (3, M) float (vs 3 reference MD samples)
+  - `edge_js_mean` (3, M) float
+  - `combined_distance` (3, M) float (weighted by `alpha`)
+  - `deltaE_mean` (M,) float (ΔE = E_A - E_B on λ-samples)
+  - `deltaE_q25` / `deltaE_q75` (M,) float (IQR for ΔE)
+  - `sample_ids` / `sample_names` (M,) str
+  - `ref_md_sample_ids` / `ref_md_sample_names` (3,) str
 
 Notes
 - Analyses live under `clusters/<cluster_id>/analyses/` and can be safely deleted/regenerated without affecting the raw samples.
-

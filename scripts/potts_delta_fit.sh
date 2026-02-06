@@ -11,7 +11,6 @@ else
   DEFAULT_ENV="${ROOT_DIR}/.venv-potts-fit"
 fi
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
-DEFAULT_RESULTS=""
 DEFAULT_ROOT="${PHASE_DATA_ROOT:-${ROOT_DIR}/data}"
 
 prompt() {
@@ -103,8 +102,6 @@ if [ -z "$BASE_MODEL" ] || [ ! -f "$BASE_MODEL" ]; then
   exit 1
 fi
 
-DEFAULT_RESULTS="${OFFLINE_ROOT}/projects/${OFFLINE_PROJECT_ID}/systems/${OFFLINE_SYSTEM_ID}/clusters/${CLUSTER_ID}/potts_models/delta_fit_${TIMESTAMP}"
-
 RESUME_MODEL=""
 MODEL_LINES="$(python -m phase.scripts.offline_browser --root "$OFFLINE_ROOT" list-models --project-id "$OFFLINE_PROJECT_ID" --system-id "$OFFLINE_SYSTEM_ID" || true)"
 MODEL_LINES="$(printf "%s\n" "$MODEL_LINES" | awk -F'|' -v cid="$CLUSTER_ID" '$4==cid')"
@@ -117,7 +114,6 @@ if [ -n "$MODEL_LINES" ] && prompt_bool "Resume from existing delta model? (y/N)
   fi
 fi
 
-RESULTS_DIR="$(prompt "Results directory" "${DEFAULT_RESULTS}")"
 MODEL_NAME="$(prompt "Model name (base for delta models)" "")"
 
 NPZ_PATH=""
@@ -160,7 +156,6 @@ CMD=(
   --system-id "$OFFLINE_SYSTEM_ID"
   --cluster-id "$CLUSTER_ID"
   --base-model "$BASE_MODEL"
-  --results-dir "$RESULTS_DIR"
   --epochs "$EPOCHS"
   --lr "$LR"
   --lr-min "$LR_MIN"
@@ -192,5 +187,4 @@ fi
 
 echo "Running delta Potts fit..."
 PYTHONPATH="${ROOT_DIR}:${PYTHONPATH:-}" "${CMD[@]}"
-
-echo "Done. Outputs in: ${RESULTS_DIR}"
+echo "Done."

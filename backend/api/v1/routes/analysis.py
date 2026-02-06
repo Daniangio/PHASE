@@ -6,6 +6,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from backend.api.v1.common import ensure_system_ready, get_cluster_entry, get_queue, project_store
 from backend.api.v1.schemas import (
     DeltaEvalJobRequest,
+    DeltaTransitionJobRequest,
+    LambdaSweepJobRequest,
     MdSamplesRefreshJobRequest,
     PottsAnalysisJobRequest,
     PottsFitJobRequest,
@@ -15,6 +17,8 @@ from backend.api.v1.schemas import (
 from backend.tasks import (
     run_analysis_job,
     run_delta_eval_job,
+    run_delta_transition_job,
+    run_lambda_sweep_job,
     run_md_samples_refresh_job,
     run_potts_analysis_job,
     run_potts_fit_job,
@@ -222,6 +226,88 @@ async def submit_simulation_job(
         raise HTTPException(status_code=500, detail=f"Job submission failed: {exc}") from exc
 
 
+@router.post("/submit/lambda_sweep", summary="Submit a lambda-interpolation sweep (validation ladder 4)")
+async def submit_lambda_sweep_job(
+    payload: LambdaSweepJobRequest,
+    task_queue: Any = Depends(get_queue),
+):
+    try:
+        system_meta = project_store.get_system(payload.project_id, payload.system_id)
+    except FileNotFoundError:
+        raise HTTPException(
+            status_code=404,
+            detail=f"System '{payload.system_id}' not found in project '{payload.project_id}'.",
+        )
+
+    get_cluster_entry(system_meta, payload.cluster_id)
+
+    if payload.model_a_id == payload.model_b_id:
+        raise HTTPException(status_code=400, detail="model_a_id and model_b_id must be different.")
+
+    if payload.lambda_count is not None and int(payload.lambda_count) < 2:
+        raise HTTPException(status_code=400, detail="lambda_count must be >= 2.")
+    if payload.alpha is not None:
+        alpha = float(payload.alpha)
+        if not (0.0 <= alpha <= 1.0):
+            raise HTTPException(status_code=400, detail="alpha must be in [0,1].")
+
+    md_label_mode = (payload.md_label_mode or "assigned").lower()
+    if md_label_mode not in {"assigned", "halo"}:
+        raise HTTPException(status_code=400, detail="md_label_mode must be 'assigned' or 'halo'.")
+
+    if len({payload.md_sample_id_1, payload.md_sample_id_2, payload.md_sample_id_3}) < 3:
+        raise HTTPException(status_code=400, detail="md_sample_id_1/2/3 must be three distinct samples.")
+
+    gibbs_method = (payload.gibbs_method or "rex").lower()
+    if gibbs_method not in {"single", "rex"}:
+        raise HTTPException(status_code=400, detail="gibbs_method must be 'single' or 'rex'.")
+
+    if payload.beta is not None and float(payload.beta) <= 0:
+        raise HTTPException(status_code=400, detail="beta must be > 0.")
+
+    for name, value in {
+        "gibbs_samples": payload.gibbs_samples,
+        "gibbs_burnin": payload.gibbs_burnin,
+        "gibbs_thin": payload.gibbs_thin,
+        "rex_n_replicas": payload.rex_n_replicas,
+        "rex_rounds": payload.rex_rounds,
+        "rex_burnin_rounds": payload.rex_burnin_rounds,
+        "rex_sweeps_per_round": payload.rex_sweeps_per_round,
+        "rex_thin_rounds": payload.rex_thin_rounds,
+    }.items():
+        if value is not None and int(value) < 1:
+            raise HTTPException(status_code=400, detail=f"{name} must be >= 1.")
+
+    try:
+        project_meta = project_store.get_project(payload.project_id)
+        project_name = project_meta.name
+    except Exception:
+        project_name = None
+
+    dataset_ref = {
+        "project_id": payload.project_id,
+        "project_name": project_name,
+        "system_id": payload.system_id,
+        "system_name": system_meta.name,
+        "cluster_id": payload.cluster_id,
+    }
+
+    params = payload.dict(exclude_none=True, exclude={"project_id", "system_id", "cluster_id"})
+
+    try:
+        job_uuid = str(uuid.uuid4())
+        job = task_queue.enqueue(
+            run_lambda_sweep_job,
+            args=(job_uuid, dataset_ref, params),
+            job_timeout="4h",
+            result_ttl=86400,
+            job_id=f"lambda-sweep-{job_uuid}",
+        )
+        return {"status": "queued", "job_id": job.id, "analysis_uuid": job_uuid}
+    except Exception as exc:  # pragma: no cover
+        raise HTTPException(status_code=500, detail=f"Job submission failed: {exc}") from exc
+
+
 @router.post("/submit/potts_analysis", summary="Submit a Potts sample analysis job")
 async def submit_potts_analysis_job(
     payload: PottsAnalysisJobRequest,
@@ -332,6 +418,59 @@ async def submit_delta_eval_job(
             job_timeout="2h",
             result_ttl=86400,
             job_id=f"delta-eval-{job_uuid}",
+        )
+        return {"status": "queued", "job_id": job.id, "analysis_uuid": job_uuid}
+    except Exception as exc:  # pragma: no cover
+        raise HTTPException(status_code=500, detail=f"Job submission failed: {exc}") from exc
+
+
+@router.post(
+    "/submit/delta_transition",
+    summary="Submit a transition-like (TS-band) delta-Potts analysis across Active/Inactive/pAS MD samples",
+)
+async def submit_delta_transition_job(
+    payload: DeltaTransitionJobRequest,
+    task_queue: Any = Depends(get_queue),
+):
+    try:
+        system_meta = project_store.get_system(payload.project_id, payload.system_id)
+    except FileNotFoundError:
+        raise HTTPException(
+            status_code=404,
+            detail=f"System '{payload.system_id}' not found in project '{payload.project_id}'.",
+        )
+
+    get_cluster_entry(system_meta, payload.cluster_id)
+
+    md_label_mode = (payload.md_label_mode or "assigned").lower()
+    if md_label_mode not in {"assigned", "halo"}:
+        raise HTTPException(status_code=400, detail="md_label_mode must be 'assigned' or 'halo'.")
+
+    if payload.band_fraction is not None:
+        band = float(payload.band_fraction)
+        if not (0 < band < 1):
+            raise HTTPException(status_code=400, detail="band_fraction must be in (0,1).")
+
+    if payload.top_k_residues is not None and int(payload.top_k_residues) < 1:
+        raise HTTPException(status_code=400, detail="top_k_residues must be >= 1.")
+    if payload.top_k_edges is not None and int(payload.top_k_edges) < 1:
+        raise HTTPException(status_code=400, detail="top_k_edges must be >= 1.")
+
+    params = payload.dict(exclude_none=True, exclude={"project_id", "system_id", "cluster_id"})
+    dataset_ref = {
+        "project_id": payload.project_id,
+        "system_id": payload.system_id,
+        "cluster_id": payload.cluster_id,
+    }
+
+    try:
+        job_uuid = str(uuid.uuid4())
+        job = task_queue.enqueue(
+            run_delta_transition_job,
+            args=(job_uuid, dataset_ref, params),
+            job_timeout="2h",
+            result_ttl=86400,
+            job_id=f"delta-transition-{job_uuid}",
         )
         return {"status": "queued", "job_id": job.id, "analysis_uuid": job_uuid}
     except Exception as exc:  # pragma: no cover

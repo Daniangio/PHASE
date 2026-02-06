@@ -139,6 +139,211 @@ def _run_rex_chain_worker(payload: dict[str, object]) -> dict[str, object]:
         progress_mode=str(payload.get("progress_mode", "samples")),
     )
 
+def _filter_md_labels_for_states(
+    labels: np.ndarray,
+    frame_state_ids: np.ndarray | None,
+    *,
+    state_ids: Sequence[str] | None,
+) -> np.ndarray:
+    if labels is None:
+        return labels
+    if not state_ids:
+        return labels
+    if frame_state_ids is None:
+        raise ValueError("MD frame_state_ids missing in cluster NPZ; cannot filter by --sa-md-state-ids.")
+    ids = [str(s).strip() for s in state_ids if str(s).strip()]
+    if not ids:
+        return labels
+    frame_ids = np.asarray(frame_state_ids).astype(str)
+    mask = np.isin(frame_ids, ids)
+    if not np.any(mask):
+        raise ValueError(f"No MD frames matched sa_md_state_ids={ids}.")
+    return np.asarray(labels)[mask]
+
+
+def _parse_str_list(raw: str) -> List[str]:
+    parts = [p.strip() for p in str(raw or "").split(",") if p.strip()]
+    return [str(p) for p in parts]
+
+
+def _sa_decode_labels(
+    Z: np.ndarray,
+    qubo,
+    *,
+    repair: str,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    repair_mode = None if str(repair) == "none" else str(repair)
+    labels = np.zeros((Z.shape[0], len(qubo.var_slices)), dtype=np.int32)
+    valid_counts = np.zeros(Z.shape[0], dtype=np.int32)
+    for i in range(Z.shape[0]):
+        x, valid = decode_onehot(Z[i], qubo, repair=repair_mode)
+        labels[i] = x
+        valid_counts[i] = int(valid.sum())
+    invalid_mask = valid_counts != int(labels.shape[1])
+    return labels, invalid_mask.astype(bool), valid_counts
+
+
+def _run_sa_independent_worker(payload: dict[str, object]) -> dict[str, object]:
+    model = _load_combined_model(payload["model_npz"])  # type: ignore[arg-type]
+    beta = float(payload["beta"])
+    penalty_safety = float(payload["penalty_safety"])
+    n_reads = int(payload["n_reads"])
+    sweeps = int(payload["sweeps"])
+    seed = int(payload["seed"])
+    beta_range = payload.get("beta_range")  # type: ignore[assignment]
+    sa_init = str(payload.get("sa_init", "md"))
+    sa_init_md_frame = int(payload.get("sa_init_md_frame", -1))
+    repair = str(payload.get("repair", "none"))
+
+    md_ds = load_npz(str(payload["cluster_npz"]), unassigned_policy="drop_frames", allow_missing_edges=True)  # type: ignore[arg-type]
+    md_labels = md_ds.labels
+    md_state_ids = _parse_str_list(str(payload.get("sa_md_state_ids", "")))
+    md_labels = _filter_md_labels_for_states(md_labels, md_ds.frame_state_ids, state_ids=md_state_ids)
+
+    qubo = potts_to_qubo_onehot(model, beta=beta, penalty_safety=penalty_safety)
+    init_rng = np.random.default_rng(seed + 1000)
+    init_labels = _build_sa_initial_labels(
+        mode=sa_init,
+        md_labels=md_labels,
+        model=model,
+        beta=beta,
+        n_reads=n_reads,
+        md_frame=sa_init_md_frame,
+        rng=init_rng,
+    )
+    init_states = encode_onehot(init_labels, qubo) if init_labels is not None and init_labels.size else None
+
+    Z = sa_sample_qubo_neal(
+        qubo,
+        n_reads=n_reads,
+        sweeps=sweeps,
+        seed=seed,
+        progress=False,
+        beta_range=beta_range,  # type: ignore[arg-type]
+        initial_states=init_states,
+    )
+    labels, invalid_mask, valid_counts = _sa_decode_labels(Z, qubo, repair=repair)
+    return {"labels": labels, "invalid_mask": invalid_mask, "valid_counts": valid_counts}
+
+
+def _run_sa_chain_worker(payload: dict[str, object]) -> dict[str, object]:
+    """
+    Sequential SA chain: each sample starts from either the previous sample ("previous")
+    or a fresh random MD frame ("md").
+    """
+    try:
+        import dimod  # type: ignore
+        import neal  # type: ignore
+    except Exception as e:
+        raise RuntimeError("neal/dimod are not installed.") from e
+
+    model = _load_combined_model(payload["model_npz"])  # type: ignore[arg-type]
+    beta = float(payload["beta"])
+    penalty_safety = float(payload["penalty_safety"])
+    n_samples = int(payload["n_samples"])
+    sweeps = int(payload["sweeps"])
+    seed = int(payload["seed"])
+    beta_range = payload.get("beta_range")  # type: ignore[assignment]
+    sa_init = str(payload.get("sa_init", "md"))
+    sa_init_md_frame = int(payload.get("sa_init_md_frame", -1))
+    sa_restart = str(payload.get("sa_restart", "previous")).strip().lower()
+    repair = str(payload.get("repair", "none"))
+
+    if sa_restart not in {"previous", "md"}:
+        raise ValueError("--sa-restart must be one of: previous, md (for chain mode).")
+
+    md_ds = load_npz(str(payload["cluster_npz"]), unassigned_policy="drop_frames", allow_missing_edges=True)  # type: ignore[arg-type]
+    md_labels = md_ds.labels
+    md_state_ids = _parse_str_list(str(payload.get("sa_md_state_ids", "")))
+    md_labels = _filter_md_labels_for_states(md_labels, md_ds.frame_state_ids, state_ids=md_state_ids)
+
+    # Build QUBO and corresponding BQM once.
+    qubo = potts_to_qubo_onehot(model, beta=beta, penalty_safety=penalty_safety)
+    linear = {i: float(qubo.a[i]) for i in range(qubo.num_vars())}
+    quadratic = {k: float(v) for k, v in qubo.Q.items()}
+    bqm = dimod.BinaryQuadraticModel(linear, quadratic, float(qubo.const), dimod.BINARY)
+    sampler = neal.SimulatedAnnealingSampler()
+
+    init_rng = np.random.default_rng(seed + 1000)
+    next_init = _build_sa_initial_labels(
+        mode=sa_init,
+        md_labels=md_labels,
+        model=model,
+        beta=beta,
+        n_reads=1,
+        md_frame=sa_init_md_frame,
+        rng=init_rng,
+    )[0]
+
+    repair_mode = None if str(repair) == "none" else str(repair)
+    labels = np.zeros((n_samples, len(qubo.var_slices)), dtype=np.int32)
+    valid_counts = np.zeros(n_samples, dtype=np.int32)
+    invalid_mask = np.zeros(n_samples, dtype=bool)
+
+    for i in range(n_samples):
+        init_state = encode_onehot(next_init, qubo)
+        init = np.asarray(init_state, dtype=np.int8)[None, :]
+        init_min = int(init.min()) if init.size else 0
+        init_max = int(init.max()) if init.size else 0
+        if init_min >= 0 and init_max <= 1:
+            init = (init * 2 - 1).astype(np.int8, copy=False)
+        elif init_min < -1 or init_max > 1:
+            raise ValueError("initial state must be binary (0/1) or spin (-1/1).")
+        init = np.ascontiguousarray(init, dtype=np.int8)
+
+        kwargs: Dict[str, object] = {
+            "num_reads": 1,
+            "num_sweeps": sweeps,
+            "seed": int(seed) + int(i),
+            "initial_states": init,
+        }
+        if beta_range is not None:
+            kwargs["beta_range"] = beta_range  # type: ignore[assignment]
+
+        def _sample_with_kwargs(sample_kwargs: Dict[str, object]):
+            return sampler.sample(bqm, **sample_kwargs)
+
+        try:
+            ss = _sample_with_kwargs(kwargs)
+        except TypeError:
+            # Some neal versions require initial_states as a list[dict]
+            init_list = [{j: int(init[0, j]) for j in range(qubo.num_vars())}]
+            retry = dict(kwargs)
+            retry["initial_states"] = init_list
+            try:
+                ss = _sample_with_kwargs(retry)
+            except Exception:
+                # Fall back to random init (best effort).
+                fallback = dict(kwargs)
+                fallback.pop("initial_states", None)
+                ss = _sample_with_kwargs(fallback)
+
+        sample = next(iter(ss.samples()))
+        z = np.zeros(qubo.num_vars(), dtype=int)
+        for j in range(qubo.num_vars()):
+            z[j] = int(sample[j])
+        x, valid = decode_onehot(z, qubo, repair=repair_mode)
+        labels[i] = x
+        vc = int(valid.sum())
+        valid_counts[i] = vc
+        invalid_mask[i] = vc != int(labels.shape[1])
+
+        if sa_restart == "previous":
+            next_init = x
+        else:
+            # fresh MD init for each sample
+            next_init = _build_sa_initial_labels(
+                mode="md",
+                md_labels=md_labels,
+                model=model,
+                beta=beta,
+                n_reads=1,
+                md_frame=-1,
+                rng=init_rng,
+            )[0]
+
+    return {"labels": labels, "invalid_mask": invalid_mask, "valid_counts": valid_counts}
+
 
 def run_sampling(
     *,
@@ -168,13 +373,15 @@ def run_sampling(
     rex_chains: int = 1,
     # sa
     sa_reads: int = 2000,
+    sa_chains: int = 1,
     sa_sweeps: int = 2000,
     sa_beta_hot: float = 0.0,
     sa_beta_cold: float = 0.0,
     sa_init: str = "md",
     sa_init_md_frame: int = -1,
-    sa_restart: str = "independent",
+    sa_restart: str = "previous",
     sa_restart_topk: int = 200,
+    sa_md_state_ids: str = "",
     penalty_safety: float = 3.0,
     repair: str = "none",
     progress_callback: Callable[[str, int], None] | None = None,
@@ -191,8 +398,6 @@ def run_sampling(
             progress_callback(msg, int(pct))
 
     model = _load_combined_model(model_npz)
-    md_ds = load_npz(cluster_npz, unassigned_policy="drop_frames", allow_missing_edges=True)
-    md_labels = md_ds.labels
 
     method = (sampling_method or "gibbs").strip().lower()
     if method not in {"gibbs", "sa"}:
@@ -334,43 +539,74 @@ def run_sampling(
     if sa_beta_hot and sa_beta_cold:
         beta_range = (float(sa_beta_hot), float(sa_beta_cold))
 
-    qubo = potts_to_qubo_onehot(model, beta=float(beta), penalty_safety=float(penalty_safety))
-    init_rng = np.random.default_rng(int(seed) + 1000)
-    init_labels = _build_sa_initial_labels(
-        mode=str(sa_init),
-        md_labels=md_labels,
-        model=model,
-        beta=float(beta),
-        n_reads=int(sa_reads),
-        md_frame=int(sa_init_md_frame),
-        rng=init_rng,
-    )
-    init_states = encode_onehot(init_labels, qubo) if init_labels is not None and init_labels.size else None
+    restart = str(sa_restart or "previous").strip().lower()
+    if restart not in {"previous", "md", "independent"}:
+        raise ValueError("--sa-restart must be one of: previous, md, independent.")
 
-    Z = sa_sample_qubo_neal(
-        qubo,
-        n_reads=int(sa_reads),
-        sweeps=int(sa_sweeps),
-        seed=int(seed),
-        progress=bool(progress),
-        beta_range=beta_range,
-        initial_states=init_states,
+    n_chains = max(1, int(sa_chains))
+    total_reads = max(0, int(sa_reads))
+    if total_reads <= 0:
+        labels = np.zeros((0, len(model.h)), dtype=np.int32)
+        save_sample_npz(sample_path, labels=labels)
+        return SamplingResult(sample_path=sample_path, n_samples=0, n_residues=int(labels.shape[1]))
+    if n_chains > max(1, total_reads):
+        n_chains = max(1, total_reads)
+    base = total_reads // n_chains if n_chains else total_reads
+    extra = total_reads % n_chains if n_chains else 0
+    chain_reads = [base + (1 if i < extra else 0) for i in range(n_chains)]
+    worker_fn = _run_sa_independent_worker if restart == "independent" else _run_sa_chain_worker
+
+    def _payload(idx: int, n: int) -> dict[str, object]:
+        common: dict[str, object] = {
+            "model_npz": model_npz,
+            "cluster_npz": cluster_npz,
+            "beta": float(beta),
+            "penalty_safety": float(penalty_safety),
+            "sweeps": int(sa_sweeps),
+            "seed": int(seed) + idx,
+            "beta_range": beta_range,
+            "sa_init": str(sa_init),
+            "sa_init_md_frame": int(sa_init_md_frame),
+            "sa_md_state_ids": str(sa_md_state_ids),
+            "repair": str(repair),
+        }
+        if restart == "independent":
+            common["n_reads"] = int(n)
+        else:
+            common["n_samples"] = int(n)
+            common["sa_restart"] = restart
+        return common
+
+    parts_labels: List[np.ndarray] = []
+    parts_invalid: List[np.ndarray] = []
+    parts_valid_counts: List[np.ndarray] = []
+
+    if n_chains <= 1:
+        out = worker_fn(_payload(0, int(total_reads)))
+        parts_labels.append(np.asarray(out["labels"], dtype=np.int32))
+        parts_invalid.append(np.asarray(out["invalid_mask"], dtype=bool))
+        parts_valid_counts.append(np.asarray(out["valid_counts"], dtype=np.int32))
+    else:
+        with ProcessPoolExecutor(max_workers=n_chains) as executor:
+            futures = {}
+            for idx, n in enumerate(chain_reads):
+                if int(n) <= 0:
+                    continue
+                futures[executor.submit(worker_fn, _payload(idx, int(n)))] = idx
+            completed = 0
+            for future in as_completed(futures):
+                out = future.result()
+                parts_labels.append(np.asarray(out["labels"], dtype=np.int32))
+                parts_invalid.append(np.asarray(out["invalid_mask"], dtype=bool))
+                parts_valid_counts.append(np.asarray(out["valid_counts"], dtype=np.int32))
+                completed += 1
+                report(f"SA chains {completed}/{n_chains}", 10 + int(80 * completed / max(1, n_chains)))
+
+    labels = np.concatenate(parts_labels, axis=0) if parts_labels else np.zeros((0, len(model.h)), dtype=np.int32)
+    invalid_mask = np.concatenate(parts_invalid, axis=0) if parts_invalid else np.zeros((labels.shape[0],), dtype=bool)
+    valid_counts = (
+        np.concatenate(parts_valid_counts, axis=0) if parts_valid_counts else np.zeros((labels.shape[0],), dtype=np.int32)
     )
 
-    repair_mode = None if str(repair) == "none" else str(repair)
-    labels = np.zeros((Z.shape[0], len(qubo.var_slices)), dtype=np.int32)
-    valid_counts = np.zeros(Z.shape[0], dtype=np.int32)
-    for i in range(Z.shape[0]):
-        x, valid = decode_onehot(Z[i], qubo, repair=repair_mode)
-        labels[i] = x
-        valid_counts[i] = int(valid.sum())
-    invalid_mask = np.array([np.any(qubo.constraint_violations(z) != 0) for z in Z], dtype=bool)
-
-    save_sample_npz(
-        sample_path,
-        labels=labels,
-        invalid_mask=invalid_mask,
-        valid_counts=valid_counts,
-    )
+    save_sample_npz(sample_path, labels=labels, invalid_mask=invalid_mask, valid_counts=valid_counts)
     return SamplingResult(sample_path=sample_path, n_samples=int(labels.shape[0]), n_residues=int(labels.shape[1]))
-

@@ -212,9 +212,16 @@ if [ "$SAMPLING_METHOD" = "gibbs" ]; then
   fi
 else
   SA_READS="$(prompt "SA reads" "2000")"
+  SA_CHAINS="$(prompt "SA chain count (parallel independent chains)" "1")"
   SA_SWEEPS="$(prompt "SA sweeps" "2000")"
   SA_BETA_HOT="$(prompt "SA beta hot (0 = default)" "0")"
   SA_BETA_COLD="$(prompt "SA beta cold (0 = default)" "0")"
+  SA_RESTART="$(prompt "SA restart (previous/md/independent)" "previous")"
+  SA_RESTART="$(printf "%s" "$SA_RESTART" | tr '[:upper:]' '[:lower:]')"
+  if [ "$SA_RESTART" != "md" ] && [ "$SA_RESTART" != "independent" ]; then
+    SA_RESTART="previous"
+  fi
+  SA_MD_STATE_IDS="$(prompt "SA MD state IDs (comma separated, blank = all)" "")"
 fi
 
 SEED="$(prompt "Random seed" "0")"
@@ -264,7 +271,10 @@ elif [ "$SAMPLING_METHOD" = "gibbs" ]; then
 fi
 
 if [ "$SAMPLING_METHOD" = "sa" ]; then
-  CMD+=(--sa-reads "$SA_READS" --sa-sweeps "$SA_SWEEPS")
+  CMD+=(--sa-reads "$SA_READS" --sa-chains "$SA_CHAINS" --sa-sweeps "$SA_SWEEPS" --sa-restart "$SA_RESTART")
+  if [ -n "$(trim "$SA_MD_STATE_IDS")" ]; then
+    CMD+=(--sa-md-state-ids "$(trim "$SA_MD_STATE_IDS")")
+  fi
 fi
 
 if [ "$SAMPLING_METHOD" = "sa" ] && [ "$SA_BETA_HOT" != "0" ] && [ "$SA_BETA_COLD" != "0" ]; then

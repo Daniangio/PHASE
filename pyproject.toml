@@ -44,6 +44,8 @@ dev = [
 [project.scripts]
 # This creates the `phase` command
 phase = "phase.cli:main"
+phase-console = "phase.scripts.phase_console:main"
+phase-lambda-sweep = "phase.scripts.potts_lambda_sweep:main"
 
 ## This explicitly tells setuptools to *only* look for packages starting with 'phase'
 [tool.setuptools.packages.find]

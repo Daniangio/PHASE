@@ -11,6 +11,7 @@ import DescriptorVizPage from './pages/DescriptorVizPage';
 import MetastableVizPage from './pages/MetastableVizPage';
 import SamplingVizPage from './pages/SamplingVizPage';
 import DeltaEvalPage from './pages/DeltaEvalPage';
+import LambdaSweepPage from './pages/LambdaSweepPage';
 import MolstarDebugPage from './pages/MolstarDebugPage';
 import HealthPage from './pages/HealthPage';
 import JobStatusPage from './pages/JobStatusPage';
@@ -38,6 +39,10 @@ export default function App() {
           <Route
             path="/projects/:projectId/systems/:systemId/sampling/delta_eval"
             element={<DeltaEvalPage />}
+          />
+          <Route
+            path="/projects/:projectId/systems/:systemId/sampling/lambda_sweep"
+            element={<LambdaSweepPage />}
           />
           <Route path="/results" element={<ResultsPage />} />
           <Route path="/results/:jobId" element={<ResultDetailPage />} />

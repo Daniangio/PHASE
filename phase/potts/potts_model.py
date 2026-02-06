@@ -539,6 +539,43 @@ def add_potts_models(base: PottsModel, delta: PottsModel) -> PottsModel:
     return PottsModel(h=h, J=J, edges=list(base.edges))
 
 
+def interpolate_potts_models(model0: PottsModel, model1: PottsModel, lam: float) -> PottsModel:
+    """
+    Linear interpolation in parameter space:
+      model(lam) = (1-lam) * model0 + lam * model1
+
+    This is the backbone used by the lambda-sweep experiment (validation_ladder4.MD).
+    Assumes both models share the same residue count, alphabet sizes, and edge set.
+    """
+    lam = float(lam)
+    if not np.isfinite(lam):
+        raise ValueError("lam must be finite.")
+    if len(model0.h) != len(model1.h):
+        raise ValueError("Potts model sizes do not match.")
+    edges0 = sorted((min(int(r), int(s)), max(int(r), int(s))) for r, s in (model0.edges or []) if int(r) != int(s))
+    edges1 = sorted((min(int(r), int(s)), max(int(r), int(s))) for r, s in (model1.edges or []) if int(r) != int(s))
+    if edges0 != edges1:
+        raise ValueError("Potts model edges do not match (cannot interpolate).")
+
+    h: List[np.ndarray] = []
+    for r in range(len(model0.h)):
+        h0 = np.asarray(model0.h[r], dtype=float)
+        h1 = np.asarray(model1.h[r], dtype=float)
+        if h0.shape != h1.shape:
+            raise ValueError(f"Potts model alphabet size mismatch at residue {r}.")
+        h.append((1.0 - lam) * h0 + lam * h1)
+
+    J: Dict[Tuple[int, int], np.ndarray] = {}
+    for (r, s) in edges0:
+        m0 = np.asarray(model0.J[(r, s)], dtype=float)
+        m1 = np.asarray(model1.J[(r, s)], dtype=float)
+        if m0.shape != m1.shape:
+            raise ValueError(f"Potts model coupling shape mismatch at edge ({r},{s}).")
+        J[(r, s)] = (1.0 - lam) * m0 + lam * m1
+
+    return PottsModel(h=h, J=J, edges=list(edges0))
+
+
 def fit_potts_delta_pseudolikelihood_torch(
     base_model: PottsModel,
     labels: np.ndarray,
@@ -561,6 +598,7 @@ def fit_potts_delta_pseudolikelihood_torch(
     best_model_metadata: Optional[dict] = None,
     best_combined_path: str | "os.PathLike[str]" | None = None,
     best_combined_metadata: Optional[dict] = None,
+    best_save_callback: "callable | None" = None,
     progress_callback: "callable | None" = None,
     progress_every: int = 10,
     batch_progress_callback: "callable | None" = None,
@@ -699,6 +737,12 @@ def fit_potts_delta_pseudolikelihood_torch(
             meta["delta_best_epoch"] = int(best_epoch)
             meta["delta_last_loss"] = float(train_loss)
             save_potts_model(combined_model, best_combined_path, metadata=meta)
+        if best_save_callback is not None:
+            best_save_callback(
+                int(ep),
+                float(best_loss),
+                float(train_loss),
+            )
 
     def _logits_for_residue(x_batch: "torch.Tensor", r: int) -> "torch.Tensor":
         B = x_batch.shape[0]

@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
-import { Info, Play, RefreshCw, Trash2, X } from 'lucide-react';
+import { CircleHelp, Info, Play, RefreshCw, Trash2, X } from 'lucide-react';
 import Plot from 'react-plotly.js';
 
 import Loader from '../components/common/Loader';
 import ErrorMessage from '../components/common/ErrorMessage';
+import HelpDrawer from '../components/common/HelpDrawer';
 import {
   deleteSamplingSample,
   fetchClusterAnalyses,
@@ -116,6 +117,21 @@ function SampleInfoPanel({ sample, stats, onClose }) {
             <span className="text-gray-400">source:</span> {sample.source}
           </div>
         )}
+        {sample.series_kind && (
+          <div>
+            <span className="text-gray-400">series:</span> {sample.series_kind}
+          </div>
+        )}
+        {sample.series_id && (
+          <div className="break-all">
+            <span className="text-gray-400">series_id:</span> {sample.series_id}
+          </div>
+        )}
+        {typeof sample.lambda === 'number' && Number.isFinite(sample.lambda) && (
+          <div>
+            <span className="text-gray-400">lambda:</span> {sample.lambda.toFixed(3)}
+          </div>
+        )}
         {sample.model_names && sample.model_names.length > 0 && (
           <div>
             <span className="text-gray-400">models:</span> {sample.model_names.join(', ')}
@@ -201,6 +217,7 @@ export default function SamplingVizPage() {
   const [sampleStatsError, setSampleStatsError] = useState(null);
 
   const [overlayPlot, setOverlayPlot] = useState(null);
+  const [helpOpen, setHelpOpen] = useState(false);
 
   const clusterOptions = useMemo(
     () => (system?.metastable_clusters || []).filter((run) => run.path && run.status !== 'failed'),
@@ -220,6 +237,7 @@ export default function SamplingVizPage() {
     if (!selectedModelId) return sampleEntries;
     return sampleEntries.filter((s) => {
       if (s.type === 'md_eval') return true;
+      if (s.type === 'potts_lambda_sweep') return true;
       const ids = Array.isArray(s.model_ids) ? s.model_ids : s.model_id ? [s.model_id] : [];
       if (!ids.length) return true;
       return ids.includes(selectedModelId);
@@ -234,6 +252,36 @@ export default function SamplingVizPage() {
     [filteredSamples]
   );
   const pottsSamples = useMemo(() => [...gibbsSamples, ...saSamples], [gibbsSamples, saSamples]);
+  const lambdaSweepSamples = useMemo(
+    () => filteredSamples.filter((s) => s.type === 'potts_lambda_sweep'),
+    [filteredSamples]
+  );
+  const selectableSamples = useMemo(() => [...pottsSamples, ...lambdaSweepSamples], [pottsSamples, lambdaSweepSamples]);
+
+  const lambdaSweepSeries = useMemo(() => {
+    const map = new Map();
+    lambdaSweepSamples.forEach((s) => {
+      const sid = s.series_id || 'unknown';
+      if (!map.has(sid)) {
+        map.set(sid, {
+          series_id: sid,
+          label: s.series_label || `Lambda sweep (${sid.slice(0, 8)})`,
+          samples: [],
+        });
+      }
+      map.get(sid).samples.push(s);
+    });
+    const out = Array.from(map.values());
+    out.forEach((g) => {
+      g.samples.sort((a, b) => {
+        const la = typeof a.lambda === 'number' ? a.lambda : Number.POSITIVE_INFINITY;
+        const lb = typeof b.lambda === 'number' ? b.lambda : Number.POSITIVE_INFINITY;
+        return la - lb;
+      });
+    });
+    out.sort((a, b) => String(a.label).localeCompare(String(b.label)));
+    return out;
+  }, [lambdaSweepSamples]);
 
   const infoSample = useMemo(() => sampleEntries.find((s) => s.sample_id === infoSampleId) || null, [sampleEntries, infoSampleId]);
   const infoSampleStats = useMemo(() => (infoSampleId ? sampleStatsCache[infoSampleId] : null), [sampleStatsCache, infoSampleId]);
@@ -338,14 +386,14 @@ export default function SamplingVizPage() {
   }, [mdSamples, selectedMdSampleId]);
 
   useEffect(() => {
-    if (!pottsSamples.length) {
+    if (!selectableSamples.length) {
       setSelectedSampleId('');
       return;
     }
-    if (!selectedSampleId || !pottsSamples.some((s) => s.sample_id === selectedSampleId)) {
-      setSelectedSampleId(pottsSamples[0].sample_id);
+    if (!selectedSampleId || !selectableSamples.some((s) => s.sample_id === selectedSampleId)) {
+      setSelectedSampleId(selectableSamples[0].sample_id);
     }
-  }, [pottsSamples, selectedSampleId]);
+  }, [selectableSamples, selectedSampleId]);
 
   const mdVsSampleAnalyses = useMemo(
     () => analyses.filter((a) => a.analysis_type === 'md_vs_sample'),
@@ -710,6 +758,12 @@ export default function SamplingVizPage() {
   return (
     <div className="space-y-4">
       <PlotOverlay overlay={overlayPlot} onClose={() => setOverlayPlot(null)} />
+      <HelpDrawer
+        open={helpOpen}
+        title="Sampling Explorer: How To Read The Plots"
+        docPath="/docs/sampling_viz_help.md"
+        onClose={() => setHelpOpen(false)}
+      />
 
       <div className="flex items-start justify-between gap-3">
         <div>
@@ -722,10 +776,25 @@ export default function SamplingVizPage() {
         <div className="flex items-center gap-2">
           <button
             type="button"
+            onClick={() => setHelpOpen(true)}
+            className="text-xs px-3 py-2 rounded-md border border-gray-700 text-gray-200 hover:border-gray-500 inline-flex items-center gap-2"
+          >
+            <CircleHelp className="h-4 w-4" />
+            Help
+          </button>
+          <button
+            type="button"
             onClick={() => navigate(`/projects/${projectId}/systems/${systemId}/sampling/delta_eval`)}
             className="text-xs px-3 py-2 rounded-md border border-gray-700 text-gray-200 hover:border-gray-500"
           >
             Delta eval
+          </button>
+          <button
+            type="button"
+            onClick={() => navigate(`/projects/${projectId}/systems/${systemId}/sampling/lambda_sweep`)}
+            className="text-xs px-3 py-2 rounded-md border border-gray-700 text-gray-200 hover:border-gray-500"
+          >
+            Lambda sweep
           </button>
           <button
             type="button"
@@ -934,6 +1003,60 @@ export default function SamplingVizPage() {
               )}
             </div>
 
+            <div>
+              <p className="text-xs font-semibold text-gray-300">Lambda sweeps</p>
+              {lambdaSweepSamples.length === 0 && (
+                <p className="text-[11px] text-gray-500 mt-1">No lambda sweep samples yet.</p>
+              )}
+              {lambdaSweepSeries.length > 0 && (
+                <div className="space-y-2 mt-2">
+                  {lambdaSweepSeries.map((group) => (
+                    <div key={group.series_id} className="rounded-md border border-gray-800 bg-gray-950/30 p-2">
+                      <p className="text-[11px] text-gray-200 font-semibold">{group.label}</p>
+                      <p className="text-[10px] text-gray-500">{group.samples.length} samples</p>
+                      <div className="space-y-1 mt-2">
+                        {group.samples.map((sample) => (
+                          <div
+                            key={sample.sample_id || sample.path}
+                            className="flex items-center justify-between gap-2 rounded-md border border-gray-800 bg-gray-950/40 px-2 py-1 text-[11px] text-gray-300"
+                          >
+                            <button
+                              type="button"
+                              onClick={() => setSelectedSampleId(sample.sample_id)}
+                              className={`truncate text-left ${selectedSampleId === sample.sample_id ? 'text-cyan-200' : ''}`}
+                            >
+                              {typeof sample.lambda === 'number' && Number.isFinite(sample.lambda)
+                                ? `λ=${sample.lambda.toFixed(3)}`
+                                : sample.name || 'Lambda sample'}{' '}
+                              • {sample.created_at || ''}
+                            </button>
+                            <div className="flex items-center gap-2">
+                              <button
+                                type="button"
+                                onClick={() => toggleInfo(sample.sample_id)}
+                                className="text-gray-400 hover:text-gray-200"
+                                aria-label={`Show info for ${sample.name || 'lambda sweep sample'}`}
+                              >
+                                <Info className="h-4 w-4" />
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleDeleteSample(sample.sample_id)}
+                                className="text-gray-400 hover:text-red-300"
+                                aria-label={`Delete ${sample.name || 'lambda sweep sample'}`}
+                              >
+                                <Trash2 className="h-4 w-4" />
+                              </button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
             {sampleStatsError && <ErrorMessage message={sampleStatsError} />}
             <SampleInfoPanel
               sample={infoSample}
@@ -971,13 +1094,13 @@ export default function SamplingVizPage() {
                 </select>
               </div>
               <div>
-                <label className="block text-xs text-gray-400 mb-1">Potts sample</label>
+                <label className="block text-xs text-gray-400 mb-1">Sample</label>
                 <select
                   value={selectedSampleId}
                   onChange={(e) => setSelectedSampleId(e.target.value)}
                   className="w-full bg-gray-900 border border-gray-700 rounded-md px-3 py-2 text-white"
                 >
-                  {pottsSamples.map((s) => (
+                  {selectableSamples.map((s) => (
                     <option key={s.sample_id} value={s.sample_id}>
                       {s.name || s.sample_id}
                     </option>

@@ -24,6 +24,15 @@ Common fields
 - `path` (string or null) – optional shortcut to the primary NPZ
 - `params` (object, optional) – sampling hyperparameters
 
+Correlated samples (optional)
+- `series_kind` (string) – e.g. `lambda_sweep`
+- `series_id` (string) – correlation key shared by all samples in the series
+- `series_label` (string) – display label for the series
+- `lambda` (float) – for `lambda_sweep` samples, the interpolation value in `[0,1]`
+- `lambda_index` (int) – index in the lambda grid (0-based)
+- `lambda_count` (int) – total number of lambdas in the sweep
+- `endpoint_model_a_id` / `endpoint_model_b_id` (string) – endpoint model references
+
 Typical `paths` keys
 - `summary_npz`
 

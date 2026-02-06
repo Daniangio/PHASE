@@ -42,6 +42,20 @@ export function submitDeltaEvalJob(payload) {
   });
 }
 
+export function submitDeltaTransitionJob(payload) {
+  return requestJSON('/submit/delta_transition', {
+    method: 'POST',
+    body: payload,
+  });
+}
+
+export function submitLambdaSweepJob(payload) {
+  return requestJSON('/submit/lambda_sweep', {
+    method: 'POST',
+    body: payload,
+  });
+}
+
 export function fetchResults() {
   return requestJSON('/results');
 }

@@ -21,7 +21,15 @@ from phase.pipeline.runner import run_analysis
 from phase.potts.pipeline import parse_args as parse_simulation_args
 from phase.potts.pipeline import run_pipeline as run_simulation_pipeline
 from phase.potts.sampling_run import run_sampling
-from phase.potts.analysis_run import analyze_cluster_samples, compute_md_delta_preference
+from phase.potts.analysis_run import (
+    analyze_cluster_samples,
+    compute_delta_transition_analysis,
+    compute_lambda_sweep_analysis,
+    compute_md_delta_preference,
+)
+from phase.potts.potts_model import interpolate_potts_models, load_potts_model, zero_sum_gauge_model
+from phase.potts.sample_io import save_sample_npz
+from phase.potts.sampling import gibbs_sample_potts, make_beta_ladder, replica_exchange_gibbs_potts
 from phase.common.runtime import RuntimePolicy
 from phase.potts import pipeline as sim_main
 from phase.potts import delta_fit as delta_fit_main
@@ -715,11 +723,14 @@ def run_simulation_job(
             rex_thin_rounds=int(sim_params.get("rex_thin") or sim_params.get("rex_thin_rounds") or 1),
             rex_chains=int(sim_params.get("rex_chains") or sim_params.get("rex_chain_count") or 1),
             sa_reads=int(sim_params.get("sa_reads") or 2000),
+            sa_chains=int(sim_params.get("sa_chains") or 1),
             sa_sweeps=int(sim_params.get("sa_sweeps") or 2000),
             sa_beta_hot=float(sim_params.get("sa_beta_hot") or 0.0),
             sa_beta_cold=float(sim_params.get("sa_beta_cold") or 0.0),
             sa_init=str(sim_params.get("sa_init") or "md"),
             sa_init_md_frame=int(sim_params.get("sa_init_md_frame") or -1),
+            sa_restart=str(sim_params.get("sa_restart") or "previous"),
+            sa_md_state_ids=str(sim_params.get("sa_md_state_ids") or ""),
             penalty_safety=float(sim_params.get("penalty_safety") or 3.0),
             repair=str(sim_params.get("repair") or "none"),
             progress_callback=save_progress,
@@ -762,7 +773,8 @@ def run_simulation_job(
                 "sa_reads": 2000,
                 "sa_sweeps": 2000,
                 "sa_init": "md",
-                "sa_restart": "independent",
+                "sa_restart": "previous",
+                "sa_chains": 1,
             }
 
             def _maybe(key: str, value: Any) -> None:
@@ -794,13 +806,18 @@ def run_simulation_job(
                 _maybe("rex_burnin_rounds", int(burnin) if burnin is not None else None)
                 _maybe("rex_thin_rounds", int(thin) if thin is not None else None)
             else:
+                # Keep a few key SA parameters even when defaults are used (mirrors offline sampling metadata).
+                out["beta"] = float(effective_beta)
+                out["sa_restart"] = str(raw.get("sa_restart") or "previous")
+                out["sa_sweeps"] = int(raw.get("sa_sweeps") or 2000)
+
                 _maybe("sa_reads", int(raw.get("sa_reads")) if raw.get("sa_reads") is not None else None)
-                _maybe("sa_sweeps", int(raw.get("sa_sweeps")) if raw.get("sa_sweeps") is not None else None)
                 _maybe("sa_beta_hot", float(raw.get("sa_beta_hot")) if raw.get("sa_beta_hot") is not None else None)
                 _maybe("sa_beta_cold", float(raw.get("sa_beta_cold")) if raw.get("sa_beta_cold") is not None else None)
                 _maybe("sa_init", str(raw.get("sa_init") or "md"))
                 _maybe("sa_init_md_frame", int(raw.get("sa_init_md_frame")) if raw.get("sa_init_md_frame") is not None else None)
-                _maybe("sa_restart", str(raw.get("sa_restart") or "independent"))
+                _maybe("sa_chains", int(raw.get("sa_chains")) if raw.get("sa_chains") is not None else None)
+                _maybe("sa_md_state_ids", str(raw.get("sa_md_state_ids") or ""))
                 _maybe("sa_restart_topk", int(raw.get("sa_restart_topk")) if raw.get("sa_restart_topk") is not None else None)
 
             return out
@@ -856,6 +873,445 @@ def run_simulation_job(
         write_result_to_disk(sanitized_payload)
 
     save_progress("Simulation completed", 100)
+    return sanitized_payload
+
+
+def run_lambda_sweep_job(
+    job_uuid: str,
+    dataset_ref: Dict[str, str],
+    params: Dict[str, Any],
+):
+    """
+    Run the validation_ladder4.MD lambda-interpolation experiment:
+      - sample N ensembles from interpolated endpoint models with λ in [0,1]
+      - persist each ensemble as an independent sample folder (correlated via series metadata)
+      - compute a dedicated lambda_sweep analysis vs 3 reference MD samples
+
+    Results:
+      - samples written under clusters/<cluster_id>/samples/<sample_id>/sample.npz
+      - analysis written under clusters/<cluster_id>/analyses/lambda_sweep/<analysis_id>/
+    """
+    job = get_current_job()
+    start_time = datetime.utcnow()
+    rq_job_id = job.id if job else f"lambda-sweep-{job_uuid}"
+
+    project_id = dataset_ref.get("project_id")
+    system_id = dataset_ref.get("system_id")
+    cluster_id = dataset_ref.get("cluster_id")
+    if not project_id or not system_id or not cluster_id:
+        raise ValueError("lambda_sweep requires project_id/system_id/cluster_id.")
+
+    results_dirs = project_store.ensure_results_directories(project_id, system_id)
+    result_filepath = results_dirs["jobs_dir"] / f"{job_uuid}.json"
+
+    result_payload: Dict[str, Any] = {
+        "job_id": job_uuid,
+        "rq_job_id": rq_job_id,
+        "analysis_type": "lambda_sweep",
+        "status": "started",
+        "created_at": start_time.isoformat(),
+        "params": params,
+        "results": None,
+        "system_reference": {
+            "project_id": project_id,
+            "system_id": system_id,
+            "cluster_id": cluster_id,
+        },
+        "error": None,
+        "completed_at": None,
+    }
+
+    def force_single_thread():
+        os.environ["OMP_NUM_THREADS"] = "1"
+        os.environ["MKL_NUM_THREADS"] = "1"
+        os.environ["OPENBLAS_NUM_THREADS"] = "1"
+        os.environ["NUMEXPR_NUM_THREADS"] = "1"
+
+    def save_progress(status_msg: str, progress: int):
+        if job:
+            job.meta["status"] = status_msg
+            job.meta["progress"] = progress
+            job.save_meta()
+        print(f"[LambdaSweep {job_uuid}] {status_msg}")
+
+    def write_result_to_disk(payload: Dict[str, Any]):
+        try:
+            with open(result_filepath, "w") as f:
+                json.dump(payload, f, indent=2)
+        except Exception as e:
+            print(f"CRITICAL: Failed to save result file {result_filepath}: {e}")
+            payload["status"] = "failed"
+            payload["error"] = f"Failed to save result file: {e}"
+
+    def _parse_float_list(raw: str) -> List[float]:
+        parts = [p.strip() for p in str(raw or "").split(",") if p.strip()]
+        return [float(p) for p in parts]
+
+    def _filter_sampling_params(raw: Dict[str, Any]) -> Dict[str, Any]:
+        # Keep a minimal, stable configuration in metadata (skip defaults).
+        defaults = {
+            "gibbs_samples": 500,
+            "gibbs_burnin": 50,
+            "gibbs_thin": 2,
+            "rex_beta_min": 0.2,
+            "rex_beta_max": 1.0,
+            "rex_spacing": "geom",
+            "rex_n_replicas": 8,
+            "rex_rounds": 2000,
+            "rex_burnin_rounds": 50,
+            "rex_sweeps_per_round": 2,
+            "rex_thin_rounds": 1,
+        }
+
+        out: Dict[str, Any] = {"sampling_method": "gibbs"}
+
+        def _maybe(key: str, value: Any) -> None:
+            if value in (None, "", [], {}):
+                return
+            if key in defaults and value == defaults[key]:
+                return
+            out[key] = value
+
+        gm = str(raw.get("gibbs_method") or "rex").lower()
+        if gm not in {"single", "rex"}:
+            gm = "rex"
+        _maybe("gibbs_method", gm)
+        beta = float(raw.get("beta") or 1.0)
+        _maybe("beta", beta)
+
+        if gm == "single":
+            _maybe("gibbs_samples", int(raw.get("gibbs_samples") or defaults["gibbs_samples"]))
+            _maybe("gibbs_burnin", int(raw.get("gibbs_burnin") or defaults["gibbs_burnin"]))
+            _maybe("gibbs_thin", int(raw.get("gibbs_thin") or defaults["gibbs_thin"]))
+        else:
+            rex_betas = raw.get("rex_betas")
+            if isinstance(rex_betas, list):
+                rex_betas = ",".join(str(v) for v in rex_betas)
+            if isinstance(rex_betas, str) and rex_betas.strip():
+                _maybe("rex_betas", str(rex_betas).strip())
+            else:
+                _maybe("rex_beta_min", float(raw.get("rex_beta_min") or defaults["rex_beta_min"]))
+                _maybe("rex_beta_max", float(raw.get("rex_beta_max") or defaults["rex_beta_max"]))
+                _maybe("rex_n_replicas", int(raw.get("rex_n_replicas") or defaults["rex_n_replicas"]))
+                _maybe("rex_spacing", str(raw.get("rex_spacing") or defaults["rex_spacing"]))
+
+            _maybe("rex_rounds", int(raw.get("rex_rounds") or raw.get("rex_samples") or defaults["rex_rounds"]))
+            _maybe("rex_burnin_rounds", int(raw.get("rex_burnin_rounds") or raw.get("rex_burnin") or defaults["rex_burnin_rounds"]))
+            _maybe("rex_sweeps_per_round", int(raw.get("rex_sweeps_per_round") or defaults["rex_sweeps_per_round"]))
+            _maybe("rex_thin_rounds", int(raw.get("rex_thin_rounds") or raw.get("rex_thin") or defaults["rex_thin_rounds"]))
+
+        seed = raw.get("seed")
+        if seed is not None:
+            _maybe("seed", int(seed))
+        return out
+
+    try:
+        force_single_thread()
+        save_progress("Initializing...", 0)
+        write_result_to_disk(result_payload)
+
+        system_meta = project_store.get_system(project_id, system_id)
+        clusters = system_meta.metastable_clusters or []
+        entry = next((c for c in clusters if c.get("cluster_id") == cluster_id), None)
+        if not isinstance(entry, dict):
+            raise FileNotFoundError(f"Cluster '{cluster_id}' not found.")
+
+        # Endpoint models
+        model_a_id = str(params.get("model_a_id") or "").strip()
+        model_b_id = str(params.get("model_b_id") or "").strip()
+        if not model_a_id or not model_b_id:
+            raise ValueError("lambda_sweep requires model_a_id and model_b_id.")
+        if model_a_id == model_b_id:
+            raise ValueError("Select two different endpoint models.")
+
+        models_meta = entry.get("potts_models") or []
+        model_a_meta = next((m for m in models_meta if isinstance(m, dict) and m.get("model_id") == model_a_id), None)
+        model_b_meta = next((m for m in models_meta if isinstance(m, dict) and m.get("model_id") == model_b_id), None)
+        if not model_a_meta or not model_a_meta.get("path"):
+            raise FileNotFoundError(f"Endpoint model A not found on this cluster: {model_a_id}")
+        if not model_b_meta or not model_b_meta.get("path"):
+            raise FileNotFoundError(f"Endpoint model B not found on this cluster: {model_b_id}")
+
+        def _reject_delta_only(meta: Dict[str, Any], label: str) -> None:
+            p = meta.get("params") or {}
+            kind = str(p.get("delta_kind") or "")
+            if kind.startswith("delta"):
+                raise ValueError(f"{label} is a delta-only model ({kind}); choose the combined model_* endpoint instead.")
+
+        _reject_delta_only(model_a_meta, "model_a_id")
+        _reject_delta_only(model_b_meta, "model_b_id")
+
+        model_a_name = model_a_meta.get("name") or model_a_id
+        model_b_name = model_b_meta.get("name") or model_b_id
+        model_a_path = project_store.resolve_path(project_id, system_id, str(model_a_meta.get("path")))
+        model_b_path = project_store.resolve_path(project_id, system_id, str(model_b_meta.get("path")))
+        if not model_a_path.exists():
+            raise FileNotFoundError(f"Model A NPZ missing on disk: {model_a_path}")
+        if not model_b_path.exists():
+            raise FileNotFoundError(f"Model B NPZ missing on disk: {model_b_path}")
+
+        endpoint_a = zero_sum_gauge_model(load_potts_model(str(model_a_path)))
+        endpoint_b = zero_sum_gauge_model(load_potts_model(str(model_b_path)))
+
+        # Lambda grid
+        lambda_count = int(params.get("lambda_count") or 11)
+        if lambda_count < 2:
+            raise ValueError("lambda_count must be >= 2.")
+        lambdas = np.linspace(0.0, 1.0, lambda_count).astype(float).tolist()
+
+        series_id = str(params.get("series_id") or uuid.uuid4())
+        series_label = str(params.get("series_label") or "").strip()
+        if not series_label:
+            series_label = f"Lambda sweep {datetime.utcnow().strftime('%Y%m%d %H:%M')}"
+
+        # Sampling params (Gibbs only)
+        gibbs_method = str(params.get("gibbs_method") or "rex").lower()
+        if gibbs_method not in {"single", "rex"}:
+            gibbs_method = "rex"
+        beta = float(params.get("beta") or 1.0)
+        base_seed = int(params.get("seed") or 0)
+
+        gibbs_samples = int(params.get("gibbs_samples") or 500)
+        gibbs_burnin = int(params.get("gibbs_burnin") or 50)
+        gibbs_thin = int(params.get("gibbs_thin") or 2)
+
+        rex_betas_raw = params.get("rex_betas")
+        rex_beta_min = float(params.get("rex_beta_min") or 0.2)
+        rex_beta_max = float(params.get("rex_beta_max") or 1.0)
+        rex_spacing = str(params.get("rex_spacing") or "geom")
+        rex_n_replicas = int(params.get("rex_n_replicas") or 8)
+        rex_rounds = int(params.get("rex_rounds") or params.get("rex_samples") or 2000)
+        rex_burnin_rounds = int(params.get("rex_burnin_rounds") or params.get("rex_burnin") or 50)
+        rex_sweeps_per_round = int(params.get("rex_sweeps_per_round") or 2)
+        rex_thin_rounds = int(params.get("rex_thin_rounds") or params.get("rex_thin") or 1)
+
+        md_label_mode = (params.get("md_label_mode") or "assigned").lower()
+        keep_invalid = bool(params.get("keep_invalid", False))
+        alpha = float(params.get("alpha", 0.5))
+
+        ref_md_ids = [
+            str(params.get("md_sample_id_1") or "").strip(),
+            str(params.get("md_sample_id_2") or "").strip(),
+            str(params.get("md_sample_id_3") or "").strip(),
+        ]
+        if not all(ref_md_ids):
+            raise ValueError("lambda_sweep requires md_sample_id_1, md_sample_id_2, md_sample_id_3.")
+
+        # Output sample folders
+        cluster_dirs = project_store.ensure_cluster_directories(project_id, system_id, cluster_id)
+        system_dir = cluster_dirs["system_dir"]
+        samples_dir = cluster_dirs["samples_dir"]
+
+        sample_ids: List[str] = []
+        sample_names: List[str] = []
+
+        save_progress("Sampling lambda grid...", 10)
+
+        for idx, lam in enumerate(lambdas):
+            pct = 10 + int(60 * (idx / max(1, len(lambdas))))
+            save_progress(f"Sampling λ={lam:.3f} ({idx + 1}/{len(lambdas)})", pct)
+
+            sample_id = str(uuid.uuid4())
+            sample_dir = samples_dir / sample_id
+            sample_dir.mkdir(parents=True, exist_ok=True)
+
+            model_lam = interpolate_potts_models(endpoint_b, endpoint_a, float(lam))
+
+            # Sample labels
+            seed = base_seed + idx
+            if gibbs_method == "single":
+                labels = gibbs_sample_potts(
+                    model_lam,
+                    beta=float(beta),
+                    n_samples=int(gibbs_samples),
+                    burn_in=int(gibbs_burnin),
+                    thinning=int(gibbs_thin),
+                    seed=int(seed),
+                    progress=False,
+                    progress_mode="samples",
+                )
+            else:
+                if isinstance(rex_betas_raw, list):
+                    betas = [float(v) for v in rex_betas_raw]
+                elif isinstance(rex_betas_raw, str) and rex_betas_raw.strip():
+                    betas = _parse_float_list(rex_betas_raw)
+                else:
+                    betas = make_beta_ladder(
+                        beta_min=float(rex_beta_min),
+                        beta_max=float(rex_beta_max),
+                        n_replicas=int(rex_n_replicas),
+                        spacing=str(rex_spacing),
+                    )
+                if all(abs(float(b) - float(beta)) > 1e-12 for b in betas):
+                    betas = sorted(set(list(betas) + [float(beta)]))
+
+                burn_in = min(int(rex_burnin_rounds), max(0, int(rex_rounds) - 1))
+                run = replica_exchange_gibbs_potts(
+                    model_lam,
+                    betas=betas,
+                    sweeps_per_round=int(rex_sweeps_per_round),
+                    n_rounds=int(rex_rounds),
+                    burn_in_rounds=int(burn_in),
+                    thinning_rounds=int(rex_thin_rounds),
+                    seed=int(seed),
+                    progress=False,
+                    progress_mode="samples",
+                )
+                samples_by_beta = run.get("samples_by_beta")
+                labels = None
+                if isinstance(samples_by_beta, dict):
+                    labels = samples_by_beta.get(float(beta))
+                if not isinstance(labels, np.ndarray):
+                    labels = np.zeros((0, len(model_lam.h)), dtype=int)
+
+            summary_path = save_sample_npz(sample_dir / "sample.npz", labels=labels)
+            try:
+                rel_summary = str(summary_path.relative_to(system_dir))
+            except Exception:
+                rel_summary = str(summary_path)
+
+            display_name = f"{series_label} λ={float(lam):.3f}"
+
+            sample_entry: Dict[str, Any] = {
+                "sample_id": sample_id,
+                "name": display_name,
+                "type": "potts_lambda_sweep",
+                "method": "gibbs",
+                "source": "lambda_sweep",
+                "model_id": None,
+                "model_ids": [model_b_id, model_a_id],
+                "model_names": [str(model_b_name), str(model_a_name)],
+                "created_at": datetime.utcnow().isoformat(),
+                "path": rel_summary,
+                "paths": {"summary_npz": rel_summary},
+                "params": _filter_sampling_params(params),
+                # Correlation metadata
+                "series_kind": "lambda_sweep",
+                "series_id": series_id,
+                "series_label": series_label,
+                "lambda": float(lam),
+                "lambda_index": int(idx),
+                "lambda_count": int(lambda_count),
+                "endpoint_model_a_id": model_a_id,
+                "endpoint_model_b_id": model_b_id,
+            }
+
+            # Persist into system metadata immediately so partial progress is visible if the job is interrupted.
+            system_meta = project_store.get_system(project_id, system_id)
+            clusters = system_meta.metastable_clusters or []
+            cluster_entry = next((c for c in clusters if c.get("cluster_id") == cluster_id), None)
+            if not isinstance(cluster_entry, dict):
+                raise FileNotFoundError(f"Cluster '{cluster_id}' not found while persisting samples.")
+            samples_list = cluster_entry.get("samples")
+            if not isinstance(samples_list, list):
+                samples_list = []
+            samples_list.append(sample_entry)
+            cluster_entry["samples"] = samples_list
+            system_meta.metastable_clusters = clusters
+            project_store.save_system(system_meta)
+
+            sample_ids.append(sample_id)
+            sample_names.append(display_name)
+
+        # Analysis
+        save_progress("Computing lambda-sweep analysis...", 75)
+        analysis_payload = compute_lambda_sweep_analysis(
+            project_id=project_id,
+            system_id=system_id,
+            cluster_id=cluster_id,
+            model_a_ref=model_a_id,
+            model_b_ref=model_b_id,
+            lambda_sample_ids=sample_ids,
+            lambdas=lambdas,
+            ref_md_sample_ids=ref_md_ids,
+            md_label_mode=md_label_mode,
+            drop_invalid=not keep_invalid,
+            alpha=float(alpha),
+        )
+
+        analyses_dir = cluster_dirs["cluster_dir"] / "analyses" / "lambda_sweep"
+        analyses_dir.mkdir(parents=True, exist_ok=True)
+        analysis_id = str(uuid.uuid4())
+        out_dir = analyses_dir / analysis_id
+        out_dir.mkdir(parents=True, exist_ok=True)
+        npz_path = out_dir / "analysis.npz"
+        meta_path = out_dir / "analysis_metadata.json"
+
+        np.savez_compressed(
+            npz_path,
+            lambdas=np.asarray(analysis_payload["lambdas"], dtype=float),
+            edges=np.asarray(analysis_payload["edges"], dtype=int),
+            node_js_mean=np.asarray(analysis_payload["node_js_mean"], dtype=float),
+            edge_js_mean=np.asarray(analysis_payload["edge_js_mean"], dtype=float),
+            combined_distance=np.asarray(analysis_payload["combined_distance"], dtype=float),
+            deltaE_mean=np.asarray(analysis_payload["deltaE_mean"], dtype=float),
+            deltaE_q25=np.asarray(analysis_payload["deltaE_q25"], dtype=float),
+            deltaE_q75=np.asarray(analysis_payload["deltaE_q75"], dtype=float),
+            sample_ids=np.asarray(analysis_payload["sample_ids"], dtype=str),
+            sample_names=np.asarray(analysis_payload["sample_names"], dtype=str),
+            ref_md_sample_ids=np.asarray(analysis_payload["ref_md_sample_ids"], dtype=str),
+            ref_md_sample_names=np.asarray(analysis_payload["ref_md_sample_names"], dtype=str),
+            alpha=np.asarray([analysis_payload["alpha"]], dtype=float),
+            match_ref_index=np.asarray([analysis_payload["match_ref_index"]], dtype=int),
+            lambda_star_index=np.asarray([analysis_payload["lambda_star_index"]], dtype=int),
+            lambda_star=np.asarray([analysis_payload["lambda_star"]], dtype=float),
+            match_min=np.asarray([analysis_payload["match_min"]], dtype=float),
+        )
+
+        meta = {
+            "analysis_id": analysis_id,
+            "analysis_type": "lambda_sweep",
+            "created_at": datetime.utcnow().isoformat(),
+            "project_id": project_id,
+            "system_id": system_id,
+            "cluster_id": cluster_id,
+            "series_kind": "lambda_sweep",
+            "series_id": series_id,
+            "series_label": series_label,
+            "model_a_id": model_a_id,
+            "model_a_name": model_a_name,
+            "model_b_id": model_b_id,
+            "model_b_name": model_b_name,
+            "md_sample_ids": ref_md_ids,
+            "md_sample_names": analysis_payload.get("ref_md_sample_names") or [],
+            "md_label_mode": md_label_mode,
+            "drop_invalid": bool(not keep_invalid),
+            "alpha": float(alpha),
+            "lambda_count": int(lambda_count),
+            "paths": {
+                "analysis_npz": str(npz_path.relative_to(system_dir)),
+            },
+            "summary": {
+                "lambda_star": analysis_payload.get("lambda_star"),
+                "match_min": analysis_payload.get("match_min"),
+            },
+        }
+        meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+
+        result_payload["status"] = "finished"
+        result_payload["results"] = {
+            "series_id": series_id,
+            "series_label": series_label,
+            "sample_ids": sample_ids,
+            "analysis_id": analysis_id,
+            "analysis_dir": _relativize_path(out_dir),
+            "analysis_npz": _relativize_path(npz_path),
+        }
+
+    except Exception as e:
+        print(f"[LambdaSweep {job_uuid}] FAILED: {e}")
+        traceback.print_exc()
+        result_payload["status"] = "failed"
+        result_payload["error"] = str(e)
+        raise e
+
+    finally:
+        save_progress("Saving final result", 95)
+        result_payload["completed_at"] = datetime.utcnow().isoformat()
+        sanitized_payload = _convert_nan_to_none(result_payload)
+        write_result_to_disk(sanitized_payload)
+
+    save_progress("Lambda sweep completed", 100)
     return sanitized_payload
 
 
@@ -1239,6 +1695,7 @@ def run_delta_eval_job(
             model_b_ref=model_b_id,
             md_label_mode=md_label_mode,
             drop_invalid=not keep_invalid,
+            include_potts_overlay=True,
         )
 
         cluster_dirs = project_store.ensure_cluster_directories(project_id, system_id, cluster_id)
@@ -1252,6 +1709,13 @@ def run_delta_eval_job(
         npz_path = out_dir / "analysis.npz"
         meta_path = out_dir / "analysis_metadata.json"
 
+        potts_a = payload.get("delta_energy_potts_a")
+        if potts_a is None:
+            potts_a = np.zeros((0,), dtype=float)
+        potts_b = payload.get("delta_energy_potts_b")
+        if potts_b is None:
+            potts_b = np.zeros((0,), dtype=float)
+
         # Persist NPZ
         np.savez_compressed(
             npz_path,
@@ -1260,6 +1724,8 @@ def run_delta_eval_job(
             delta_residue_std=np.asarray(payload["delta_residue_std"], dtype=float),
             edges=np.asarray(payload["edges"], dtype=int),
             delta_edge_mean=np.asarray(payload["delta_edge_mean"], dtype=float),
+            delta_energy_potts_a=np.asarray(potts_a, dtype=float),
+            delta_energy_potts_b=np.asarray(potts_b, dtype=float),
         )
 
         # Persist metadata (cluster-relative paths)
@@ -1279,6 +1745,12 @@ def run_delta_eval_job(
             "drop_invalid": bool(not keep_invalid),
             "md_label_mode": md_label_mode,
             "paths": {"analysis_npz": str(npz_path.relative_to(system_dir))},
+            "potts_overlay": {
+                "sample_ids_a": payload.get("potts_sample_ids_a") or [],
+                "sample_ids_b": payload.get("potts_sample_ids_b") or [],
+                "frames_a": int(np.asarray(potts_a).shape[0]),
+                "frames_b": int(np.asarray(potts_b).shape[0]),
+            },
             "summary": {
                 "frames": int(np.asarray(payload["delta_energy"]).shape[0]),
                 "residues": int(np.asarray(payload["delta_residue_mean"]).shape[0]),
@@ -1309,6 +1781,204 @@ def run_delta_eval_job(
         write_result_to_disk(sanitized_payload)
 
     save_progress("Delta eval completed", 100)
+    return sanitized_payload
+
+
+def run_delta_transition_job(
+    job_uuid: str,
+    dataset_ref: Dict[str, str],
+    params: Dict[str, Any],
+):
+    """
+    Implements the "TS-like" operational analysis described in validation_ladder3.MD (Step 1-4).
+
+    Results are written under clusters/<cluster_id>/analyses/delta_transition/.
+    """
+    job = get_current_job()
+    start_time = datetime.utcnow()
+    rq_job_id = job.id if job else f"delta-transition-{job_uuid}"
+
+    project_id = dataset_ref.get("project_id")
+    system_id = dataset_ref.get("system_id")
+    cluster_id = dataset_ref.get("cluster_id")
+    if not project_id or not system_id or not cluster_id:
+        raise ValueError("delta_transition requires project_id/system_id/cluster_id.")
+
+    results_dirs = project_store.ensure_results_directories(project_id, system_id)
+    result_filepath = results_dirs["jobs_dir"] / f"{job_uuid}.json"
+
+    result_payload: Dict[str, Any] = {
+        "job_id": job_uuid,
+        "rq_job_id": rq_job_id,
+        "analysis_type": "delta_transition",
+        "status": "started",
+        "created_at": start_time.isoformat(),
+        "params": params,
+        "results": None,
+        "system_reference": {
+            "project_id": project_id,
+            "system_id": system_id,
+            "cluster_id": cluster_id,
+        },
+        "error": None,
+        "completed_at": None,
+    }
+
+    def save_progress(status_msg: str, progress: int):
+        if job:
+            job.meta["status"] = status_msg
+            job.meta["progress"] = progress
+            job.save_meta()
+        print(f"[DeltaTransition {job_uuid}] {status_msg}")
+
+    def write_result_to_disk(payload: Dict[str, Any]):
+        try:
+            with open(result_filepath, "w") as f:
+                json.dump(payload, f, indent=2)
+        except Exception as e:
+            print(f"CRITICAL: Failed to save result file {result_filepath}: {e}")
+            payload["status"] = "failed"
+            payload["error"] = f"Failed to save result file: {e}"
+
+    try:
+        save_progress("Initializing...", 0)
+        write_result_to_disk(result_payload)
+
+        active_id = str(params.get("active_md_sample_id") or "").strip()
+        inactive_id = str(params.get("inactive_md_sample_id") or "").strip()
+        pas_id = str(params.get("pas_md_sample_id") or "").strip()
+        model_a_id = str(params.get("model_a_id") or "").strip()
+        model_b_id = str(params.get("model_b_id") or "").strip()
+        if not active_id or not inactive_id or not pas_id or not model_a_id or not model_b_id:
+            raise ValueError(
+                "delta_transition requires active_md_sample_id, inactive_md_sample_id, pas_md_sample_id, model_a_id, model_b_id."
+            )
+        if model_a_id == model_b_id:
+            raise ValueError("Select two different models.")
+
+        md_label_mode = (params.get("md_label_mode") or "assigned").lower()
+        keep_invalid = bool(params.get("keep_invalid", False))
+        band_fraction = float(params.get("band_fraction", 0.1))
+        top_k_residues = int(params.get("top_k_residues", 20))
+        top_k_edges = int(params.get("top_k_edges", 30))
+        seed = int(params.get("seed", 0))
+
+        save_progress("Computing TS-band analysis...", 20)
+        payload = compute_delta_transition_analysis(
+            project_id=project_id,
+            system_id=system_id,
+            cluster_id=cluster_id,
+            active_md_sample_id=active_id,
+            inactive_md_sample_id=inactive_id,
+            pas_md_sample_id=pas_id,
+            model_a_ref=model_a_id,
+            model_b_ref=model_b_id,
+            md_label_mode=md_label_mode,
+            drop_invalid=not keep_invalid,
+            band_fraction=band_fraction,
+            top_k_residues=top_k_residues,
+            top_k_edges=top_k_edges,
+            seed=seed,
+        )
+
+        cluster_dirs = project_store.ensure_cluster_directories(project_id, system_id, cluster_id)
+        system_dir = cluster_dirs["system_dir"]
+        analyses_dir = cluster_dirs["cluster_dir"] / "analyses" / "delta_transition"
+        analyses_dir.mkdir(parents=True, exist_ok=True)
+
+        analysis_id = str(uuid.uuid4())
+        out_dir = analyses_dir / analysis_id
+        out_dir.mkdir(parents=True, exist_ok=True)
+        npz_path = out_dir / "analysis.npz"
+        meta_path = out_dir / "analysis_metadata.json"
+
+        edges_arr = payload.get("edges")
+        if edges_arr is None:
+            edges_arr = np.zeros((0, 2), dtype=int)
+
+        np.savez_compressed(
+            npz_path,
+            delta_energy_active=np.asarray(payload["delta_energy_active"], dtype=float),
+            delta_energy_inactive=np.asarray(payload["delta_energy_inactive"], dtype=float),
+            delta_energy_pas=np.asarray(payload["delta_energy_pas"], dtype=float),
+            edges=np.asarray(edges_arr, dtype=int),
+            z_active=np.asarray(payload["z_active"], dtype=float),
+            z_inactive=np.asarray(payload["z_inactive"], dtype=float),
+            z_pas=np.asarray(payload["z_pas"], dtype=float),
+            median_train=np.asarray([payload["median_train"]], dtype=float),
+            mad_train=np.asarray([payload["mad_train"]], dtype=float),
+            tau=np.asarray([payload["tau"]], dtype=float),
+            p_train=np.asarray([payload["p_train"]], dtype=float),
+            p_pas=np.asarray([payload["p_pas"]], dtype=float),
+            enrichment=np.asarray([payload["enrichment"]], dtype=float),
+            D_residue=np.asarray(payload["D_residue"], dtype=float),
+            top_residue_indices=np.asarray(payload["top_residue_indices"], dtype=int),
+            q_residue=np.asarray(payload["q_residue"], dtype=float),
+            D_edge=np.asarray(payload.get("D_edge") if payload.get("D_edge") is not None else np.zeros((0,), dtype=float), dtype=float),
+            top_edge_indices=np.asarray(payload.get("top_edge_indices") if payload.get("top_edge_indices") is not None else np.zeros((0,), dtype=int), dtype=int),
+            q_edge=np.asarray(payload.get("q_edge") if payload.get("q_edge") is not None else np.zeros((0, 0), dtype=float), dtype=float),
+            ensemble_labels=np.asarray(payload.get("ensemble_labels") or [], dtype=str),
+        )
+
+        meta = {
+            "analysis_id": analysis_id,
+            "analysis_type": "delta_transition",
+            "created_at": datetime.utcnow().isoformat(),
+            "project_id": project_id,
+            "system_id": system_id,
+            "cluster_id": cluster_id,
+            "active_md_sample_id": active_id,
+            "active_md_sample_name": payload.get("active_md_sample_name"),
+            "inactive_md_sample_id": inactive_id,
+            "inactive_md_sample_name": payload.get("inactive_md_sample_name"),
+            "pas_md_sample_id": pas_id,
+            "pas_md_sample_name": payload.get("pas_md_sample_name"),
+            "model_a_id": model_a_id,
+            "model_a_name": payload.get("model_a_name"),
+            "model_b_id": model_b_id,
+            "model_b_name": payload.get("model_b_name"),
+            "drop_invalid": bool(not keep_invalid),
+            "md_label_mode": md_label_mode,
+            "band_fraction": float(band_fraction),
+            "top_k_residues": int(np.asarray(payload["top_residue_indices"]).shape[0]),
+            "top_k_edges": int(np.asarray(payload.get("top_edge_indices") if payload.get("top_edge_indices") is not None else []).shape[0]),
+            "paths": {"analysis_npz": str(npz_path.relative_to(system_dir))},
+            "summary": {
+                "frames_active": int(np.asarray(payload["delta_energy_active"]).shape[0]),
+                "frames_inactive": int(np.asarray(payload["delta_energy_inactive"]).shape[0]),
+                "frames_pas": int(np.asarray(payload["delta_energy_pas"]).shape[0]),
+                "residues": int(np.asarray(payload["D_residue"]).shape[0]),
+                "edges": int(np.asarray(payload.get("D_edge") if payload.get("D_edge") is not None else []).shape[0]),
+                "tau": float(payload["tau"]),
+                "p_train": float(payload["p_train"]),
+                "p_pas": float(payload["p_pas"]),
+                "enrichment": float(payload["enrichment"]),
+            },
+        }
+        meta_path.write_text(json.dumps(_convert_nan_to_none(meta), indent=2), encoding="utf-8")
+
+        result_payload["status"] = "finished"
+        result_payload["results"] = {
+            "analysis_type": "delta_transition",
+            "analysis_id": analysis_id,
+            "analysis_dir": _relativize_path(out_dir),
+            "analysis_npz": _relativize_path(npz_path),
+        }
+
+    except Exception as e:
+        print(f"[DeltaTransition {job_uuid}] FAILED: {e}")
+        traceback.print_exc()
+        result_payload["status"] = "failed"
+        result_payload["error"] = str(e)
+        raise e
+
+    finally:
+        save_progress("Saving final result", 95)
+        result_payload["completed_at"] = datetime.utcnow().isoformat()
+        sanitized_payload = _convert_nan_to_none(result_payload)
+        write_result_to_disk(sanitized_payload)
+
+    save_progress("Delta transition analysis completed", 100)
     return sanitized_payload
 
 

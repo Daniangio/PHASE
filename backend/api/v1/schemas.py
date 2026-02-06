@@ -151,3 +151,70 @@ class DeltaEvalJobRequest(BaseModel):
     model_b_id: str
     md_label_mode: Optional[str] = None  # assigned|halo
     keep_invalid: Optional[bool] = None
+
+
+class DeltaTransitionJobRequest(BaseModel):
+    project_id: str
+    system_id: str
+    cluster_id: str
+    active_md_sample_id: str
+    inactive_md_sample_id: str
+    pas_md_sample_id: str
+    model_a_id: str
+    model_b_id: str
+    md_label_mode: Optional[str] = None  # assigned|halo
+    keep_invalid: Optional[bool] = None
+    band_fraction: Optional[float] = None
+    top_k_residues: Optional[int] = None
+    top_k_edges: Optional[int] = None
+    seed: Optional[int] = None
+
+
+class LambdaSweepJobRequest(BaseModel):
+    """
+    Validation ladder 4: sample from an interpolated model E_λ between two endpoint Potts models.
+
+    The job creates N correlated Gibbs samples (λ grid) and saves a dedicated analysis artifact
+    with JS-distance curves vs three reference MD samples.
+    """
+
+    project_id: str
+    system_id: str
+    cluster_id: str
+
+    # Endpoint models (λ=1 and λ=0)
+    model_a_id: str
+    model_b_id: str
+
+    # Reference MD samples (three macro-state evaluations on this cluster)
+    md_sample_id_1: str
+    md_sample_id_2: str
+    md_sample_id_3: str
+
+    series_id: Optional[str] = None
+    series_label: Optional[str] = None
+
+    lambda_count: Optional[int] = None
+    alpha: Optional[float] = None
+
+    md_label_mode: Optional[str] = None  # assigned|halo
+    keep_invalid: Optional[bool] = None
+
+    # Gibbs params (single-site or replica exchange)
+    gibbs_method: Optional[str] = None  # single|rex
+    beta: Optional[float] = None
+    seed: Optional[int] = None
+
+    gibbs_samples: Optional[int] = None
+    gibbs_burnin: Optional[int] = None
+    gibbs_thin: Optional[int] = None
+
+    rex_betas: Optional[Union[str, List[float]]] = None
+    rex_beta_min: Optional[float] = None
+    rex_beta_max: Optional[float] = None
+    rex_spacing: Optional[str] = None
+    rex_n_replicas: Optional[int] = None
+    rex_rounds: Optional[int] = None
+    rex_burnin_rounds: Optional[int] = None
+    rex_sweeps_per_round: Optional[int] = None
+    rex_thin_rounds: Optional[int] = None

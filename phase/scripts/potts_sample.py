@@ -47,11 +47,14 @@ def _filter_sampling_params(args: object, parser) -> dict:
     else:
         allow |= {
             "sa_reads",
+            "sa_chains",
             "sa_sweeps",
             "sa_beta_hot",
             "sa_beta_cold",
             "sa_init",
             "sa_init_md_frame",
+            "sa_restart",
+            "sa_md_state_ids",
             "penalty_safety",
             "repair",
         }
@@ -60,6 +63,11 @@ def _filter_sampling_params(args: object, parser) -> dict:
     if sampling_method == "gibbs":
         out["beta"] = raw.get("beta")
         out["gibbs_method"] = gibbs_method
+    else:
+        # Keep key SA parameters even when defaults are used (mirrors the Gibbs behavior).
+        out["beta"] = raw.get("beta")
+        out["sa_restart"] = raw.get("sa_restart") or "previous"
+        out["sa_sweeps"] = raw.get("sa_sweeps")
     for key in allow:
         if key not in raw:
             continue
@@ -108,11 +116,25 @@ def main(argv: list[str] | None = None) -> int:
 
     # SA/QUBO
     parser.add_argument("--sa-reads", type=int, default=2000)
+    parser.add_argument("--sa-chains", type=int, default=1, help="Independent SA chains (processes). Total reads are split across chains.")
     parser.add_argument("--sa-sweeps", type=int, default=2000)
     parser.add_argument("--sa-beta-hot", type=float, default=0.0)
     parser.add_argument("--sa-beta-cold", type=float, default=0.0)
     parser.add_argument("--sa-init", type=str, default="md", choices=["md", "md-frame", "random-h", "random-uniform"])
     parser.add_argument("--sa-init-md-frame", type=int, default=-1)
+    parser.add_argument(
+        "--sa-restart",
+        type=str,
+        default="previous",
+        choices=["previous", "md", "independent"],
+        help="How to initialize each SA read after the first within a chain.",
+    )
+    parser.add_argument(
+        "--sa-md-state-ids",
+        type=str,
+        default="",
+        help="Comma-separated state IDs to restrict MD frames used for SA init (when using md/md-frame restart/init).",
+    )
     parser.add_argument("--penalty-safety", type=float, default=3.0)
     parser.add_argument("--repair", type=str, default="none", choices=["none", "argmax"])
 
@@ -147,11 +169,14 @@ def main(argv: list[str] | None = None) -> int:
             rex_thin_rounds=int(args.rex_thin_rounds),
             rex_chains=int(args.rex_chains),
             sa_reads=int(args.sa_reads),
+            sa_chains=int(args.sa_chains),
             sa_sweeps=int(args.sa_sweeps),
             sa_beta_hot=float(args.sa_beta_hot),
             sa_beta_cold=float(args.sa_beta_cold),
             sa_init=str(args.sa_init),
             sa_init_md_frame=int(args.sa_init_md_frame),
+            sa_restart=str(args.sa_restart),
+            sa_md_state_ids=str(args.sa_md_state_ids),
             penalty_safety=float(args.penalty_safety),
             repair=str(args.repair),
         )
