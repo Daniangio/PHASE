@@ -1878,7 +1878,8 @@ def run_delta_transition_job(
         keep_invalid = bool(params.get("keep_invalid", False))
         band_fraction = float(params.get("band_fraction", 0.1))
         top_k_residues = int(params.get("top_k_residues", 20))
-        top_k_edges = int(params.get("top_k_edges", 30))
+        # Store commitment for the top-K edges by |ΔJ| (default high enough for rich 3D link visualization).
+        top_k_edges = int(params.get("top_k_edges", 2000))
         seed = int(params.get("seed", 0))
 
         save_progress("Computing TS-band analysis...", 20)

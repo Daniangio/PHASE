@@ -42,7 +42,12 @@ The residue overlay uses a diverging palette:
 
 ## Coupling Links (Optional)
 
-If enabled, the page draws line links for the **top Potts edges** (by parameter magnitude). Link colors follow the same palette.
+If enabled, the page draws cylinder links for the **top Potts edges** (ranked by `|ΔJ|`).
+
+Important:
+- Edge commitment `q_ij` is stored only for the **top-K edges** chosen when the delta-commitment analysis is computed.
+- If you request more links than were stored, only the available ones can be shown.
+- Default `top_k_edges` is set high (currently `2000`) so you can visualize hundreds of links without recomputing.
 
 ## Edge-Weighted Residue Coloring (Optional)
 

@@ -7,11 +7,18 @@ import { Asset } from 'molstar/lib/mol-util/assets';
 import { PluginCommands } from 'molstar/lib/mol-plugin/commands';
 import { MolScriptBuilder as MS } from 'molstar/lib/mol-script/language/builder';
 import { Script } from 'molstar/lib/mol-script/script';
-import { StructureElement, StructureSelection } from 'molstar/lib/mol-model/structure';
+import { StructureElement, StructureSelection, StructureProperties } from 'molstar/lib/mol-model/structure';
 import { clearStructureOverpaint, setStructureOverpaint } from 'molstar/lib/mol-plugin-state/helpers/structure-overpaint';
 import { StateSelection } from 'molstar/lib/mol-state';
-import { PluginStateObject } from 'molstar/lib/mol-plugin-state/objects';
+import { PluginStateObject, PluginStateTransform } from 'molstar/lib/mol-plugin-state/objects';
 import { StateTransforms } from 'molstar/lib/mol-plugin-state/transforms';
+import { ParamDefinition as PD } from 'molstar/lib/mol-util/param-definition';
+import { Task } from 'molstar/lib/mol-task';
+import { Vec3 } from 'molstar/lib/mol-math/linear-algebra';
+import { Mesh } from 'molstar/lib/mol-geo/geometry/mesh/mesh';
+import { MeshBuilder } from 'molstar/lib/mol-geo/geometry/mesh/mesh-builder';
+import { addCylinder } from 'molstar/lib/mol-geo/geometry/mesh/builder/cylinder';
+import { Shape } from 'molstar/lib/mol-model/shape';
 import 'molstar/build/viewer/molstar.css';
 
 import Loader from '../components/common/Loader';
@@ -90,6 +97,76 @@ function parseResidueId(label) {
 
 const EDGE_LINK_TAG = 'phase-delta-commitment-edge-link';
 
+// Custom Mol* transform that builds a mesh of cylinders (one per edge link).
+// This avoids the "distance measurement" machinery which can be surprisingly expensive.
+const EdgeLinksShape3D = PluginStateTransform.BuiltIn({
+  name: 'phase-edge-links-shape-3d',
+  display: { name: 'Edge Links' },
+  from: PluginStateObject.Root,
+  to: PluginStateObject.Shape.Provider,
+  params: {
+    payload: PD.Value({ links: [], colors: [], radii: [], labels: [] }, { isHidden: true }),
+  },
+})({
+  canAutoUpdate() {
+    return true;
+  },
+  apply({ params }) {
+    return Task.create('Edge Links Shape', async () => {
+      const provider = new PluginStateObject.Shape.Provider(
+        {
+          label: 'Edge Links',
+          data: params.payload,
+          params: Mesh.Params,
+          getShape: (_, data, __, prev) => {
+            const links = Array.isArray(data?.links) ? data.links : [];
+            const colors = Array.isArray(data?.colors) ? data.colors : [];
+            const radii = Array.isArray(data?.radii) ? data.radii : [];
+            const labels = Array.isArray(data?.labels) ? data.labels : [];
+
+            const meshState = MeshBuilder.createState(Math.max(256, links.length * 256), 128, prev?.geometry);
+            const a = Vec3();
+            const b = Vec3();
+            for (let i = 0; i < links.length; i += 1) {
+              const link = links[i];
+              if (!link || !Array.isArray(link.a) || !Array.isArray(link.b)) continue;
+              if (link.a.length < 3 || link.b.length < 3) continue;
+              Vec3.set(a, Number(link.a[0]), Number(link.a[1]), Number(link.a[2]));
+              Vec3.set(b, Number(link.b[0]), Number(link.b[1]), Number(link.b[2]));
+              if (!Number.isFinite(a[0]) || !Number.isFinite(b[0])) continue;
+
+              meshState.currentGroup = i;
+              const r = Number(radii[i]);
+              const radius = Number.isFinite(r) ? r : 0.12;
+              addCylinder(meshState, a, b, 1, {
+                radiusTop: radius,
+                radiusBottom: radius,
+                radialSegments: 18,
+                topCap: true,
+                bottomCap: true,
+              });
+            }
+            const mesh = MeshBuilder.getMesh(meshState);
+            return Shape.create(
+              'EdgeLinks',
+              data,
+              mesh,
+              (groupId) => colors[groupId] ?? 0xffffff,
+              () => 1,
+              (groupId) => labels[groupId] ?? `edge_${groupId}`,
+              undefined,
+              links.length
+            );
+          },
+          geometryUtils: Mesh.Utils,
+        },
+        { label: 'Edge Links' }
+      );
+      return provider;
+    });
+  },
+});
+
 export default function DeltaCommitment3DPage() {
   const { projectId, systemId } = useParams();
   const navigate = useNavigate();
@@ -143,8 +220,17 @@ export default function DeltaCommitment3DPage() {
 
   const [showEdgeLinks, setShowEdgeLinks] = useState(false);
   const [maxEdgeLinks, setMaxEdgeLinks] = useState(60);
+  const [edgeDebug, setEdgeDebug] = useState(null);
 
   const edgeRunIdRef = useRef(0);
+  const lociLabelProviderRef = useRef(null);
+  const hoverRef = useRef({
+    residueIdMode: 'auth',
+    commitmentMode: 'prob',
+    sampleLabel: '',
+    authToQ: new Map(),
+    labelSeqToQ: [],
+  });
 
   useEffect(() => {
     const load = async () => {
@@ -704,6 +790,8 @@ export default function DeltaCommitment3DPage() {
     const residueIdsLabel = [];
     const qValuesAuth = [];
     const qValuesLabel = [];
+    const residueIdByIndexAuth = new Array(residueLabels.length).fill(null);
+    const residueIdByIndexLabel = new Array(residueLabels.length).fill(null);
 
     // Color all residues; filtering is a visualization concern.
     for (let ridx = 0; ridx < residueLabels.length; ridx += 1) {
@@ -713,12 +801,80 @@ export default function DeltaCommitment3DPage() {
       if (auth !== null) {
         residueIdsAuth.push(auth);
         qValuesAuth.push(Number.isFinite(q) ? q : NaN);
+        residueIdByIndexAuth[ridx] = auth;
       }
       residueIdsLabel.push(ridx + 1); // Mol* label_seq_id is 1-based
       qValuesLabel.push(Number.isFinite(q) ? q : NaN);
+      residueIdByIndexLabel[ridx] = ridx + 1;
     }
-    return { residueIdsAuth, qValuesAuth, residueIdsLabel, qValuesLabel };
+    return { residueIdsAuth, qValuesAuth, residueIdsLabel, qValuesLabel, residueIdByIndexAuth, residueIdByIndexLabel };
   }, [qRowValuesEdgeSmoothed, residueLabels]);
+
+  // Register a Mol* hover label provider to show the per-residue commitment being visualized.
+  useEffect(() => {
+    const plugin = pluginRef.current;
+    if (viewerStatus !== 'ready' || !plugin) return;
+    if (lociLabelProviderRef.current) return;
+
+    const provider = {
+      priority: 200,
+      label: (loci) => {
+        if (!StructureElement.Loci.is(loci)) return undefined;
+        const loc = StructureElement.Loci.getFirstLocation(loci);
+        if (!loc) return undefined;
+
+        const h = hoverRef.current;
+        const auth = Number(StructureProperties.residue.auth_seq_id(loc));
+        const labelSeq = Number(StructureProperties.residue.label_seq_id(loc)); // 1-based
+
+        let q = NaN;
+        if (h.residueIdMode === 'auth') {
+          q = h.authToQ.get(auth);
+        } else {
+          const idx = Number.isFinite(labelSeq) ? Math.floor(labelSeq) - 1 : -1;
+          if (idx >= 0 && idx < h.labelSeqToQ.length) q = h.labelSeqToQ[idx];
+        }
+
+        if (!Number.isFinite(q)) return `Commitment q: n/a`;
+        const mode = h.commitmentMode || 'prob';
+        const sample = h.sampleLabel ? ` · ${h.sampleLabel}` : '';
+        return `Commitment q: ${q.toFixed(3)} · mode: ${mode}${sample}`;
+      },
+      group: (label) => `phase-commitment:${label}`,
+    };
+
+    plugin.managers.lociLabels.addProvider(provider);
+    lociLabelProviderRef.current = provider;
+    return () => {
+      try {
+        plugin.managers.lociLabels.removeProvider(provider);
+      } catch {
+        // ignore
+      }
+      if (lociLabelProviderRef.current === provider) lociLabelProviderRef.current = null;
+    };
+  }, [viewerStatus]);
+
+  useEffect(() => {
+    const authToQ = new Map();
+    const labelSeqToQ = [];
+    if (coloringPayload) {
+      const { residueIdsAuth, qValuesAuth, residueIdsLabel, qValuesLabel } = coloringPayload;
+      for (let i = 0; i < residueIdsAuth.length; i += 1) authToQ.set(Number(residueIdsAuth[i]), Number(qValuesAuth[i]));
+      for (let i = 0; i < residueIdsLabel.length; i += 1) {
+        const rid = Number(residueIdsLabel[i]); // 1-based
+        const idx = Math.floor(rid) - 1;
+        if (idx >= 0) labelSeqToQ[idx] = Number(qValuesLabel[i]);
+      }
+    }
+    hoverRef.current = {
+      residueIdMode,
+      commitmentMode,
+      sampleLabel: commitmentLabels?.[commitmentRowIndex] ? String(commitmentLabels[commitmentRowIndex]) : '',
+      authToQ,
+      labelSeqToQ,
+    };
+  }, [coloringPayload, residueIdMode, commitmentMode, commitmentLabels, commitmentRowIndex]);
 
   const applyColoring = useCallback(async () => {
     if (viewerStatus !== 'ready') {
@@ -834,8 +990,8 @@ export default function DeltaCommitment3DPage() {
     const state = plugin.state.data;
     const update = state.build();
 
-    // Delete the selection roots; their children (representations) will be removed as well.
-    const sel = state.select(StateSelection.Generators.ofType(PluginStateObject.Molecule.Structure.Selections).withTag(EDGE_LINK_TAG));
+    // Delete the Shape provider roots; their children (representations) will be removed as well.
+    const sel = state.select(StateSelection.Generators.ofType(PluginStateObject.Shape.Provider).withTag(EDGE_LINK_TAG));
     for (const obj of sel) update.delete(obj);
 
     if (update.editInfo.count === 0) return;
@@ -846,10 +1002,12 @@ export default function DeltaCommitment3DPage() {
     if (viewerStatus !== 'ready') return;
     if (structureLoading) return;
     if (!analysisData) return;
+    if (!coloringPayload) return;
     const plugin = pluginRef.current;
     if (!plugin) return;
 
     const runId = (edgeRunIdRef.current += 1);
+    setEdgeDebug(null);
 
     // Always clear first so toggles/row changes are deterministic.
     await clearEdgeLinks();
@@ -867,91 +1025,133 @@ export default function DeltaCommitment3DPage() {
     const useAuth = residueIdMode === 'auth';
     const seqProp =
       useAuth ? MS.struct.atomProperty.macromolecular.auth_seq_id() : MS.struct.atomProperty.macromolecular.label_seq_id();
-    const atomProp =
-      useAuth ? MS.struct.atomProperty.macromolecular.auth_atom_id() : MS.struct.atomProperty.macromolecular.label_atom_id();
+    const atomProp = MS.struct.atomProperty.macromolecular.label_atom_id();
 
+    const residueIdByIndex = useAuth ? coloringPayload.residueIdByIndexAuth : coloringPayload.residueIdByIndexLabel;
     const getResidueSeqId = (resIdx) => {
-      if (useAuth) return parseResidueId(residueLabels[resIdx]);
-      return resIdx + 1; // label_seq_id is 1-based
+      if (!Array.isArray(residueIdByIndex)) return null;
+      const v = residueIdByIndex[resIdx];
+      const n = Number(v);
+      return Number.isFinite(n) ? n : null;
     };
 
-    const rowQ = qEdgeMatrix[commitmentRowIndex].map((v) => Number(v));
+    // q_edge can be large (potentially O(n_edges)). Avoid mapping the whole row just to draw a few links.
+    const rowQ = qEdgeMatrix[commitmentRowIndex];
     const limit = Math.min(Number(maxEdgeLinks) || 0, topEdgeIndices.length);
 
-    const group = plugin.managers.structure.measurement.getGroup();
-    const serialize = (l) => ({ bundle: StructureElement.Bundle.fromLoci(l) });
+    const getCA = (rid) => {
+      const expr = MS.struct.generator.atomGroups({
+        'residue-test': MS.core.rel.eq([seqProp, rid]),
+        'atom-test': MS.core.rel.eq([atomProp, MS.core.type.str('CA')]),
+      });
+      const sel = Script.getStructureSelection(expr, rootStructure);
+      const loci = StructureSelection.toLociWithSourceUnits(sel);
+      const loc = StructureElement.Loci.getFirstLocation(loci);
+      if (!loc) return null;
+      const p = Vec3();
+      StructureElement.Location.position(p, loc);
+      return [p[0], p[1], p[2]];
+    };
 
+    // Precompute coords for all residues that appear in the selected edges.
+    const residueSeqIds = new Set();
+    const edgesPicked = [];
     for (let col = 0; col < limit; col += 1) {
-      if (runId !== edgeRunIdRef.current) return;
       const eidx = Number(topEdgeIndices[col]);
       const edge = edgesAll[eidx];
       if (!Array.isArray(edge) || edge.length < 2) continue;
       const r = Number(edge[0]);
       const s = Number(edge[1]);
       if (!Number.isInteger(r) || !Number.isInteger(s)) continue;
-
       const rid = getResidueSeqId(r);
       const sid = getResidueSeqId(s);
       if (rid == null || sid == null) continue;
+      edgesPicked.push({ col, eidx, r, s, rid, sid });
+      residueSeqIds.add(rid);
+      residueSeqIds.add(sid);
+    }
+    if (!edgesPicked.length) return;
 
-      const q = Number.isFinite(rowQ[col]) ? rowQ[col] : 0.5;
-      const colorValue = hexToInt(commitmentColor(q));
-
-      const exprA = MS.struct.generator.atomGroups({
-        'residue-test': MS.core.rel.eq([seqProp, rid]),
-        'atom-test': MS.core.rel.eq([atomProp, MS.core.type.str('CA')]),
-      });
-      const exprB = MS.struct.generator.atomGroups({
-        'residue-test': MS.core.rel.eq([seqProp, sid]),
-        'atom-test': MS.core.rel.eq([atomProp, MS.core.type.str('CA')]),
-      });
-
-      const selA = Script.getStructureSelection(exprA, rootStructure);
-      const selB = Script.getStructureSelection(exprB, rootStructure);
-      const lociA = StructureSelection.toLociWithSourceUnits(selA);
-      const lociB = StructureSelection.toLociWithSourceUnits(selB);
-      if (StructureElement.Loci.isEmpty(lociA) || StructureElement.Loci.isEmpty(lociB)) continue;
-
-      const cellA = plugin.helpers.substructureParent.get(lociA.structure);
-      const cellB = plugin.helpers.substructureParent.get(lociB.structure);
-      if (!cellA || !cellB) continue;
-
-      const dependsOn = [cellA.transform.ref];
-      if (cellB.transform.ref !== cellA.transform.ref) dependsOn.push(cellB.transform.ref);
-      const selection = group.apply(
-        StateTransforms.Model.MultiStructureSelectionFromBundle,
-        {
-          selections: [
-            { key: `a${col}`, groupId: `a${col}`, ref: cellA.transform.ref, ...serialize(lociA) },
-            { key: `b${col}`, groupId: `b${col}`, ref: cellB.transform.ref, ...serialize(lociB) },
-          ],
-          isTransitive: true,
-          label: 'Distance',
-        },
-        { dependsOn, tags: [EDGE_LINK_TAG] }
-      );
-      selection.apply(
-        StateTransforms.Representation.StructureSelectionsDistance3D,
-        {
-          visuals: ['lines'],
-          // Keep defaults for label settings; we omit text by not including the "text" visual.
-          linesColor: colorValue,
-          linesSize: 0.12,
-          dashLength: 0,
-          customText: '',
-        },
-        { tags: [EDGE_LINK_TAG] }
-      );
+    const coordBySeq = new Map();
+    for (const rid of residueSeqIds) {
+      if (runId !== edgeRunIdRef.current) return;
+      const xyz = getCA(rid);
+      if (xyz) coordBySeq.set(rid, xyz);
     }
 
-    if (runId !== edgeRunIdRef.current) return;
+    // Thickness scaling based on |ΔJ| magnitude (D_edge) for the selected edges.
+    let wMax = 0;
+    for (const ep of edgesPicked) {
+      const wRaw = dEdge && Number.isFinite(Number(dEdge[ep.eidx])) ? Math.abs(Number(dEdge[ep.eidx])) : 0;
+      if (wRaw > wMax) wMax = wRaw;
+    }
+    if (!Number.isFinite(wMax) || wMax <= 0) wMax = 1;
+
+    const links = [];
+    const colors = [];
+    const radii = [];
+    const labels = [];
+    const qUsed = [];
+    const wUsed = [];
+    for (const ep of edgesPicked) {
+      if (runId !== edgeRunIdRef.current) return;
+      const a = coordBySeq.get(ep.rid);
+      const b = coordBySeq.get(ep.sid);
+      if (!a || !b) continue;
+
+      const qRaw = Array.isArray(rowQ) ? Number(rowQ[ep.col]) : Number.NaN;
+      const q = Number.isFinite(qRaw) ? clamp01(qRaw) : 0.5;
+      // Boost contrast a bit for edges (q values are often close to 0.5).
+      const d = q - 0.5;
+      const qVis = 0.5 + Math.sign(d) * Math.pow(Math.abs(d) * 2, 0.65) / 2;
+      colors.push(hexToInt(commitmentColor(qVis)));
+      qUsed.push(q);
+
+      const wRaw = dEdge && Number.isFinite(Number(dEdge[ep.eidx])) ? Math.abs(Number(dEdge[ep.eidx])) : 0;
+      const wNorm = Math.max(0, Math.min(1, wRaw / wMax));
+      // Make width variation more obvious.
+      radii.push(0.05 + 0.45 * Math.sqrt(wNorm));
+      wUsed.push(wRaw);
+
+      const aLabel = residueLabels[ep.r] ?? `res_${ep.r}`;
+      const bLabel = residueLabels[ep.s] ?? `res_${ep.s}`;
+      labels.push(`${aLabel}–${bLabel} · q=${q.toFixed(3)} · |ΔJ|=${wRaw.toFixed(3)}`);
+      links.push({ a, b });
+    }
+    if (!links.length) return;
+
+    const finiteQ = qUsed.filter((v) => Number.isFinite(v));
+    const qMin = finiteQ.length ? Math.min(...finiteQ) : NaN;
+    const qMax = finiteQ.length ? Math.max(...finiteQ) : NaN;
+    const finiteW = wUsed.filter((v) => Number.isFinite(v));
+    const wMin = finiteW.length ? Math.min(...finiteW) : NaN;
+    const wMaxUsed = finiteW.length ? Math.max(...finiteW) : NaN;
+    setEdgeDebug({
+      status: 'run',
+      mode: residueIdMode,
+      requestedMax: Number(maxEdgeLinks) || 0,
+      availableTopEdges: topEdgeIndices.length,
+      picked: edgesPicked.length,
+      residuesWithCoords: coordBySeq.size,
+      links: links.length,
+      qMin,
+      qMax,
+      wMin,
+      wMax: wMaxUsed,
+    });
+
+    const payload = { links, colors, radii, labels };
     const state = plugin.state.data;
-    if (group.editInfo.count === 0) return;
-    await PluginCommands.State.Update(plugin, { state, tree: group, options: { doNotLogTiming: true } });
+    const update = state.build();
+    const provider = update.toRoot().apply(EdgeLinksShape3D, { payload }, { tags: [EDGE_LINK_TAG] });
+    provider.apply(StateTransforms.Representation.ShapeRepresentation3D, { alpha: 1.0, quality: 'low' }, { tags: [EDGE_LINK_TAG] });
+    if (runId !== edgeRunIdRef.current) return;
+    await PluginCommands.State.Update(plugin, { state, tree: update, options: { doNotLogTiming: true } });
   }, [
     viewerStatus,
     structureLoading,
     analysisData,
+    coloringPayload,
     clearEdgeLinks,
     showEdgeLinks,
     maxEdgeLinks,
@@ -959,6 +1159,7 @@ export default function DeltaCommitment3DPage() {
     commitmentRowIndex,
     topEdgeIndices,
     edgesAll,
+    dEdge,
     residueIdMode,
     residueLabels,
   ]);
@@ -1329,6 +1530,28 @@ export default function DeltaCommitment3DPage() {
                       )}
                     </>
                   )}
+                </div>
+              )}
+
+              {edgeDebug && (
+                <div className="mt-2 rounded-md border border-gray-800 bg-gray-950/40 p-2 text-[11px] text-gray-300">
+                  <div>
+                    edges: <span className="font-mono">{edgeDebug.status}</span> · mode{' '}
+                    <span className="font-mono">{edgeDebug.mode}</span>
+                  </div>
+                  <div>
+                    requested <span className="font-mono">{edgeDebug.requestedMax}</span> · available{' '}
+                    <span className="font-mono">{edgeDebug.availableTopEdges}</span> · parsed{' '}
+                    <span className="font-mono">{edgeDebug.picked}</span> · coords{' '}
+                    <span className="font-mono">{edgeDebug.residuesWithCoords}</span> · shown{' '}
+                    <span className="font-mono">{edgeDebug.links}</span>
+                  </div>
+                  <div>
+                    q: <span className="font-mono">{String(edgeDebug.qMin)}</span>..{' '}
+                    <span className="font-mono">{String(edgeDebug.qMax)}</span> · |ΔJ|:{' '}
+                    <span className="font-mono">{String(edgeDebug.wMin)}</span>..{' '}
+                    <span className="font-mono">{String(edgeDebug.wMax)}</span>
+                  </div>
                 </div>
               )}
             </div>

@@ -70,7 +70,9 @@ export default function DeltaEvalPage() {
 
   // Visualization-only filter: 0 means "show all residues". The analysis always stores q for all residues.
   const [topKResidues, setTopKResidues] = useState(0);
-  const [topKEdges, setTopKEdges] = useState(30);
+  // Edge commitment is stored only for the top-K edges by |ΔJ| to keep the stored analysis lightweight.
+  // Set a generous default so other pages (e.g. 3D) can visualize hundreds of links without recomputing.
+  const [topKEdges, setTopKEdges] = useState(2000);
   const [energyBins, setEnergyBins] = useState(80);
 
   const [selectedSampleIds, setSelectedSampleIds] = useState([]);
