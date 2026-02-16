@@ -17,10 +17,10 @@ def _parse_paths(raw: str) -> list[str]:
 
 def _parse_density_z(raw: str | None) -> float | str:
     if raw is None:
-        return "auto"
+        return 2.0
     value = str(raw).strip()
     if not value:
-        return "auto"
+        return 2.0
     if value.lower() == "auto":
         return "auto"
     return float(value)
@@ -47,7 +47,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-cluster-frames", type=int)
     parser.add_argument("--random-state", type=int, default=0)
     parser.add_argument("--density-maxk", type=int, default=100)
-    parser.add_argument("--density-z", default="auto")
+    parser.add_argument("--density-z", default="2.0")
     parser.add_argument("--n-jobs", type=int, default=1, help="Worker processes for residue clustering (default=1; 0=all cpus).")
     parser.add_argument(
         "--output",

@@ -94,8 +94,8 @@ export default function SystemDetailPage() {
   const [backmappingDownloadProgress, setBackmappingDownloadProgress] = useState({});
   const [backmappingJobStatus, setBackmappingJobStatus] = useState({});
   const [maxClusterFrames, setMaxClusterFrames] = useState(0);
-  const [densityZMode, setDensityZMode] = useState('auto');
-  const [densityZValue, setDensityZValue] = useState(1.65);
+  const [densityZMode, setDensityZMode] = useState('manual');
+  const [densityZValue, setDensityZValue] = useState(2.0);
   const [densityMaxk, setDensityMaxk] = useState(100);
   const [metaChoice, setMetaChoice] = useState(null);
   const [analysisFocus, setAnalysisFocus] = useState('');

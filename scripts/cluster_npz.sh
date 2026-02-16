@@ -81,7 +81,7 @@ fi
 STATE_IDS="$(printf "%s\n" "$STATE_ROWS" | awk -F'|' '{print $1}' | paste -sd, -)"
 CLUSTER_NAME="$(prompt "Cluster name" "cluster_${OFFLINE_SYSTEM_ID}")"
 N_JOBS="$(prompt "Worker processes (0 = all cpus)" "1")"
-DENSITY_Z="$(prompt "Density z (auto or float)" "auto")"
+DENSITY_Z="$(prompt "Density z (auto or float)" "2.0")"
 if [ -z "$MAX_CLUSTER_FRAMES" ]; then
   MAX_CLUSTER_FRAMES="$(prompt "Max cluster frames (blank = no limit)" "")"
 fi

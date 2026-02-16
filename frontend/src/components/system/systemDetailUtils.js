@@ -15,6 +15,6 @@ export function formatClusterAlgorithm(run) {
   if (algo !== 'density_peaks') return algo;
   const params = run.algorithm_params || {};
   const maxk = params.density_maxk ?? params.maxk ?? '—';
-  const zVal = params.density_z ?? params.Z ?? 'auto';
+  const zVal = params.density_z ?? params.Z ?? 2.0;
   return `density_peaks (maxk=${maxk}, Z=${zVal})`;
 }
