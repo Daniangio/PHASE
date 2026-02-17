@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from backend.api.v1.common import ensure_system_ready, get_cluster_entry, get_queue, project_store
 from backend.api.v1.schemas import (
+    GibbsRelaxationJobRequest,
     DeltaEvalJobRequest,
     DeltaCommitmentJobRequest,
     DeltaTransitionJobRequest,
@@ -16,6 +17,7 @@ from backend.api.v1.schemas import (
     StaticJobRequest,
 )
 from backend.tasks import (
+    run_gibbs_relaxation_job,
     run_analysis_job,
     run_delta_eval_job,
     run_delta_commitment_job,
@@ -354,6 +356,72 @@ async def submit_potts_analysis_job(
             job_timeout="2h",
             result_ttl=86400,
             job_id=f"potts-analysis-{job_uuid}",
+        )
+        return {"status": "queued", "job_id": job.id, "analysis_uuid": job_uuid}
+    except Exception as exc:  # pragma: no cover
+        raise HTTPException(status_code=500, detail=f"Job submission failed: {exc}") from exc
+
+
+@router.post(
+    "/submit/gibbs_relaxation",
+    summary="Submit Gibbs relaxation analysis from random MD starts under a selected Potts model",
+)
+async def submit_gibbs_relaxation_job(
+    payload: GibbsRelaxationJobRequest,
+    task_queue: Any = Depends(get_queue),
+):
+    try:
+        system_meta = project_store.get_system(payload.project_id, payload.system_id)
+    except FileNotFoundError:
+        raise HTTPException(
+            status_code=404,
+            detail=f"System '{payload.system_id}' not found in project '{payload.project_id}'.",
+        )
+
+    cluster_entry = get_cluster_entry(system_meta, payload.cluster_id)
+
+    model_id = str(payload.model_id or "").strip()
+    model_path = str(payload.model_path or "").strip()
+    if not model_id and not model_path:
+        raise HTTPException(status_code=400, detail="Provide model_id or model_path.")
+
+    sample_id = str(payload.start_sample_id or "").strip()
+    if not sample_id:
+        raise HTTPException(status_code=400, detail="start_sample_id is required.")
+    sample_list = cluster_entry.get("samples") if isinstance(cluster_entry, dict) else []
+    if not isinstance(sample_list, list) or not any(
+        isinstance(s, dict) and str(s.get("sample_id")) == sample_id for s in sample_list
+    ):
+        raise HTTPException(status_code=404, detail=f"Sample '{sample_id}' not found in cluster metadata.")
+
+    label_mode = (payload.start_label_mode or "assigned").lower()
+    if label_mode not in {"assigned", "halo"}:
+        raise HTTPException(status_code=400, detail="start_label_mode must be 'assigned' or 'halo'.")
+
+    if payload.beta is not None and float(payload.beta) <= 0:
+        raise HTTPException(status_code=400, detail="beta must be > 0.")
+    if payload.n_start_frames is not None and int(payload.n_start_frames) < 1:
+        raise HTTPException(status_code=400, detail="n_start_frames must be >= 1.")
+    if payload.gibbs_sweeps is not None and int(payload.gibbs_sweeps) < 1:
+        raise HTTPException(status_code=400, detail="gibbs_sweeps must be >= 1.")
+    if payload.workers is not None and int(payload.workers) < 0:
+        raise HTTPException(status_code=400, detail="workers must be >= 0.")
+
+    params = payload.dict(exclude_none=True, exclude={"project_id", "system_id", "cluster_id"})
+    dataset_ref = {
+        "project_id": payload.project_id,
+        "system_id": payload.system_id,
+        "cluster_id": payload.cluster_id,
+    }
+
+    try:
+        job_uuid = str(uuid.uuid4())
+        job = task_queue.enqueue(
+            run_gibbs_relaxation_job,
+            args=(job_uuid, dataset_ref, params),
+            job_timeout="6h",
+            result_ttl=86400,
+            job_id=f"gibbs-relaxation-{job_uuid}",
         )
         return {"status": "queued", "job_id": job.id, "analysis_uuid": job_uuid}
     except Exception as exc:  # pragma: no cover

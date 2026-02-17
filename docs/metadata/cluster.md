@@ -26,11 +26,9 @@ Common fields
 - `random_state` (int)
 - `generated_at` (ISO8601 string or null)
 - `contact_edge_count` (int or null)
-- `assigned_state_paths` (object) – `{state_id: relative_path_to_md_eval_npz}`
-- `assigned_metastable_paths` (object) – `{metastable_id: relative_path_to_md_eval_npz}`
 
 Notes
 - Potts models and samples are **not** stored in this file.
 - Potts models live under `clusters/<cluster_id>/potts_models/<model_id>/model_metadata.json`.
 - Samples live under `clusters/<cluster_id>/samples/<sample_id>/sample_metadata.json`.
-
+- MD assignment provenance is discovered from `samples/*/sample_metadata.json` and `samples/*/sample.npz`, not from cluster-level path maps.

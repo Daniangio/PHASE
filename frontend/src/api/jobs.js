@@ -63,6 +63,13 @@ export function submitLambdaSweepJob(payload) {
   });
 }
 
+export function submitGibbsRelaxationJob(payload) {
+  return requestJSON('/submit/gibbs_relaxation', {
+    method: 'POST',
+    body: payload,
+  });
+}
+
 export function fetchResults() {
   return requestJSON('/results');
 }

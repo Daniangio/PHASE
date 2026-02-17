@@ -242,6 +242,34 @@ class LambdaSweepJobRequest(BaseModel):
     rex_thin_rounds: Optional[int] = None
 
 
+class GibbsRelaxationJobRequest(BaseModel):
+    """
+    Relaxation analysis from MD starts under a selected Potts Hamiltonian.
+
+    Workflow:
+      - randomly choose starting frames from one MD sample
+      - run Gibbs trajectories under model H
+      - aggregate first-flip/percentile statistics
+    """
+
+    project_id: str
+    system_id: str
+    cluster_id: str
+
+    start_sample_id: str
+    model_id: Optional[str] = None
+    model_path: Optional[str] = None
+
+    beta: Optional[float] = None
+    n_start_frames: Optional[int] = None
+    gibbs_sweeps: Optional[int] = None
+    seed: Optional[int] = None
+    workers: Optional[int] = None
+
+    start_label_mode: Optional[str] = None  # assigned|halo
+    keep_invalid: Optional[bool] = None
+
+
 class LambdaPottsModelCreateRequest(BaseModel):
     """
     Create a derived Potts model by interpolating two existing endpoint models:

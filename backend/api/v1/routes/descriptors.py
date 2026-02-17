@@ -355,7 +355,95 @@ async def get_state_descriptors(
         raise HTTPException(status_code=500, detail="Descriptor file contained no usable angle data.")
 
     halo_payload = {}
-    if halo_summary and cluster_npz is not None:
+    if cluster_id and isinstance(entry, dict) and str(selected_cluster_variant or "original") == "original":
+        cluster_residue_keys = (
+            [str(v) for v in (cluster_meta or {}).get("residue_keys", [])]
+            if isinstance(cluster_meta, dict)
+            else []
+        )
+        if not cluster_residue_keys and cluster_residue_indices:
+            cluster_residue_keys = [k for k, _ in sorted(cluster_residue_indices.items(), key=lambda item: item[1])]
+        n_residues = len(cluster_residue_keys)
+        state_label_map = {str(sid): str(state.name or sid) for sid, state in (system.states or {}).items()}
+        meta_label_map = {
+            str(m.get("metastable_id")): str(m.get("name") or m.get("default_name") or m.get("metastable_id"))
+            for m in (system.metastable_states or [])
+            if m.get("metastable_id")
+        }
+        md_samples = [
+            s
+            for s in (entry.get("samples") or [])
+            if isinstance(s, dict) and str(s.get("type") or "") == "md_eval" and isinstance(s.get("path"), str)
+        ]
+        by_condition: Dict[str, Dict[str, Any]] = {}
+        for sample in sorted(md_samples, key=lambda s: str(s.get("created_at") or "")):
+            sid = sample.get("state_id")
+            mid = sample.get("metastable_id")
+            if sid:
+                cond_id = f"state:{sid}"
+                cond_label = state_label_map.get(str(sid), str(sample.get("name") or sid))
+                cond_type = "macro"
+            elif mid:
+                cond_id = f"meta:{mid}"
+                cond_label = meta_label_map.get(str(mid), str(sample.get("name") or mid))
+                cond_type = "metastable"
+            else:
+                sample_id = str(sample.get("sample_id") or "")
+                if not sample_id:
+                    continue
+                cond_id = f"sample:{sample_id}"
+                cond_label = str(sample.get("name") or sample_id)
+                cond_type = "md_eval"
+            sample_path = project_store.resolve_path(project_id, system_id, sample["path"])
+            if not sample_path.exists():
+                try:
+                    cluster_dirs = project_store.ensure_cluster_directories(project_id, system_id, cluster_id)
+                    alt = cluster_dirs["cluster_dir"] / sample["path"]
+                    if alt.exists():
+                        sample_path = alt
+                except Exception:
+                    pass
+            if not sample_path.exists():
+                continue
+            try:
+                with np.load(sample_path, allow_pickle=True) as sample_npz:
+                    if "labels_halo" in sample_npz:
+                        labels_arr = np.asarray(sample_npz["labels_halo"], dtype=np.int32)
+                    elif "labels" in sample_npz:
+                        labels_arr = np.asarray(sample_npz["labels"], dtype=np.int32)
+                    else:
+                        continue
+            except Exception:
+                continue
+            if labels_arr.ndim != 2:
+                continue
+            if n_residues <= 0:
+                n_residues = int(labels_arr.shape[1])
+                if not cluster_residue_keys:
+                    cluster_residue_keys = [f"res_{i}" for i in range(n_residues)]
+            if labels_arr.shape[1] != n_residues:
+                continue
+            halo_rate = (
+                np.mean(labels_arr == -1, axis=0).astype(float, copy=False)
+                if labels_arr.shape[0] > 0
+                else np.full(n_residues, np.nan, dtype=float)
+            )
+            by_condition[cond_id] = {
+                "id": cond_id,
+                "label": str(cond_label),
+                "type": cond_type,
+                "rate": halo_rate,
+            }
+        if by_condition:
+            rows = list(by_condition.values())
+            halo_payload["halo_rate_residue_keys"] = cluster_residue_keys
+            halo_payload["halo_rate_matrix"] = np.stack([row["rate"] for row in rows], axis=0).tolist()
+            halo_payload["halo_rate_condition_ids"] = [row["id"] for row in rows]
+            halo_payload["halo_rate_condition_labels"] = [row["label"] for row in rows]
+            halo_payload["halo_rate_condition_types"] = [row["type"] for row in rows]
+
+    # Backward-compatible fallback for clusters that do not yet have md_eval sample files.
+    if not halo_payload and halo_summary and cluster_npz is not None:
         keys = (halo_summary or {}).get("npz_keys", {})
         matrix_key = keys.get("matrix") if isinstance(keys, dict) else None
         ids_key = keys.get("condition_ids") if isinstance(keys, dict) else None

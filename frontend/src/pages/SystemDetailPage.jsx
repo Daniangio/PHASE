@@ -20,6 +20,7 @@ import {
   uploadStateTrajectory,
   deleteStateTrajectory,
   addSystemState,
+  unlockMacroStateEditing,
   deleteState,
   renameState, // Import the new renameState function
   fetchMetastableStates,
@@ -513,6 +514,19 @@ export default function SystemDetailPage() {
       });
     } catch (err) {
       setActionError(err.message);
+    }
+  };
+
+  const handleEnableMacroEditing = async () => {
+    setActionError(null);
+    setActionMessage('Enabling macro-state editing...');
+    try {
+      await unlockMacroStateEditing(projectId, systemId);
+      await refreshSystem();
+      setActionMessage('Macro-state editing enabled. Reconfirm states after edits.');
+    } catch (err) {
+      setActionError(err.message || 'Failed to enable macro-state editing.');
+      setActionMessage(null);
     }
   };
 
@@ -1233,6 +1247,17 @@ export default function SystemDetailPage() {
         </button>
         <h1 className="text-2xl font-bold text-white">{system.name}</h1>
         <p className="text-gray-400 text-sm">{system.description || 'No description provided.'}</p>
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          {macroLocked && (
+            <button
+              type="button"
+              onClick={handleEnableMacroEditing}
+              className="text-xs px-3 py-2 rounded-md border border-emerald-500 text-emerald-300 hover:bg-emerald-500/10"
+            >
+              Enable macro-state editing
+            </button>
+          )}
+        </div>
       </div>
 
       <div className={showSidebar ? 'lg:grid lg:grid-cols-[260px_1fr] gap-6' : ''}>
@@ -1256,6 +1281,8 @@ export default function SystemDetailPage() {
             selectedClusterId={pottsFitClusterId}
             openDescriptorExplorer={openDescriptorExplorer}
             openDoc={openDoc}
+            handleEnableMacroEditing={handleEnableMacroEditing}
+            macroLocked={macroLocked}
             navigate={navigate}
             projectId={projectId}
             systemId={systemId}

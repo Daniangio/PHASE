@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ProcessPoolExecutor, as_completed
 import json
 import os
 import uuid
@@ -20,6 +21,7 @@ from phase.potts.metrics import (
 )
 from phase.potts.potts_model import PottsModel, load_potts_model, zero_sum_gauge_model
 from phase.potts.sample_io import load_sample_npz
+from phase.potts.sampling import gibbs_sample_potts
 from phase.services.project_store import ProjectStore
 
 
@@ -71,6 +73,54 @@ def _ensure_analysis_dir(cluster_dir: Path, kind: str) -> Path:
     root = cluster_dir / "analyses" / kind
     root.mkdir(parents=True, exist_ok=True)
     return root
+
+
+_GIBBS_RELAX_MODEL_CACHE: dict[str, PottsModel] = {}
+
+
+def _gibbs_relax_worker(payload: dict[str, Any]) -> dict[str, np.ndarray]:
+    """
+    Worker used by the Gibbs-relaxation analysis.
+
+    Each job runs one Gibbs trajectory from a provided starting frame and returns
+    summary arrays needed for aggregation (without returning the full trajectory).
+    """
+    model_path = str(payload["model_path"])
+    model = _GIBBS_RELAX_MODEL_CACHE.get(model_path)
+    if model is None:
+        model = load_potts_model(model_path)
+        _GIBBS_RELAX_MODEL_CACHE[model_path] = model
+
+    x0 = np.asarray(payload["x0"], dtype=np.int32).ravel()
+    n_sweeps = int(payload["n_sweeps"])
+    beta = float(payload["beta"])
+    seed = int(payload["seed"])
+
+    traj = gibbs_sample_potts(
+        model,
+        beta=beta,
+        n_samples=n_sweeps,
+        burn_in=0,
+        thinning=1,
+        seed=seed,
+        x0=x0,
+        progress=False,
+    )
+    if traj.ndim != 2:
+        raise ValueError("Gibbs trajectory must be 2D.")
+
+    diff = traj != x0[None, :]
+    any_flip = np.any(diff, axis=0)
+    first_flip = np.argmax(diff, axis=0).astype(np.int32) + 1
+    first_flip[~any_flip] = np.int32(n_sweeps + 1)
+
+    flip_counts = diff.astype(np.uint16, copy=False)
+    energy_trace = np.asarray(model.energy_batch(traj), dtype=np.float32)
+    return {
+        "first_flip": first_flip.astype(np.int32, copy=False),
+        "flip_counts": flip_counts,
+        "energy_trace": energy_trace,
+    }
 
 
 def _compute_edge_js(
@@ -884,6 +934,304 @@ def compute_md_delta_preference(
         "delta_energy_potts_b": np.asarray(delta_energy_potts_b, dtype=float),
         "potts_sample_ids_a": potts_sample_ids_a,
         "potts_sample_ids_b": potts_sample_ids_b,
+    }
+
+
+def run_gibbs_relaxation_analysis(
+    *,
+    project_id: str,
+    system_id: str,
+    cluster_id: str,
+    start_sample_id: str,
+    model_ref: str,
+    beta: float = 1.0,
+    n_start_frames: int = 100,
+    gibbs_sweeps: int = 1000,
+    seed: int = 0,
+    start_label_mode: str = "assigned",
+    drop_invalid: bool = True,
+    n_workers: int | None = None,
+    progress_callback: Optional[callable] = None,
+) -> dict[str, Any]:
+    """
+    Relaxation experiment:
+      - pick random starting frames from one MD sample
+      - run Gibbs trajectories under a selected Potts Hamiltonian
+      - aggregate per-residue first-flip statistics + percentile ranks for coloring
+    """
+    mode = (start_label_mode or "assigned").strip().lower()
+    if mode not in {"assigned", "halo"}:
+        raise ValueError("start_label_mode must be 'assigned' or 'halo'.")
+    beta = float(beta)
+    if not np.isfinite(beta) or beta <= 0:
+        raise ValueError("beta must be > 0.")
+    n_start_frames = int(n_start_frames)
+    gibbs_sweeps = int(gibbs_sweeps)
+    seed = int(seed)
+    if n_start_frames < 1:
+        raise ValueError("n_start_frames must be >= 1.")
+    if gibbs_sweeps < 1:
+        raise ValueError("gibbs_sweeps must be >= 1.")
+
+    data_root = Path(os.getenv("PHASE_DATA_ROOT", "/app/data"))
+    store = ProjectStore(base_dir=data_root / "projects")
+    cluster_dirs = store.ensure_cluster_directories(project_id, system_id, cluster_id)
+    system_dir = cluster_dirs["system_dir"]
+    cluster_dir = cluster_dirs["cluster_dir"]
+
+    # Resolve model (id or path)
+    model_id = None
+    model_name = None
+    model_path = Path(str(model_ref))
+    if not model_path.suffix:
+        model_id = str(model_ref)
+        models = store.list_potts_models(project_id, system_id, cluster_id)
+        entry = next((m for m in models if m.get("model_id") == model_id), None)
+        if not entry or not entry.get("path"):
+            raise FileNotFoundError(f"Potts model_id not found on this cluster: {model_id}")
+        model_name = str(entry.get("name") or model_id)
+        model_path = store.resolve_path(project_id, system_id, str(entry.get("path")))
+    else:
+        if not model_path.is_absolute():
+            model_path = store.resolve_path(project_id, system_id, str(model_path))
+        model_name = model_path.stem
+    if not model_path.exists():
+        raise FileNotFoundError(f"Potts model NPZ not found: {model_path}")
+
+    model = load_potts_model(str(model_path))
+    N = int(len(model.h))
+    if N <= 0:
+        raise ValueError("Model has no residues.")
+    K_list = [int(k) for k in model.K_list()]
+
+    # Resolve starting sample
+    samples = store.list_samples(project_id, system_id, cluster_id)
+    sample_entry = next((s for s in samples if str(s.get("sample_id")) == str(start_sample_id)), None)
+    if not sample_entry:
+        raise FileNotFoundError(f"Sample not found on this cluster: {start_sample_id}")
+
+    def _resolve_sample_path(entry: dict[str, Any]) -> Path:
+        paths = entry.get("paths") or {}
+        rel = None
+        if isinstance(paths, dict):
+            rel = paths.get("summary_npz") or paths.get("path")
+        rel = rel or entry.get("path")
+        if not rel:
+            raise FileNotFoundError("Sample entry missing path.")
+        p = Path(str(rel))
+        if not p.is_absolute():
+            resolved = store.resolve_path(project_id, system_id, str(rel))
+            if not resolved.exists():
+                alt = cluster_dir / str(rel)
+                p = alt if alt.exists() else resolved
+            else:
+                p = resolved
+        return p
+
+    sample_npz = load_sample_npz(_resolve_sample_path(sample_entry))
+    X = sample_npz.labels
+    if mode in {"halo", "labels_halo"} and sample_npz.labels_halo is not None:
+        X = sample_npz.labels_halo
+    X = np.asarray(X, dtype=np.int32)
+    if X.ndim != 2 or X.size == 0:
+        raise ValueError("Starting sample contains no labels.")
+    if int(X.shape[1]) != N:
+        raise ValueError(f"Starting sample has N={X.shape[1]}, model expects N={N}.")
+
+    frame_indices = (
+        np.asarray(sample_npz.frame_indices, dtype=np.int64)
+        if sample_npz.frame_indices is not None and sample_npz.frame_indices.shape[0] == X.shape[0]
+        else np.arange(X.shape[0], dtype=np.int64)
+    )
+    frame_state_ids = (
+        np.asarray(sample_npz.frame_state_ids, dtype=str)
+        if sample_npz.frame_state_ids is not None and sample_npz.frame_state_ids.shape[0] == X.shape[0]
+        else np.full((X.shape[0],), "", dtype=str)
+    )
+
+    if drop_invalid and sample_npz.invalid_mask is not None:
+        keep = ~np.asarray(sample_npz.invalid_mask, dtype=bool).ravel()
+        if keep.shape[0] == X.shape[0]:
+            X = X[keep]
+            frame_indices = frame_indices[keep]
+            frame_state_ids = frame_state_ids[keep]
+
+    # Keep only frames with fully valid labels for this model.
+    valid = np.all(X >= 0, axis=1)
+    for i, k in enumerate(K_list):
+        valid &= X[:, i] < int(k)
+    if not np.any(valid):
+        raise ValueError("No valid starting frames after filtering (invalid/out-of-range labels).")
+    X = X[valid]
+    frame_indices = frame_indices[valid]
+    frame_state_ids = frame_state_ids[valid]
+
+    n_select = min(n_start_frames, int(X.shape[0]))
+    rng = np.random.default_rng(seed)
+    selected_local = np.asarray(rng.choice(X.shape[0], size=n_select, replace=False), dtype=np.int64)
+    selected_starts = np.asarray(X[selected_local], dtype=np.int32)
+    selected_frame_indices = np.asarray(frame_indices[selected_local], dtype=np.int64)
+    selected_frame_state_ids = np.asarray(frame_state_ids[selected_local], dtype=str)
+
+    # Optional residue labels from cluster metadata.
+    residue_keys: list[str] = []
+    cluster_npz_path = cluster_dir / "cluster.npz"
+    if cluster_npz_path.exists():
+        try:
+            with np.load(cluster_npz_path, allow_pickle=True) as cnpz:
+                if "metadata_json" in cnpz:
+                    meta = json.loads(cnpz["metadata_json"].item())
+                    if isinstance(meta, dict):
+                        residue_keys = [str(v) for v in (meta.get("residue_keys") or [])]
+        except Exception:
+            residue_keys = []
+    if len(residue_keys) != N:
+        residue_keys = [f"res_{i}" for i in range(N)]
+
+    # Run independent Gibbs relaxations (parallel across starting frames).
+    if n_workers is None or int(n_workers) <= 0:
+        workers = os.cpu_count() or 1
+    else:
+        workers = int(n_workers)
+    workers = max(1, min(workers, n_select))
+
+    first_flip = np.zeros((n_select, N), dtype=np.int32)
+    flip_counts_sum = np.zeros((gibbs_sweeps, N), dtype=np.uint32)
+    energy_traces = np.zeros((n_select, gibbs_sweeps), dtype=np.float32)
+
+    if progress_callback:
+        progress_callback("Running Gibbs relaxations...", 0, n_select)
+
+    def _payload(row: int) -> dict[str, Any]:
+        return {
+            "model_path": str(model_path),
+            "x0": selected_starts[row],
+            "n_sweeps": int(gibbs_sweeps),
+            "beta": float(beta),
+            "seed": int(seed) + row,
+        }
+
+    if workers <= 1:
+        for row in range(n_select):
+            out = _gibbs_relax_worker(_payload(row))
+            first_flip[row] = np.asarray(out["first_flip"], dtype=np.int32)
+            flip_counts_sum += np.asarray(out["flip_counts"], dtype=np.uint32)
+            energy_traces[row] = np.asarray(out["energy_trace"], dtype=np.float32)
+            if progress_callback:
+                progress_callback("Running Gibbs relaxations...", row + 1, n_select)
+    else:
+        with ProcessPoolExecutor(max_workers=workers) as executor:
+            futures = {executor.submit(_gibbs_relax_worker, _payload(row)): row for row in range(n_select)}
+            done = 0
+            for fut in as_completed(futures):
+                row = futures[fut]
+                out = fut.result()
+                first_flip[row] = np.asarray(out["first_flip"], dtype=np.int32)
+                flip_counts_sum += np.asarray(out["flip_counts"], dtype=np.uint32)
+                energy_traces[row] = np.asarray(out["energy_trace"], dtype=np.float32)
+                done += 1
+                if progress_callback:
+                    progress_callback("Running Gibbs relaxations...", done, n_select)
+
+    mean_first = np.mean(first_flip, axis=0).astype(np.float32)
+    median_first = np.median(first_flip, axis=0).astype(np.float32)
+    q25_first = np.quantile(first_flip, 0.25, axis=0).astype(np.float32)
+    q75_first = np.quantile(first_flip, 0.75, axis=0).astype(np.float32)
+
+    # Rank-based percentile coloring:
+    #   fast percentile = 1.0 for early flippers (small mean first-flip time),
+    #   0.0 for late flippers.
+    order = np.argsort(mean_first, kind="mergesort")
+    pct_fast = np.zeros((N,), dtype=np.float32)
+    if N == 1:
+        pct_fast[0] = 1.0
+    else:
+        pct_fast[order] = 1.0 - (np.arange(N, dtype=np.float32) / np.float32(N - 1))
+    pct_slow = (1.0 - pct_fast).astype(np.float32)
+
+    flip_prob_time = (flip_counts_sum.astype(np.float32) / float(n_select)).astype(np.float32)
+    mean_flip_fraction_by_step = np.mean(flip_prob_time, axis=1).astype(np.float32)
+    ever_flip_rate = np.mean(first_flip <= int(gibbs_sweeps), axis=0).astype(np.float32)
+    early_cutoff = max(1, int(round(0.25 * float(gibbs_sweeps))))
+    early_flip_rate = np.mean(first_flip <= int(early_cutoff), axis=0).astype(np.float32)
+
+    energy_mean = np.mean(energy_traces, axis=0).astype(np.float32)
+    energy_std = np.std(energy_traces, axis=0).astype(np.float32)
+
+    top_k = min(20, N)
+    top_fast_idx = np.argsort(mean_first)[:top_k].astype(np.int32)
+    top_slow_idx = np.argsort(mean_first)[::-1][:top_k].astype(np.int32)
+
+    analysis_id = str(uuid.uuid4())
+    out_root = _ensure_analysis_dir(cluster_dir, "gibbs_relaxation")
+    analysis_dir = out_root / analysis_id
+    analysis_dir.mkdir(parents=True, exist_ok=True)
+    npz_path = analysis_dir / "analysis.npz"
+    meta_path = analysis_dir / ANALYSIS_METADATA_FILENAME
+
+    np.savez_compressed(
+        npz_path,
+        residue_keys=np.asarray(residue_keys, dtype=str),
+        start_frame_indices=np.asarray(selected_frame_indices, dtype=np.int64),
+        start_frame_state_ids=np.asarray(selected_frame_state_ids, dtype=str),
+        first_flip_steps=np.asarray(first_flip, dtype=np.int32),
+        mean_first_flip_steps=np.asarray(mean_first, dtype=np.float32),
+        median_first_flip_steps=np.asarray(median_first, dtype=np.float32),
+        q25_first_flip_steps=np.asarray(q25_first, dtype=np.float32),
+        q75_first_flip_steps=np.asarray(q75_first, dtype=np.float32),
+        flip_percentile_fast=np.asarray(pct_fast, dtype=np.float32),
+        flip_percentile_slow=np.asarray(pct_slow, dtype=np.float32),
+        ever_flip_rate=np.asarray(ever_flip_rate, dtype=np.float32),
+        early_flip_rate=np.asarray(early_flip_rate, dtype=np.float32),
+        flip_prob_time=np.asarray(flip_prob_time, dtype=np.float32),
+        mean_flip_fraction_by_step=np.asarray(mean_flip_fraction_by_step, dtype=np.float32),
+        energy_traces=np.asarray(energy_traces, dtype=np.float32),
+        energy_mean=np.asarray(energy_mean, dtype=np.float32),
+        energy_std=np.asarray(energy_std, dtype=np.float32),
+        top_fast_indices=np.asarray(top_fast_idx, dtype=np.int32),
+        top_slow_indices=np.asarray(top_slow_idx, dtype=np.int32),
+        beta=np.asarray([beta], dtype=np.float32),
+        gibbs_sweeps=np.asarray([gibbs_sweeps], dtype=np.int32),
+        n_start_frames=np.asarray([n_select], dtype=np.int32),
+    )
+
+    now = _utc_now()
+    meta = {
+        "analysis_id": analysis_id,
+        "analysis_type": "gibbs_relaxation",
+        "created_at": now,
+        "updated_at": now,
+        "project_id": project_id,
+        "system_id": system_id,
+        "cluster_id": cluster_id,
+        "start_sample_id": str(start_sample_id),
+        "start_sample_name": sample_entry.get("name"),
+        "start_sample_type": sample_entry.get("type"),
+        "model_id": model_id,
+        "model_name": model_name,
+        "model_path": _relativize(model_path, system_dir),
+        "start_label_mode": mode,
+        "drop_invalid": bool(drop_invalid),
+        "beta": float(beta),
+        "n_start_frames_requested": int(n_start_frames),
+        "n_start_frames_used": int(n_select),
+        "gibbs_sweeps": int(gibbs_sweeps),
+        "seed": int(seed),
+        "workers": int(workers),
+        "paths": {"analysis_npz": _relativize(npz_path, system_dir)},
+        "summary": {
+            "n_residues": int(N),
+            "mean_first_flip_min": float(np.min(mean_first)) if mean_first.size else None,
+            "mean_first_flip_median": float(np.median(mean_first)) if mean_first.size else None,
+            "mean_first_flip_max": float(np.max(mean_first)) if mean_first.size else None,
+            "early_cutoff_step": int(early_cutoff),
+        },
+    }
+    meta_path.write_text(json.dumps(_convert_nan_to_none(meta), indent=2), encoding="utf-8")
+    return {
+        "metadata": _convert_nan_to_none(meta),
+        "analysis_npz": str(npz_path),
+        "analysis_dir": str(analysis_dir),
     }
 
 

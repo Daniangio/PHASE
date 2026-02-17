@@ -13,6 +13,8 @@ import SamplingVizPage from './pages/SamplingVizPage';
 import DeltaEvalPage from './pages/DeltaEvalPage';
 import DeltaCommitment3DPage from './pages/DeltaCommitment3DPage';
 import LambdaSweepPage from './pages/LambdaSweepPage';
+import GibbsRelaxationPage from './pages/GibbsRelaxationPage';
+import GibbsRelaxation3DPage from './pages/GibbsRelaxation3DPage';
 import MolstarDebugPage from './pages/MolstarDebugPage';
 import HealthPage from './pages/HealthPage';
 import JobStatusPage from './pages/JobStatusPage';
@@ -48,6 +50,14 @@ export default function App() {
           <Route
             path="/projects/:projectId/systems/:systemId/sampling/lambda_sweep"
             element={<LambdaSweepPage />}
+          />
+          <Route
+            path="/projects/:projectId/systems/:systemId/sampling/gibbs_relaxation"
+            element={<GibbsRelaxationPage />}
+          />
+          <Route
+            path="/projects/:projectId/systems/:systemId/sampling/gibbs_relaxation_3d"
+            element={<GibbsRelaxation3DPage />}
           />
           <Route path="/results" element={<ResultsPage />} />
           <Route path="/results/:jobId" element={<ResultDetailPage />} />

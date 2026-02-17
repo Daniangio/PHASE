@@ -61,6 +61,7 @@ def _build_state_artifacts(
     descriptors_dir: Path,
     slice_spec: Optional[str],
     state_id: str,
+    state_name: Optional[str],
     selection_used: str,
 ) -> Tuple[Any, Dict[str, Path]]:
     build_result = preprocessor.build_single(str(traj_path), str(pdb_path), slice_spec)
@@ -70,6 +71,7 @@ def _build_state_artifacts(
     }
     save_descriptor_npz(artifact_paths["npz"], build_result.features)
     metadata_payload = {
+        "state_name": state_name or state_id,
         "descriptor_keys": build_result.residue_keys,
         "residue_mapping": build_result.residue_mapping,
         "n_frames": build_result.n_frames,
@@ -117,6 +119,7 @@ def build_state_descriptors(
         descriptors_dir=descriptors_dir,
         slice_spec=state_meta.slice_spec,
         state_id=state_meta.state_id,
+        state_name=state_meta.name,
         selection_used=selection_used,
     )
 

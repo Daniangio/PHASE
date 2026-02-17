@@ -221,7 +221,7 @@ cluster_menu() {
     echo "System: ${OFFLINE_SYSTEM_NAME:-$OFFLINE_SYSTEM_ID} (${OFFLINE_SYSTEM_ID})"
     echo "Cluster: ${OFFLINE_CLUSTER_NAME:-$OFFLINE_CLUSTER_ID} (${OFFLINE_CLUSTER_ID})"
     echo ""
-    ACTION_LINES=$'list-models|List Potts models\nlist-samples|List sampling runs\nfit|Fit Potts model\nfit-delta|Fit delta Potts model\nlambda-model|Create lambda model\nsample|Run sampling\nlambda-sweep|Lambda sweep sampling\npatch-cluster|Patch cluster residues\nrefresh-md|Recompute MD samples\nevaluate|Evaluate state against cluster\nback|Back to systems'
+    ACTION_LINES=$'list-models|List Potts models\nlist-samples|List sampling runs\nfit|Fit Potts model\nfit-delta|Fit delta Potts model\nlambda-model|Create lambda model\nsample|Run sampling\nlambda-sweep|Lambda sweep sampling\ngibbs-relax|Gibbs relaxation analysis\npatch-cluster|Patch cluster residues\nrefresh-md|Recompute MD samples\nassign-md|Assign selected macro states\nevaluate|Evaluate state against cluster\nback|Back to systems'
     ACTION_ROW="$(offline_choose_one "Cluster actions:" "$ACTION_LINES")"
     ACTION="$(printf "%s" "$ACTION_ROW" | awk -F'|' '{print $1}')"
     case "$ACTION" in
@@ -285,6 +285,15 @@ cluster_menu() {
           --cluster-id "$OFFLINE_CLUSTER_ID"
         pause
         ;;
+      gibbs-relax)
+        ensure_env || return 0
+        "${ROOT_DIR}/scripts/potts_gibbs_relaxation.sh" \
+          --root "$OFFLINE_ROOT" \
+          --project-id "$OFFLINE_PROJECT_ID" \
+          --system-id "$OFFLINE_SYSTEM_ID" \
+          --cluster-id "$OFFLINE_CLUSTER_ID"
+        pause
+        ;;
       patch-cluster)
         ensure_env || return 0
         "${ROOT_DIR}/scripts/cluster_patch.sh" \
@@ -301,6 +310,29 @@ cluster_menu() {
           --project-id "$OFFLINE_PROJECT_ID" \
           --system-id "$OFFLINE_SYSTEM_ID" \
           --cluster-id "$OFFLINE_CLUSTER_ID"
+        pause
+        ;;
+      assign-md)
+        ensure_env || return 0
+        STATE_ROWS="$(offline_select_states)"
+        if [ -z "$(printf "%s" "$STATE_ROWS" | awk 'NF {print; exit}')" ]; then
+          echo "No states selected."
+          pause
+          continue
+        fi
+        while IFS= read -r STATE_ROW; do
+          [ -z "$STATE_ROW" ] && continue
+          STATE_ID="$(printf "%s" "$STATE_ROW" | awk -F'|' '{print $1}')"
+          [ -z "$STATE_ID" ] && continue
+          python -m phase.scripts.evaluate_state \
+            --root "$OFFLINE_ROOT" \
+            --project-id "$OFFLINE_PROJECT_ID" \
+            --system-id "$OFFLINE_SYSTEM_ID" \
+            --cluster-id "$OFFLINE_CLUSTER_ID" \
+            --state-id "$STATE_ID"
+        done <<EOF
+$STATE_ROWS
+EOF
         pause
         ;;
       evaluate)

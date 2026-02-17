@@ -788,6 +788,9 @@ def assign_cluster_labels_to_states(
     *,
     k_neighbors: int = 10,
     output_dir: Optional[Path] = None,
+    state_ids: Optional[Sequence[str]] = None,
+    metastable_ids: Optional[Sequence[str]] = None,
+    include_metastable: bool = False,
 ) -> Dict[str, Any]:
     store = ProjectStore()
     system = store.get_system(project_id, system_id)
@@ -811,8 +814,28 @@ def assign_cluster_labels_to_states(
     assign_root.mkdir(parents=True, exist_ok=True)
 
     samples: List[Dict[str, Any]] = []
-    assigned_state_paths: Dict[str, str] = {}
-    for state_id, state in system.states.items():
+    assigned_state_ids: List[str] = []
+
+    if state_ids is None:
+        target_state_ids = [
+            str(sid)
+            for sid, state in (system.states or {}).items()
+            if getattr(state, "descriptor_file", None)
+        ]
+    else:
+        target_state_ids = []
+        seen_state_ids: set[str] = set()
+        for raw in state_ids:
+            sid = str(raw)
+            if sid in seen_state_ids:
+                continue
+            seen_state_ids.add(sid)
+            target_state_ids.append(sid)
+
+    for state_id in target_state_ids:
+        state = (system.states or {}).get(str(state_id))
+        if not state:
+            continue
         key = f"state:{state_id}"
         entry = predictions.get(key)
         if not isinstance(entry, dict):
@@ -850,7 +873,6 @@ def assign_cluster_labels_to_states(
             frame_indices=frame_indices,
             frame_state_ids=np.full(frame_indices.shape[0], str(state_id), dtype=str),
         )
-        assigned_state_paths[state_id] = str(out_path.relative_to(cluster_path.parent))
         system_dir = cluster_path.parent.parent.parent
         try:
             rel_system = str(out_path.relative_to(system_dir))
@@ -876,99 +898,113 @@ def assign_cluster_labels_to_states(
                 "type": "md_eval",
                 "method": "md_eval",
                 "state_id": state_id,
-                "path": str(out_path.relative_to(cluster_path.parent)),
+                "path": rel_system,
                 "created_at": datetime.utcnow().isoformat(),
                 "summary": {"state_id": state_id},
             }
         )
+        assigned_state_ids.append(str(state_id))
 
-    assigned_meta_paths: Dict[str, str] = {}
+    assigned_meta_ids: List[str] = []
     meta_lookup = {m.get("metastable_id") or m.get("id"): m for m in system.metastable_states or []}
-    for meta_id in meta_lookup.keys():
-        key = f"meta:{meta_id}"
-        entry = predictions.get(key)
-        if not isinstance(entry, dict):
-            continue
-        labels_key = entry.get("labels_halo")
-        if not labels_key or labels_key not in data:
-            continue
-        labels_halo = np.asarray(data[labels_key], dtype=np.int32)
-        assigned_key = entry.get("labels_assigned")
-        labels_assigned = (
-            np.asarray(data[assigned_key], dtype=np.int32)
-            if isinstance(assigned_key, str) and assigned_key in data
-            else None
-        )
-        frame_state_ids_key = entry.get("frame_state_ids")
-        frame_indices_key = entry.get("frame_indices")
-        frame_state_ids = (
-            np.asarray(data[frame_state_ids_key], dtype=str)
-            if isinstance(frame_state_ids_key, str) and frame_state_ids_key in data
-            else np.array([], dtype=str)
-        )
-        frame_indices = (
-            np.asarray(data[frame_indices_key], dtype=np.int64)
-            if isinstance(frame_indices_key, str) and frame_indices_key in data
-            else np.arange(labels_halo.shape[0], dtype=np.int64)
-        )
+    if include_metastable:
+        if metastable_ids is None:
+            target_meta_ids = [str(mid) for mid in meta_lookup.keys() if mid is not None]
+        else:
+            target_meta_ids = []
+            seen_meta_ids: set[str] = set()
+            for raw in metastable_ids:
+                mid = str(raw)
+                if mid in seen_meta_ids:
+                    continue
+                seen_meta_ids.add(mid)
+                target_meta_ids.append(mid)
 
-        sample_id = str(uuid.uuid4())
-        sample_dir = assign_root / sample_id
-        sample_dir.mkdir(parents=True, exist_ok=True)
-        out_path = sample_dir / SAMPLE_NPZ_FILENAME
-        labels_primary = labels_assigned if labels_assigned is not None else labels_halo
-        frame_state_ids_arr = frame_state_ids
-        if frame_state_ids_arr.size != frame_indices.shape[0]:
-            frame_state_ids_arr = np.full(frame_indices.shape[0], "", dtype=str)
-        keep = np.all(labels_primary >= 0, axis=1)
-        if keep.size and not np.all(keep):
-            labels_primary = labels_primary[keep]
-            labels_halo = labels_halo[keep]
-            frame_indices = frame_indices[keep]
-            frame_state_ids_arr = frame_state_ids_arr[keep] if frame_state_ids_arr.size == keep.shape[0] else frame_state_ids_arr
-        save_sample_npz(
-            out_path,
-            labels=labels_primary,
-            labels_halo=labels_halo,
-            frame_indices=frame_indices,
-            frame_state_ids=frame_state_ids_arr,
-        )
-        assigned_meta_paths[str(meta_id)] = str(out_path.relative_to(cluster_path.parent))
-        system_dir = cluster_path.parent.parent.parent
-        try:
-            rel_system = str(out_path.relative_to(system_dir))
-        except Exception:
-            rel_system = str(out_path)
-        sample_meta = {
-            "sample_id": sample_id,
-            "name": f"MD {meta_lookup.get(meta_id, {}).get('label') or meta_id}",
-            "type": "md_eval",
-            "method": "md_eval",
-            "source": "clustering",
-            "metastable_id": str(meta_id),
-            "created_at": datetime.utcnow().isoformat(),
-            "path": rel_system,
-            "paths": {"summary_npz": rel_system},
-            "params": {},
-        }
-        (sample_dir / "sample_metadata.json").write_text(json.dumps(sample_meta, indent=2), encoding="utf-8")
-        meta_label = meta_lookup.get(meta_id, {}).get("label") if isinstance(meta_id, str) else None
-        samples.append(
-            {
+        for meta_id in target_meta_ids:
+            key = f"meta:{meta_id}"
+            entry = predictions.get(key)
+            if not isinstance(entry, dict):
+                continue
+            labels_key = entry.get("labels_halo")
+            if not labels_key or labels_key not in data:
+                continue
+            labels_halo = np.asarray(data[labels_key], dtype=np.int32)
+            assigned_key = entry.get("labels_assigned")
+            labels_assigned = (
+                np.asarray(data[assigned_key], dtype=np.int32)
+                if isinstance(assigned_key, str) and assigned_key in data
+                else None
+            )
+            frame_state_ids_key = entry.get("frame_state_ids")
+            frame_indices_key = entry.get("frame_indices")
+            frame_state_ids = (
+                np.asarray(data[frame_state_ids_key], dtype=str)
+                if isinstance(frame_state_ids_key, str) and frame_state_ids_key in data
+                else np.array([], dtype=str)
+            )
+            frame_indices = (
+                np.asarray(data[frame_indices_key], dtype=np.int64)
+                if isinstance(frame_indices_key, str) and frame_indices_key in data
+                else np.arange(labels_halo.shape[0], dtype=np.int64)
+            )
+
+            sample_id = str(uuid.uuid4())
+            sample_dir = assign_root / sample_id
+            sample_dir.mkdir(parents=True, exist_ok=True)
+            out_path = sample_dir / SAMPLE_NPZ_FILENAME
+            labels_primary = labels_assigned if labels_assigned is not None else labels_halo
+            frame_state_ids_arr = frame_state_ids
+            if frame_state_ids_arr.size != frame_indices.shape[0]:
+                frame_state_ids_arr = np.full(frame_indices.shape[0], "", dtype=str)
+            keep = np.all(labels_primary >= 0, axis=1)
+            if keep.size and not np.all(keep):
+                labels_primary = labels_primary[keep]
+                labels_halo = labels_halo[keep]
+                frame_indices = frame_indices[keep]
+                frame_state_ids_arr = frame_state_ids_arr[keep] if frame_state_ids_arr.size == keep.shape[0] else frame_state_ids_arr
+            save_sample_npz(
+                out_path,
+                labels=labels_primary,
+                labels_halo=labels_halo,
+                frame_indices=frame_indices,
+                frame_state_ids=frame_state_ids_arr,
+            )
+            system_dir = cluster_path.parent.parent.parent
+            try:
+                rel_system = str(out_path.relative_to(system_dir))
+            except Exception:
+                rel_system = str(out_path)
+            sample_meta = {
                 "sample_id": sample_id,
-                "name": f"MD {meta_label or meta_id}",
+                "name": f"MD {meta_lookup.get(meta_id, {}).get('label') or meta_id}",
                 "type": "md_eval",
                 "method": "md_eval",
+                "source": "clustering",
                 "metastable_id": str(meta_id),
-                "path": str(out_path.relative_to(cluster_path.parent)),
                 "created_at": datetime.utcnow().isoformat(),
-                "summary": {"metastable_id": str(meta_id)},
+                "path": rel_system,
+                "paths": {"summary_npz": rel_system},
+                "params": {},
             }
-        )
+            (sample_dir / "sample_metadata.json").write_text(json.dumps(sample_meta, indent=2), encoding="utf-8")
+            meta_label = meta_lookup.get(meta_id, {}).get("label") if isinstance(meta_id, str) else None
+            samples.append(
+                {
+                    "sample_id": sample_id,
+                    "name": f"MD {meta_label or meta_id}",
+                    "type": "md_eval",
+                    "method": "md_eval",
+                    "metastable_id": str(meta_id),
+                    "path": rel_system,
+                    "created_at": datetime.utcnow().isoformat(),
+                    "summary": {"metastable_id": str(meta_id)},
+                }
+            )
+            assigned_meta_ids.append(str(meta_id))
 
     return {
-        "assigned_state_paths": assigned_state_paths,
-        "assigned_metastable_paths": assigned_meta_paths,
+        "assigned_state_ids": assigned_state_ids,
+        "assigned_metastable_ids": assigned_meta_ids,
         "samples": samples,
     }
 
@@ -1047,11 +1083,26 @@ def evaluate_state_with_models(
         if np.any(labels_assigned[:, idx] >= 0):
             cluster_counts[idx] = int(labels_assigned[:, idx].max()) + 1
 
+    # Keep full-frame predictions for cluster-level metadata/halo summary updates.
+    labels_halo_full = labels_halo.copy()
+    labels_assigned_full = labels_assigned.copy()
+    frame_indices_full = np.arange(labels_halo.shape[0], dtype=np.int64)
+
+    state_label = state.name or state_id
+    _upsert_state_prediction_and_halo_summary(
+        cluster_path=cluster_path,
+        state_id=state_id,
+        state_label=state_label,
+        labels_halo=labels_halo_full,
+        labels_assigned=labels_assigned_full,
+        frame_indices=frame_indices_full,
+    )
+
     sample_id = str(sample_id) if sample_id else str(uuid.uuid4())
     sample_dir = cluster_dirs["samples_dir"] / sample_id
     sample_dir.mkdir(parents=True, exist_ok=True)
     out_path = sample_dir / SAMPLE_NPZ_FILENAME
-    frame_indices = np.arange(labels_halo.shape[0], dtype=np.int64)
+    frame_indices = frame_indices_full.copy()
     keep = np.all(labels_assigned >= 0, axis=1)
     if keep.size and not np.all(keep):
         labels_assigned = labels_assigned[keep]
@@ -1070,7 +1121,7 @@ def evaluate_state_with_models(
         rel = str(out_path)
     sample_entry = {
         "sample_id": sample_id,
-        "name": f"MD {state.name or state_id}",
+        "name": f"MD {state_label}",
         "type": "md_eval",
         "method": "md_eval",
         "source": "clustering",
@@ -1083,6 +1134,77 @@ def evaluate_state_with_models(
     # Sample metadata is persisted via ProjectStore.save_system(). We return the full entry so
     # both offline scripts and the webserver can append/update it in cluster metadata.
     return sample_entry
+
+
+def build_md_eval_samples_for_cluster(
+    project_id: str,
+    system_id: str,
+    cluster_id: str,
+    *,
+    cluster_path: Path,
+    selected_state_ids: Optional[Sequence[str]] = None,
+    include_remaining_states: bool = True,
+    store: ProjectStore | None = None,
+) -> Dict[str, Any]:
+    """
+    Build md_eval samples for a cluster:
+      1) first from cluster predictions for selected macro states;
+      2) then (optionally) evaluate remaining descriptor-ready macro states with frozen models.
+    """
+    store = store or ProjectStore()
+    system = store.get_system(project_id, system_id)
+    cluster_dirs = store.ensure_cluster_directories(project_id, system_id, cluster_id)
+    samples_dir = cluster_dirs["samples_dir"]
+
+    descriptor_state_ids = [
+        str(sid)
+        for sid, state in (system.states or {}).items()
+        if getattr(state, "descriptor_file", None)
+    ]
+
+    selected_macro_ids: List[str] = []
+    if selected_state_ids:
+        descriptor_set = set(descriptor_state_ids)
+        seen: set[str] = set()
+        for raw in selected_state_ids:
+            sid = str(raw)
+            if sid in seen or sid not in descriptor_set:
+                continue
+            seen.add(sid)
+            selected_macro_ids.append(sid)
+    else:
+        selected_macro_ids = list(descriptor_state_ids)
+
+    assigned = assign_cluster_labels_to_states(
+        cluster_path,
+        project_id,
+        system_id,
+        output_dir=samples_dir,
+        state_ids=selected_macro_ids,
+        include_metastable=False,
+    )
+    samples: List[Dict[str, Any]] = [s for s in (assigned.get("samples") or []) if isinstance(s, dict)]
+    assigned_state_ids: set[str] = {str(v) for v in (assigned.get("assigned_state_ids") or [])}
+
+    if include_remaining_states:
+        for state_id in descriptor_state_ids:
+            if state_id in assigned_state_ids:
+                continue
+            sample_entry = evaluate_state_with_models(
+                project_id,
+                system_id,
+                cluster_id,
+                state_id,
+                store=store,
+            )
+            if isinstance(sample_entry, dict):
+                samples.append(sample_entry)
+                assigned_state_ids.add(str(state_id))
+
+    return {
+        "samples": samples,
+        "assigned_state_ids": sorted(assigned_state_ids),
+    }
 
 
 def update_cluster_metadata_with_assignments(
@@ -1126,6 +1248,130 @@ def _save_cluster_payload(cluster_path: Path, payload: Dict[str, Any], meta: Dic
     payload = dict(payload)
     payload["metadata_json"] = np.array(json.dumps(meta))
     np.savez_compressed(cluster_path, **payload)
+
+
+def _upsert_state_prediction_and_halo_summary(
+    *,
+    cluster_path: Path,
+    state_id: str,
+    state_label: str,
+    labels_halo: np.ndarray,
+    labels_assigned: np.ndarray,
+    frame_indices: np.ndarray,
+) -> None:
+    payload, meta = _load_cluster_payload(cluster_path)
+    predictions = meta.get("predictions")
+    if not isinstance(predictions, dict):
+        predictions = {}
+
+    labels_halo_arr = np.asarray(labels_halo, dtype=np.int32)
+    labels_assigned_arr = np.asarray(labels_assigned, dtype=np.int32)
+    frame_indices_arr = np.asarray(frame_indices, dtype=np.int64)
+    if labels_halo_arr.ndim != 2 or labels_assigned_arr.ndim != 2:
+        raise ValueError("State prediction labels must be 2D arrays.")
+    if labels_halo_arr.shape != labels_assigned_arr.shape:
+        raise ValueError("Halo/assigned state prediction arrays must have the same shape.")
+    if frame_indices_arr.ndim != 1 or frame_indices_arr.shape[0] != labels_halo_arr.shape[0]:
+        raise ValueError("frame_indices must be a 1D array aligned with state prediction rows.")
+
+    key_slug = _slug(str(state_id))
+    key_halo = f"state__{key_slug}__labels_halo"
+    key_assigned = f"state__{key_slug}__labels_assigned"
+    key_frame = f"state__{key_slug}__frame_indices"
+    payload[key_halo] = labels_halo_arr
+    payload[key_assigned] = labels_assigned_arr
+    payload[key_frame] = frame_indices_arr
+
+    predictions[f"state:{state_id}"] = {
+        "type": "macro",
+        "labels_halo": key_halo,
+        "labels_assigned": key_assigned,
+        "frame_indices": key_frame,
+        "frame_count": int(labels_halo_arr.shape[0]),
+    }
+    meta["predictions"] = predictions
+
+    halo_summary = meta.get("halo_summary")
+    if not isinstance(halo_summary, dict):
+        halo_summary = {}
+    npz_keys = halo_summary.get("npz_keys")
+    if not isinstance(npz_keys, dict):
+        npz_keys = {}
+    matrix_key = str(npz_keys.get("matrix") or "halo_rate__matrix")
+    ids_key = str(npz_keys.get("condition_ids") or "halo_rate__condition_ids")
+    labels_key = str(npz_keys.get("condition_labels") or "halo_rate__condition_labels")
+    types_key = str(npz_keys.get("condition_types") or "halo_rate__condition_types")
+    halo_summary["npz_keys"] = {
+        "matrix": matrix_key,
+        "condition_ids": ids_key,
+        "condition_labels": labels_key,
+        "condition_types": types_key,
+    }
+    meta["halo_summary"] = halo_summary
+
+    n_res = labels_halo_arr.shape[1]
+    state_condition = f"state:{state_id}"
+    halo_row = (
+        np.mean(labels_halo_arr == -1, axis=0).astype(float, copy=False)
+        if labels_halo_arr.shape[0] > 0
+        else np.full(n_res, np.nan, dtype=float)
+    )
+
+    cond_ids = (
+        np.asarray(payload[ids_key]).astype(str).tolist()
+        if ids_key in payload
+        else []
+    )
+    cond_labels = (
+        np.asarray(payload[labels_key]).astype(str).tolist()
+        if labels_key in payload
+        else []
+    )
+    cond_types = (
+        np.asarray(payload[types_key]).astype(str).tolist()
+        if types_key in payload
+        else []
+    )
+
+    matrix_existing = np.asarray(payload[matrix_key], dtype=float) if matrix_key in payload else np.zeros((0, n_res), dtype=float)
+    if matrix_existing.ndim != 2:
+        matrix_existing = np.zeros((0, n_res), dtype=float)
+    elif matrix_existing.shape[1] != n_res:
+        if matrix_existing.shape[0] == 0:
+            matrix_existing = np.zeros((0, n_res), dtype=float)
+        else:
+            raise ValueError("Existing halo summary matrix has incompatible residue dimension.")
+
+    if state_condition in cond_ids:
+        idx = cond_ids.index(state_condition)
+        if idx >= matrix_existing.shape[0]:
+            pad_rows = idx + 1 - matrix_existing.shape[0]
+            matrix_existing = np.vstack([matrix_existing, np.full((pad_rows, n_res), np.nan, dtype=float)])
+        matrix_existing[idx] = halo_row
+        if idx < len(cond_labels):
+            cond_labels[idx] = str(state_label)
+        if idx < len(cond_types):
+            cond_types[idx] = "macro"
+    else:
+        cond_ids.append(state_condition)
+        cond_labels.append(str(state_label))
+        cond_types.append("macro")
+        matrix_existing = np.vstack([matrix_existing, halo_row]) if matrix_existing.size else halo_row.reshape(1, -1)
+
+    while len(cond_labels) < len(cond_ids):
+        cond_labels.append(cond_ids[len(cond_labels)])
+    while len(cond_types) < len(cond_ids):
+        cond_types.append("macro")
+    if matrix_existing.shape[0] < len(cond_ids):
+        pad = len(cond_ids) - matrix_existing.shape[0]
+        matrix_existing = np.vstack([matrix_existing, np.full((pad, n_res), np.nan, dtype=float)])
+
+    payload[matrix_key] = matrix_existing.astype(np.float64, copy=False)
+    payload[ids_key] = np.array(cond_ids, dtype=str)
+    payload[labels_key] = np.array(cond_labels, dtype=str)
+    payload[types_key] = np.array(cond_types, dtype=str)
+
+    _save_cluster_payload(cluster_path, payload, meta)
 
 
 def _resolve_patch_residue_indices(
@@ -1672,8 +1918,16 @@ def confirm_cluster_residue_patch(
 
     assignments: Dict[str, Any] = {}
     if recompute_assignments:
-        assignments = assign_cluster_labels_to_states(cluster_path, project_id, system_id)
-        update_cluster_metadata_with_assignments(cluster_path, assignments)
+        selected_ids = [str(v) for v in (meta.get("selected_state_ids") or [])]
+        assignments = build_md_eval_samples_for_cluster(
+            project_id,
+            system_id,
+            cluster_id,
+            cluster_path=cluster_path,
+            selected_state_ids=selected_ids,
+            include_remaining_states=True,
+            store=store,
+        )
 
     return {
         "cluster_id": cluster_id,

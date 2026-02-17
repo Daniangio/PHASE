@@ -17,8 +17,7 @@ from backend.api.v1.common import DATA_ROOT, get_queue, project_store, stream_up
 from backend.api.v1.schemas import LambdaPottsModelCreateRequest
 from phase.workflows.clustering import (
     generate_metastable_cluster_npz,
-    assign_cluster_labels_to_states,
-    update_cluster_metadata_with_assignments,
+    build_md_eval_samples_for_cluster,
     build_cluster_entry,
     build_cluster_output_path,
     list_cluster_patches,
@@ -585,8 +584,6 @@ async def confirm_cluster_patch(
 
     assignments = result.get("assignments") or {}
     if isinstance(assignments, dict):
-        entry["assigned_state_paths"] = assignments.get("assigned_state_paths", {})
-        entry["assigned_metastable_paths"] = assignments.get("assigned_metastable_paths", {})
         new_md_samples = [s for s in (assignments.get("samples") or []) if isinstance(s, dict)]
         entry["samples"] = _replace_md_samples(entry.get("samples"), new_md_samples)
         entry["updated_at"] = datetime.utcnow().isoformat()
@@ -799,6 +796,184 @@ async def get_sample_stats(
         "invalid_count": invalid_count,
         "invalid_fraction": invalid_fraction,
         "has_halo": bool(has_halo),
+    }
+
+
+@router.post(
+    "/projects/{project_id}/systems/{system_id}/metastable/clusters/{cluster_id}/samples/{sample_id}/residue_profile",
+    summary="Compute residue and edge cluster distributions for one sample.",
+)
+async def get_sample_residue_profile(
+    project_id: str,
+    system_id: str,
+    cluster_id: str,
+    sample_id: str,
+    payload: Dict[str, Any],
+):
+    residue_index_raw = (payload or {}).get("residue_index")
+    if residue_index_raw is None:
+        raise HTTPException(status_code=400, detail="residue_index is required.")
+    try:
+        residue_index = int(residue_index_raw)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="residue_index must be an integer.") from exc
+
+    label_mode = str((payload or {}).get("label_mode") or "assigned").strip().lower()
+    if label_mode not in {"assigned", "labels", "halo", "labels_halo"}:
+        raise HTTPException(status_code=400, detail="label_mode must be one of: assigned, halo.")
+
+    edge_pairs_raw = (payload or {}).get("edge_pairs") or []
+    if not isinstance(edge_pairs_raw, list):
+        raise HTTPException(status_code=400, detail="edge_pairs must be a list of [r,s] pairs.")
+
+    edge_pairs: List[tuple[int, int]] = []
+    for item in edge_pairs_raw:
+        if not isinstance(item, (list, tuple)) or len(item) < 2:
+            continue
+        try:
+            r = int(item[0])
+            s = int(item[1])
+        except Exception:
+            continue
+        if r == s:
+            continue
+        edge_pairs.append((r, s))
+
+    try:
+        system_meta = project_store.get_system(project_id, system_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="System not found.")
+
+    entry = get_cluster_entry(system_meta, cluster_id)
+    samples = entry.get("samples") if isinstance(entry, dict) else None
+    if not isinstance(samples, list):
+        raise HTTPException(status_code=404, detail="No samples recorded for this cluster.")
+    sample_entry = next((s for s in samples if isinstance(s, dict) and s.get("sample_id") == sample_id), None)
+    if not sample_entry:
+        raise HTTPException(status_code=404, detail="Sample not found in cluster metadata.")
+    paths = sample_entry.get("paths") if isinstance(sample_entry, dict) else None
+    sample_rel = paths.get("summary_npz") if isinstance(paths, dict) else None
+    sample_rel = sample_rel or sample_entry.get("path")
+    if not sample_rel:
+        raise HTTPException(status_code=404, detail="Sample NPZ path is missing.")
+
+    sample_path = project_store.resolve_path(project_id, system_id, str(sample_rel))
+    if not sample_path.exists():
+        cluster_dirs = project_store.ensure_cluster_directories(project_id, system_id, cluster_id)
+        alt = cluster_dirs["cluster_dir"] / str(sample_rel)
+        if alt.exists():
+            sample_path = alt
+    if not sample_path.exists():
+        raise HTTPException(status_code=404, detail="Sample NPZ not found on disk.")
+
+    cluster_dirs = project_store.ensure_cluster_directories(project_id, system_id, cluster_id)
+    cluster_path = cluster_dirs["cluster_dir"] / "cluster.npz"
+    if not cluster_path.exists() and entry.get("path"):
+        cluster_path = project_store.resolve_path(project_id, system_id, str(entry.get("path")))
+    if not cluster_path.exists():
+        raise HTTPException(status_code=404, detail="Cluster NPZ not found.")
+
+    try:
+        with np.load(cluster_path, allow_pickle=True) as cluster_npz:
+            if "merged__cluster_counts" not in cluster_npz:
+                raise HTTPException(status_code=400, detail="Cluster NPZ is missing merged__cluster_counts.")
+            K = np.asarray(cluster_npz["merged__cluster_counts"], dtype=int)
+            residue_keys = [str(v) for v in cluster_npz["residue_keys"].tolist()] if "residue_keys" in cluster_npz else []
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to load cluster NPZ: {exc}") from exc
+
+    if residue_index < 0 or residue_index >= int(K.shape[0]):
+        raise HTTPException(status_code=400, detail=f"residue_index out of range [0,{int(K.shape[0]) - 1}].")
+
+    try:
+        with np.load(sample_path, allow_pickle=True) as sample_npz:
+            labels = None
+            if label_mode in {"halo", "labels_halo"}:
+                if "labels_halo" in sample_npz:
+                    labels = np.asarray(sample_npz["labels_halo"], dtype=int)
+                elif "assigned__labels" in sample_npz:
+                    labels = np.asarray(sample_npz["assigned__labels"], dtype=int)
+            if labels is None:
+                if "labels" in sample_npz:
+                    labels = np.asarray(sample_npz["labels"], dtype=int)
+                elif "assigned__labels_assigned" in sample_npz:
+                    labels = np.asarray(sample_npz["assigned__labels_assigned"], dtype=int)
+                elif "assigned__labels" in sample_npz:
+                    labels = np.asarray(sample_npz["assigned__labels"], dtype=int)
+            if labels is None:
+                raise HTTPException(status_code=400, detail="Sample NPZ has no labels.")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to load sample NPZ: {exc}") from exc
+
+    if labels.ndim != 2:
+        raise HTTPException(status_code=400, detail="Sample labels array must be 2D.")
+    if int(labels.shape[1]) != int(K.shape[0]):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Sample labels width mismatch: got {labels.shape[1]}, expected {int(K.shape[0])}.",
+        )
+
+    Ki = int(K[residue_index])
+    if Ki <= 0:
+        raise HTTPException(status_code=400, detail=f"Invalid cluster count K[{residue_index}]={Ki}.")
+    col = np.asarray(labels[:, residue_index], dtype=int)
+    valid = (col >= 0) & (col < Ki)
+    valid_count = int(np.count_nonzero(valid))
+    counts = np.bincount(col[valid], minlength=Ki).astype(float, copy=False) if valid_count > 0 else np.zeros((Ki,), dtype=float)
+    probs = counts / float(valid_count) if valid_count > 0 else np.zeros((Ki,), dtype=float)
+
+    edge_profiles: List[Dict[str, Any]] = []
+    seen_pairs: set[tuple[int, int]] = set()
+    for r, s in edge_pairs:
+        if r < 0 or s < 0 or r >= int(K.shape[0]) or s >= int(K.shape[0]):
+            continue
+        rr, ss = (r, s) if r < s else (s, r)
+        if (rr, ss) in seen_pairs:
+            continue
+        seen_pairs.add((rr, ss))
+        Kr = int(K[rr])
+        Ks = int(K[ss])
+        if Kr <= 0 or Ks <= 0:
+            continue
+        ar = np.asarray(labels[:, rr], dtype=int)
+        bs = np.asarray(labels[:, ss], dtype=int)
+        valid_edge = (ar >= 0) & (ar < Kr) & (bs >= 0) & (bs < Ks)
+        edge_valid_count = int(np.count_nonzero(valid_edge))
+        if edge_valid_count > 0:
+            flat = np.asarray(ar[valid_edge] * Ks + bs[valid_edge], dtype=int)
+            joint_counts = np.bincount(flat, minlength=Kr * Ks).astype(float, copy=False).reshape(Kr, Ks)
+            joint_probs = joint_counts / float(edge_valid_count)
+        else:
+            joint_probs = np.zeros((Kr, Ks), dtype=float)
+        edge_profiles.append(
+            {
+                "r": int(rr),
+                "s": int(ss),
+                "k_r": int(Kr),
+                "k_s": int(Ks),
+                "valid_count": int(edge_valid_count),
+                "invalid_count": int(labels.shape[0] - edge_valid_count),
+                "joint_probs": joint_probs.tolist(),
+            }
+        )
+
+    residue_label = residue_keys[residue_index] if residue_keys and residue_index < len(residue_keys) else f"res_{residue_index}"
+    return {
+        "sample_id": sample_id,
+        "sample_name": sample_entry.get("name"),
+        "label_mode": "halo" if label_mode in {"halo", "labels_halo"} else "assigned",
+        "n_frames": int(labels.shape[0]),
+        "residue_index": int(residue_index),
+        "residue_label": str(residue_label),
+        "k": int(Ki),
+        "node_probs": probs.tolist(),
+        "node_valid_count": int(valid_count),
+        "node_invalid_count": int(labels.shape[0] - valid_count),
+        "edge_profiles": edge_profiles,
     }
 
 
@@ -1069,8 +1244,26 @@ async def build_metastable_cluster_vectors(
     except Exception:
         rel_path = str(npz_path)
 
-    assignments = assign_cluster_labels_to_states(npz_path, project_id, system_id)
-    update_cluster_metadata_with_assignments(npz_path, assignments)
+    selected_state_ids = []
+    try:
+        descriptor_state_ids = {
+            str(sid)
+            for sid, state in (system_meta.states or {}).items()
+            if getattr(state, "descriptor_file", None)
+        }
+        selected_state_ids = [str(v) for v in parsed["state_ids"] if str(v) in descriptor_state_ids]
+    except Exception:
+        selected_state_ids = []
+
+    assignments = build_md_eval_samples_for_cluster(
+        project_id,
+        system_id,
+        cluster_id,
+        cluster_path=npz_path,
+        selected_state_ids=selected_state_ids,
+        include_remaining_states=True,
+        store=project_store,
+    )
 
     cluster_entry = _build_cluster_entry(parsed, cluster_id, "finished", 100, "Complete")
     cluster_entry.update(
@@ -1078,8 +1271,7 @@ async def build_metastable_cluster_vectors(
             "path": rel_path,
             "generated_at": meta.get("generated_at") if isinstance(meta, dict) else None,
             "contact_edge_count": meta.get("contact_edge_count") if isinstance(meta, dict) else None,
-            "assigned_state_paths": assignments.get("assigned_state_paths", {}),
-            "assigned_metastable_paths": assignments.get("assigned_metastable_paths", {}),
+            "samples": assignments.get("samples", []),
         }
     )
     system_meta.metastable_clusters = (system_meta.metastable_clusters or []) + [cluster_entry]
@@ -1541,13 +1733,26 @@ async def upload_metastable_cluster_npz(
     out_path = cluster_dir / "cluster.npz"
     np.savez_compressed(out_path, **payload)
 
-    assignments = assign_cluster_labels_to_states(
-        out_path,
+    selected_state_ids = []
+    try:
+        descriptor_state_ids = {
+            str(sid)
+            for sid, state in (system_meta.states or {}).items()
+            if getattr(state, "descriptor_file", None)
+        }
+        selected_state_ids = [str(v) for v in parsed_state_ids if str(v) in descriptor_state_ids]
+    except Exception:
+        selected_state_ids = []
+
+    assignments = build_md_eval_samples_for_cluster(
         project_id,
         system_id,
-        output_dir=cluster_dirs["samples_dir"],
+        cluster_id,
+        cluster_path=out_path,
+        selected_state_ids=selected_state_ids,
+        include_remaining_states=True,
+        store=project_store,
     )
-    update_cluster_metadata_with_assignments(out_path, assignments)
 
     cluster_entry = {
         "cluster_id": cluster_id,
@@ -1570,8 +1775,6 @@ async def upload_metastable_cluster_npz(
             "density_z": meta.get("cluster_params", {}).get("density_z"),
             "max_cluster_frames": meta.get("cluster_params", {}).get("max_cluster_frames"),
         },
-        "assigned_state_paths": assignments.get("assigned_state_paths", {}),
-        "assigned_metastable_paths": assignments.get("assigned_metastable_paths", {}),
         "samples": assignments.get("samples", []),
         "potts_models": [],
     }
@@ -1712,6 +1915,112 @@ async def evaluate_state_against_cluster(
     system_meta.metastable_clusters = clusters
     project_store.save_system(system_meta)
     return {"status": "ok", "cluster_id": cluster_id, "sample": sample_entry}
+
+
+@router.post(
+    "/projects/{project_id}/systems/{system_id}/metastable/clusters/{cluster_id}/assign_states",
+    summary="Assign selected macro states to an existing cluster and create/update MD samples",
+)
+async def assign_states_against_cluster(
+    project_id: str,
+    system_id: str,
+    cluster_id: str,
+    payload: Dict[str, Any],
+):
+    raw_state_ids = (payload or {}).get("state_ids")
+    if raw_state_ids is None:
+        raw_state_ids = []
+    if not isinstance(raw_state_ids, list):
+        raise HTTPException(status_code=400, detail="state_ids must be a list.")
+    state_ids = []
+    seen_ids: set[str] = set()
+    for raw in raw_state_ids:
+        sid = str(raw).strip()
+        if not sid or sid in seen_ids:
+            continue
+        seen_ids.add(sid)
+        state_ids.append(sid)
+
+    try:
+        system_meta = project_store.get_system(project_id, system_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"System '{system_id}' not found.")
+
+    clusters = system_meta.metastable_clusters or []
+    entry = next((c for c in clusters if c.get("cluster_id") == cluster_id), None)
+    if not entry:
+        raise HTTPException(status_code=404, detail="Cluster NPZ not found.")
+
+    descriptor_state_ids = [
+        str(sid)
+        for sid, state in (system_meta.states or {}).items()
+        if getattr(state, "descriptor_file", None)
+    ]
+    if not state_ids:
+        state_ids = descriptor_state_ids
+    invalid = [sid for sid in state_ids if sid not in descriptor_state_ids]
+    if invalid:
+        raise HTTPException(status_code=400, detail=f"State(s) missing descriptors: {', '.join(invalid)}")
+
+    samples = entry.get("samples")
+    if not isinstance(samples, list):
+        samples = []
+
+    out_samples: List[Dict[str, Any]] = list(samples)
+    refreshed: List[Dict[str, Any]] = []
+    for state_id in state_ids:
+        existing = [
+            s
+            for s in out_samples
+            if isinstance(s, dict)
+            and (s.get("type") or "") == "md_eval"
+            and (s.get("state_id") or "") == state_id
+            and s.get("sample_id")
+        ]
+        reuse_id = None
+        if existing:
+            existing.sort(key=lambda s: str(s.get("created_at") or ""))
+            reuse_id = str(existing[-1].get("sample_id"))
+            dup_ids = {str(s.get("sample_id")) for s in existing[:-1] if s.get("sample_id")}
+            if dup_ids:
+                out_samples = [s for s in out_samples if not (isinstance(s, dict) and s.get("sample_id") in dup_ids)]
+
+        try:
+            sample_entry = evaluate_state_with_models(
+                project_id,
+                system_id,
+                cluster_id,
+                state_id,
+                sample_id=reuse_id,
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        out_id = sample_entry.get("sample_id")
+        replaced = False
+        for idx, s in enumerate(out_samples):
+            if isinstance(s, dict) and s.get("sample_id") == out_id:
+                out_samples[idx] = sample_entry
+                replaced = True
+                break
+        if not replaced:
+            out_samples = [
+                s
+                for s in out_samples
+                if not (
+                    isinstance(s, dict)
+                    and (s.get("type") or "") == "md_eval"
+                    and (s.get("state_id") or "") == state_id
+                )
+            ]
+            out_samples.append(sample_entry)
+        refreshed.append(sample_entry)
+
+    entry["samples"] = out_samples
+    entry["updated_at"] = datetime.utcnow().isoformat()
+    system_meta.metastable_clusters = clusters
+    project_store.save_system(system_meta)
+    return {"status": "ok", "cluster_id": cluster_id, "states": state_ids, "samples": refreshed}
 
 
 @router.post(

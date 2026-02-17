@@ -28,6 +28,7 @@ import {
   fetchClusterAnalyses,
   fetchClusterAnalysisData,
   fetchPottsClusterInfo,
+  fetchSampleResidueProfile,
   fetchSystem,
 } from '../api/projects';
 
@@ -93,6 +94,79 @@ function parseResidueId(label) {
   if (!m) return null;
   const v = Number(m[0]);
   return Number.isFinite(v) ? v : null;
+}
+
+function pieColor(idx) {
+  const hue = (idx * 137.507764) % 360;
+  return `hsl(${hue} 70% 55%)`;
+}
+
+function compressPieSlices(rawSlices, maxSlices = 8) {
+  const clean = (rawSlices || [])
+    .map((s) => ({
+      label: String(s?.label ?? ''),
+      value: Number(s?.value ?? 0),
+    }))
+    .filter((s) => Number.isFinite(s.value) && s.value > 0);
+  if (!clean.length) return [];
+  clean.sort((a, b) => b.value - a.value);
+  const keep = clean.slice(0, maxSlices);
+  const rest = clean.slice(maxSlices);
+  const other = rest.reduce((acc, s) => acc + s.value, 0);
+  const out = keep.map((s, i) => ({
+    ...s,
+    color: pieColor(i),
+  }));
+  if (other > 0) out.push({ label: 'other', value: other, color: '#6b7280' });
+  const total = out.reduce((acc, s) => acc + s.value, 0);
+  if (total <= 0) return [];
+  return out.map((s) => ({ ...s, value: s.value / total }));
+}
+
+function vecToSlices(values, labelPrefix = 'c') {
+  if (!Array.isArray(values)) return [];
+  return values.map((v, idx) => ({ label: `${labelPrefix}${idx}`, value: Number(v) || 0 }));
+}
+
+function jointToSlices(joint) {
+  if (!Array.isArray(joint)) return [];
+  const out = [];
+  for (let a = 0; a < joint.length; a += 1) {
+    const row = joint[a];
+    if (!Array.isArray(row)) continue;
+    for (let b = 0; b < row.length; b += 1) {
+      out.push({ label: `c${a}-c${b}`, value: Number(row[b]) || 0 });
+    }
+  }
+  return out;
+}
+
+function piePath(cx, cy, r, start, end) {
+  const x0 = cx + r * Math.cos(start);
+  const y0 = cy + r * Math.sin(start);
+  const x1 = cx + r * Math.cos(end);
+  const y1 = cy + r * Math.sin(end);
+  const large = end - start > Math.PI ? 1 : 0;
+  return `M ${cx} ${cy} L ${x0} ${y0} A ${r} ${r} 0 ${large} 1 ${x1} ${y1} Z`;
+}
+
+function PieChart({ slices, size = 120 }) {
+  const radius = size * 0.45;
+  const center = size / 2;
+  let acc = -Math.PI / 2;
+  return (
+    <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} className="shrink-0">
+      <circle cx={center} cy={center} r={radius} fill="#111827" />
+      {slices.map((slice, idx) => {
+        const v = Number(slice.value) || 0;
+        const next = acc + v * Math.PI * 2;
+        const d = piePath(center, center, radius, acc, next);
+        acc = next;
+        return <path key={`${slice.label}:${idx}`} d={d} fill={slice.color || pieColor(idx)} />;
+      })}
+      <circle cx={center} cy={center} r={radius * 0.35} fill="#0b1220" />
+    </svg>
+  );
 }
 
 const EDGE_LINK_TAG = 'phase-delta-commitment-edge-link';
@@ -221,6 +295,10 @@ export default function DeltaCommitment3DPage() {
   const [showEdgeLinks, setShowEdgeLinks] = useState(false);
   const [maxEdgeLinks, setMaxEdgeLinks] = useState(60);
   const [edgeDebug, setEdgeDebug] = useState(null);
+  const [selectedResidueIndex, setSelectedResidueIndex] = useState(0);
+  const [residueProfile, setResidueProfile] = useState(null);
+  const [residueProfileLoading, setResidueProfileLoading] = useState(false);
+  const [residueProfileError, setResidueProfileError] = useState(null);
 
   const edgeRunIdRef = useRef(0);
   const lociLabelProviderRef = useRef(null);
@@ -555,6 +633,23 @@ export default function DeltaCommitment3DPage() {
     [analysisData]
   );
   const dEdge = useMemo(() => (Array.isArray(analysisData?.data?.D_edge) ? analysisData.data.D_edge : null), [analysisData]);
+  const singleClusterByResidue = useMemo(() => {
+    const n = residueLabels.length;
+    const out = new Array(n).fill(false);
+    const source =
+      Array.isArray(kList) && kList.length
+        ? kList
+        : Array.isArray(clusterInfo?.cluster_counts)
+        ? clusterInfo.cluster_counts
+        : [];
+    if (!Array.isArray(source) || !source.length) return out;
+    const m = Math.min(n, source.length);
+    for (let i = 0; i < m; i += 1) {
+      const ki = Number(source[i]);
+      if (Number.isFinite(ki) && ki <= 1) out[i] = true;
+    }
+    return out;
+  }, [kList, clusterInfo, residueLabels.length]);
 
   const hasAltCommitmentData = useMemo(() => {
     const okDh = Boolean(dhTable && Array.isArray(dhTable[0]) && dhTable.length > 0);
@@ -727,11 +822,99 @@ export default function DeltaCommitment3DPage() {
     return null;
   }, [commitmentMatrix, commitmentRowIndex, commitmentMode, dhTable, pNode, centeredCalib, residueLabels, kList]);
 
+  const centeredEdgeRefIdxs = useMemo(() => {
+    if (commitmentMode !== 'centered') return [];
+    if (!referenceSampleIds.length || !commitmentSampleIds.length) return [];
+    return referenceSampleIds
+      .map((sid) => commitmentSampleIds.indexOf(String(sid)))
+      .filter((i) => Number.isInteger(i) && i >= 0);
+  }, [commitmentMode, referenceSampleIds, commitmentSampleIds]);
+
+  const qEdgeRowValues = useMemo(() => {
+    if (!qEdgeMatrix || !Array.isArray(qEdgeMatrix[commitmentRowIndex])) return null;
+    const row = qEdgeMatrix[commitmentRowIndex].map((v) => Number(v));
+    if (commitmentMode !== 'centered') return row;
+    if (!centeredEdgeRefIdxs.length) return row;
+
+    const eps = 1e-9;
+    const out = new Array(row.length).fill(NaN);
+    for (let col = 0; col < row.length; col += 1) {
+      const v = Number(row[col]);
+      if (!Number.isFinite(v)) continue;
+      let before = 0;
+      let at = 0;
+      let n = 0;
+      for (const ridx of centeredEdgeRefIdxs) {
+        const rv = Number(qEdgeMatrix?.[ridx]?.[col]);
+        if (!Number.isFinite(rv)) continue;
+        n += 1;
+        if (rv < v - eps) before += 1;
+        else if (Math.abs(rv - v) <= eps) at += 1;
+      }
+      out[col] = n > 0 ? (before + 0.5 * at) / n : v;
+    }
+    return out;
+  }, [qEdgeMatrix, commitmentRowIndex, commitmentMode, centeredEdgeRefIdxs]);
+
+  useEffect(() => {
+    setSelectedResidueIndex((prev) => {
+      const idx = Number(prev);
+      if (Number.isInteger(idx) && idx >= 0 && idx < residueLabels.length) return idx;
+      return 0;
+    });
+  }, [residueLabels.length]);
+
+  const selectedSampleId = useMemo(() => {
+    if (!Array.isArray(commitmentSampleIds) || !commitmentSampleIds.length) return '';
+    const sid = commitmentSampleIds[commitmentRowIndex];
+    return sid ? String(sid) : '';
+  }, [commitmentSampleIds, commitmentRowIndex]);
+
+  const selectedSampleLabel = useMemo(() => {
+    if (!Array.isArray(commitmentLabels) || !commitmentLabels.length) return '';
+    return String(commitmentLabels[commitmentRowIndex] || selectedSampleId || '');
+  }, [commitmentLabels, commitmentRowIndex, selectedSampleId]);
+
+  const qByEdgeIndex = useMemo(() => {
+    const map = new Map();
+    if (!Array.isArray(topEdgeIndices) || !Array.isArray(qEdgeRowValues)) return map;
+    for (let col = 0; col < topEdgeIndices.length; col += 1) {
+      const eidx = Number(topEdgeIndices[col]);
+      if (!Number.isInteger(eidx) || eidx < 0) continue;
+      const q = Number(qEdgeRowValues[col]);
+      if (Number.isFinite(q)) map.set(eidx, q);
+    }
+    return map;
+  }, [topEdgeIndices, qEdgeRowValues]);
+
+  const selectedEdgeEntries = useMemo(() => {
+    if (!Array.isArray(edgesAll)) return [];
+    if (!Number.isInteger(selectedResidueIndex) || selectedResidueIndex < 0) return [];
+    const out = [];
+    for (let eidx = 0; eidx < edgesAll.length; eidx += 1) {
+      const edge = edgesAll[eidx];
+      if (!Array.isArray(edge) || edge.length < 2) continue;
+      const r = Number(edge[0]);
+      const s = Number(edge[1]);
+      if (!Number.isInteger(r) || !Number.isInteger(s)) continue;
+      if (r !== selectedResidueIndex && s !== selectedResidueIndex) continue;
+      out.push({
+        eidx,
+        r,
+        s,
+        q: Number(qByEdgeIndex.get(eidx)),
+        d: Number(Array.isArray(dEdge) ? dEdge[eidx] : NaN),
+      });
+    }
+    out.sort((a, b) => Math.abs(Number(b.d) || 0) - Math.abs(Number(a.d) || 0));
+    return out;
+  }, [edgesAll, qByEdgeIndex, dEdge, selectedResidueIndex]);
+
   const qRowValuesEdgeSmoothed = useMemo(() => {
     // Optional visualization: smooth residue colors using edge commitment on top edges.
     if (!edgeSmoothEnabled) return qRowValues;
     if (!Array.isArray(qRowValues) || !qRowValues.length) return qRowValues;
-    if (!qEdgeMatrix || !Array.isArray(qEdgeMatrix[commitmentRowIndex])) return qRowValues;
+    if (!Array.isArray(qEdgeRowValues) || !qEdgeRowValues.length) return qRowValues;
     if (!Array.isArray(topEdgeIndices) || !topEdgeIndices.length) return qRowValues;
     if (!Array.isArray(edgesAll) || !edgesAll.length) return qRowValues;
 
@@ -739,7 +922,7 @@ export default function DeltaCommitment3DPage() {
     const strength = clamp(Number(edgeSmoothStrength), 0, 1);
     if (strength <= 0) return qRowValues;
 
-    const rowQe = qEdgeMatrix[commitmentRowIndex].map((v) => Number(v));
+    const rowQe = qEdgeRowValues.map((v) => Number(v));
     const sumW = new Array(N).fill(0);
     const sumWD = new Array(N).fill(0);
 
@@ -755,7 +938,9 @@ export default function DeltaCommitment3DPage() {
 
       const wRaw = dEdge && Number.isFinite(Number(dEdge[eidx])) ? Math.abs(Number(dEdge[eidx])) : 1.0;
       const w = wRaw > 1e-12 ? wRaw : 1.0;
-      const d = clamp01(q) - 0.5;
+      const d0 = clamp01(q) - 0.5;
+      const qVis = 0.5 + Math.sign(d0) * Math.pow(Math.abs(d0) * 2, 0.65) / 2;
+      const d = qVis - 0.5;
       sumW[r] += w;
       sumWD[r] += w * d;
       sumW[s] += w;
@@ -775,8 +960,7 @@ export default function DeltaCommitment3DPage() {
     edgeSmoothEnabled,
     edgeSmoothStrength,
     qRowValues,
-    qEdgeMatrix,
-    commitmentRowIndex,
+    qEdgeRowValues,
     topEdgeIndices,
     edgesAll,
     dEdge,
@@ -792,23 +976,50 @@ export default function DeltaCommitment3DPage() {
     const qValuesLabel = [];
     const residueIdByIndexAuth = new Array(residueLabels.length).fill(null);
     const residueIdByIndexLabel = new Array(residueLabels.length).fill(null);
+    const singleClusterByIndex = new Array(residueLabels.length).fill(false);
+    const singleClusterAuth = [];
+    const singleClusterLabel = [];
 
     // Color all residues; filtering is a visualization concern.
     for (let ridx = 0; ridx < residueLabels.length; ridx += 1) {
       const q = Number(qRowValuesEdgeSmoothed[ridx]);
+      const isSingle = Boolean(singleClusterByResidue[ridx]);
       const label = residueLabels[ridx];
       const auth = parseResidueId(label);
       if (auth !== null) {
         residueIdsAuth.push(auth);
         qValuesAuth.push(Number.isFinite(q) ? q : NaN);
+        singleClusterAuth.push(isSingle);
         residueIdByIndexAuth[ridx] = auth;
       }
       residueIdsLabel.push(ridx + 1); // Mol* label_seq_id is 1-based
       qValuesLabel.push(Number.isFinite(q) ? q : NaN);
+      singleClusterLabel.push(isSingle);
       residueIdByIndexLabel[ridx] = ridx + 1;
+      singleClusterByIndex[ridx] = isSingle;
     }
-    return { residueIdsAuth, qValuesAuth, residueIdsLabel, qValuesLabel, residueIdByIndexAuth, residueIdByIndexLabel };
-  }, [qRowValuesEdgeSmoothed, residueLabels]);
+    return {
+      residueIdsAuth,
+      qValuesAuth,
+      residueIdsLabel,
+      qValuesLabel,
+      residueIdByIndexAuth,
+      residueIdByIndexLabel,
+      singleClusterByIndex,
+      singleClusterAuth,
+      singleClusterLabel,
+    };
+  }, [qRowValuesEdgeSmoothed, residueLabels, singleClusterByResidue]);
+
+  const residueIndexByAuth = useMemo(() => {
+    const map = new Map();
+    const byIdx = coloringPayload?.residueIdByIndexAuth || [];
+    for (let i = 0; i < byIdx.length; i += 1) {
+      const auth = Number(byIdx[i]);
+      if (Number.isFinite(auth)) map.set(auth, i);
+    }
+    return map;
+  }, [coloringPayload]);
 
   // Register a Mol* hover label provider to show the per-residue commitment being visualized.
   useEffect(() => {
@@ -876,6 +1087,39 @@ export default function DeltaCommitment3DPage() {
     };
   }, [coloringPayload, residueIdMode, commitmentMode, commitmentLabels, commitmentRowIndex]);
 
+  // Allow residue selection directly from 3D clicks.
+  useEffect(() => {
+    const plugin = pluginRef.current;
+    if (viewerStatus !== 'ready' || !plugin) return undefined;
+    const sub = plugin.behaviors.interaction.click.subscribe((evt) => {
+      const loci = evt?.current?.loci;
+      if (!StructureElement.Loci.is(loci)) return;
+      const loc = StructureElement.Loci.getFirstLocation(loci);
+      if (!loc) return;
+      const auth = Number(StructureProperties.residue.auth_seq_id(loc));
+      const labelSeq = Number(StructureProperties.residue.label_seq_id(loc)); // 1-based
+
+      let idx = -1;
+      if (residueIdMode === 'auth') {
+        if (Number.isFinite(auth) && residueIndexByAuth.has(auth)) idx = Number(residueIndexByAuth.get(auth));
+        else if (Number.isFinite(labelSeq)) idx = Math.floor(labelSeq) - 1;
+      } else {
+        if (Number.isFinite(labelSeq)) idx = Math.floor(labelSeq) - 1;
+        else if (Number.isFinite(auth) && residueIndexByAuth.has(auth)) idx = Number(residueIndexByAuth.get(auth));
+      }
+      if (Number.isInteger(idx) && idx >= 0 && idx < residueLabels.length) {
+        setSelectedResidueIndex(idx);
+      }
+    });
+    return () => {
+      try {
+        sub?.unsubscribe?.();
+      } catch {
+        // ignore
+      }
+    };
+  }, [viewerStatus, residueIdMode, residueIndexByAuth, residueLabels.length]);
+
   const applyColoring = useCallback(async () => {
     if (viewerStatus !== 'ready') {
       setColoringDebug({ status: 'skip', reason: 'viewer-not-ready' });
@@ -906,6 +1150,7 @@ export default function DeltaCommitment3DPage() {
     const useAuth = residueIdMode === 'auth';
     const residueIds = useAuth ? residueIdsAuth : residueIdsLabel;
     const qValues = useAuth ? qValuesAuth : qValuesLabel;
+    const singleFlags = useAuth ? coloringPayload.singleClusterAuth : coloringPayload.singleClusterLabel;
     const prop = useAuth ? 'auth' : 'label';
     if (!residueIds.length) {
       setColoringDebug({ status: 'skip', reason: 'no-residue-ids-for-mode', mode: residueIdMode });
@@ -919,9 +1164,14 @@ export default function DeltaCommitment3DPage() {
 
     const bins = 21;
     const bucket = Array.from({ length: bins }, () => []);
+    const grayIds = [];
     for (let i = 0; i < residueIds.length; i += 1) {
       const q = qValues[i];
       if (!Number.isFinite(q)) continue;
+      if (singleFlags?.[i]) {
+        grayIds.push(residueIds[i]);
+        continue;
+      }
       const b = Math.max(0, Math.min(bins - 1, Math.floor(clamp01(q) * (bins - 1) + 1e-9)));
       bucket[b].push(residueIds[i]);
     }
@@ -957,6 +1207,36 @@ export default function DeltaCommitment3DPage() {
       await setStructureOverpaint(plugin, [base], colorValue, lociGetter, ['cartoon']);
       layers += 1;
     }
+    if (grayIds.length) {
+      const propFn =
+        prop === 'auth'
+          ? MS.struct.atomProperty.macromolecular.auth_seq_id()
+          : MS.struct.atomProperty.macromolecular.label_seq_id();
+      const residueTests =
+        grayIds.length === 1
+          ? MS.core.rel.eq([propFn, grayIds[0]])
+          : MS.core.set.has([MS.set(...grayIds), propFn]);
+      const expression = MS.struct.generator.atomGroups({ 'residue-test': residueTests });
+      if (rootStructure) {
+        const sel = Script.getStructureSelection(expression, rootStructure);
+        const el = StructureSelection.unionStructure(sel).elementCount;
+        if (el > 0) {
+          const lociGetter = async (structure) => {
+            const s2 = Script.getStructureSelection(expression, structure);
+            return StructureSelection.toLociWithSourceUnits(s2);
+          };
+          await setStructureOverpaint(plugin, [base], hexToInt('#9ca3af'), lociGetter, ['cartoon']);
+          layers += 1;
+        }
+      } else {
+        const lociGetter = async (structure) => {
+          const s2 = Script.getStructureSelection(expression, structure);
+          return StructureSelection.toLociWithSourceUnits(s2);
+        };
+        await setStructureOverpaint(plugin, [base], hexToInt('#9ca3af'), lociGetter, ['cartoon']);
+        layers += 1;
+      }
+    }
     setColoringDebug({
       status: 'run',
       prop,
@@ -968,6 +1248,7 @@ export default function DeltaCommitment3DPage() {
       qMax,
       qMean,
       bins: bucket.map((x) => x.length),
+      singleClusterGray: grayIds.length,
       created: layers,
       note: 'overpaint layers applied',
       selectedElementsByBin,
@@ -1015,7 +1296,7 @@ export default function DeltaCommitment3DPage() {
 
     if (!showEdgeLinks) return;
     if (Number(maxEdgeLinks) <= 0) return;
-    if (!qEdgeMatrix || !Array.isArray(qEdgeMatrix[commitmentRowIndex])) return;
+    if (!Array.isArray(qEdgeRowValues) || !qEdgeRowValues.length) return;
     if (!Array.isArray(topEdgeIndices) || !topEdgeIndices.length) return;
     if (!Array.isArray(edgesAll) || !edgesAll.length) return;
 
@@ -1028,6 +1309,7 @@ export default function DeltaCommitment3DPage() {
     const atomProp = MS.struct.atomProperty.macromolecular.label_atom_id();
 
     const residueIdByIndex = useAuth ? coloringPayload.residueIdByIndexAuth : coloringPayload.residueIdByIndexLabel;
+    const singleByIndex = Array.isArray(coloringPayload.singleClusterByIndex) ? coloringPayload.singleClusterByIndex : [];
     const getResidueSeqId = (resIdx) => {
       if (!Array.isArray(residueIdByIndex)) return null;
       const v = residueIdByIndex[resIdx];
@@ -1036,7 +1318,7 @@ export default function DeltaCommitment3DPage() {
     };
 
     // q_edge can be large (potentially O(n_edges)). Avoid mapping the whole row just to draw a few links.
-    const rowQ = qEdgeMatrix[commitmentRowIndex];
+    const rowQ = qEdgeRowValues;
     const limit = Math.min(Number(maxEdgeLinks) || 0, topEdgeIndices.length);
 
     const getCA = (rid) => {
@@ -1093,6 +1375,7 @@ export default function DeltaCommitment3DPage() {
     const labels = [];
     const qUsed = [];
     const wUsed = [];
+    let grayLinks = 0;
     for (const ep of edgesPicked) {
       if (runId !== edgeRunIdRef.current) return;
       const a = coordBySeq.get(ep.rid);
@@ -1101,10 +1384,16 @@ export default function DeltaCommitment3DPage() {
 
       const qRaw = Array.isArray(rowQ) ? Number(rowQ[ep.col]) : Number.NaN;
       const q = Number.isFinite(qRaw) ? clamp01(qRaw) : 0.5;
-      // Boost contrast a bit for edges (q values are often close to 0.5).
-      const d = q - 0.5;
-      const qVis = 0.5 + Math.sign(d) * Math.pow(Math.abs(d) * 2, 0.65) / 2;
-      colors.push(hexToInt(commitmentColor(qVis)));
+      const isSingleEdge = Boolean(singleByIndex[ep.r]) || Boolean(singleByIndex[ep.s]);
+      if (isSingleEdge) {
+        colors.push(hexToInt('#9ca3af'));
+        grayLinks += 1;
+      } else {
+        // Boost contrast a bit for edges (q values are often close to 0.5).
+        const d = q - 0.5;
+        const qVis = 0.5 + Math.sign(d) * Math.pow(Math.abs(d) * 2, 0.65) / 2;
+        colors.push(hexToInt(commitmentColor(qVis)));
+      }
       qUsed.push(q);
 
       const wRaw = dEdge && Number.isFinite(Number(dEdge[ep.eidx])) ? Math.abs(Number(dEdge[ep.eidx])) : 0;
@@ -1115,7 +1404,7 @@ export default function DeltaCommitment3DPage() {
 
       const aLabel = residueLabels[ep.r] ?? `res_${ep.r}`;
       const bLabel = residueLabels[ep.s] ?? `res_${ep.s}`;
-      labels.push(`${aLabel}–${bLabel} · q=${q.toFixed(3)} · |ΔJ|=${wRaw.toFixed(3)}`);
+      labels.push(`${aLabel}–${bLabel} · q=${q.toFixed(3)} · |ΔJ|=${wRaw.toFixed(3)}${isSingleEdge ? ' · single-K gray' : ''}`);
       links.push({ a, b });
     }
     if (!links.length) return;
@@ -1134,6 +1423,7 @@ export default function DeltaCommitment3DPage() {
       picked: edgesPicked.length,
       residuesWithCoords: coordBySeq.size,
       links: links.length,
+      grayLinks,
       qMin,
       qMax,
       wMin,
@@ -1155,8 +1445,7 @@ export default function DeltaCommitment3DPage() {
     clearEdgeLinks,
     showEdgeLinks,
     maxEdgeLinks,
-    qEdgeMatrix,
-    commitmentRowIndex,
+    qEdgeRowValues,
     topEdgeIndices,
     edgesAll,
     dEdge,
@@ -1183,6 +1472,71 @@ export default function DeltaCommitment3DPage() {
       clearEdgeLinks();
     };
   }, [clearEdgeLinks]);
+
+  useEffect(() => {
+    const run = async () => {
+      setResidueProfileError(null);
+      setResidueProfile(null);
+      if (!selectedClusterId || !selectedSampleId) return;
+      if (!Number.isInteger(selectedResidueIndex) || selectedResidueIndex < 0) return;
+      setResidueProfileLoading(true);
+      try {
+        const payload = {
+          residue_index: selectedResidueIndex,
+          label_mode: mdLabelMode,
+          edge_pairs: selectedEdgeEntries.map((e) => [e.r, e.s]),
+        };
+        const data = await fetchSampleResidueProfile(projectId, systemId, selectedClusterId, selectedSampleId, payload);
+        setResidueProfile(data);
+      } catch (err) {
+        setResidueProfileError(err.message || 'Failed to compute residue profile.');
+      } finally {
+        setResidueProfileLoading(false);
+      }
+    };
+    run();
+  }, [
+    projectId,
+    systemId,
+    selectedClusterId,
+    selectedSampleId,
+    selectedResidueIndex,
+    mdLabelMode,
+    selectedEdgeEntries,
+  ]);
+
+  const selectedResidueLabel = useMemo(() => {
+    if (selectedResidueIndex < 0 || selectedResidueIndex >= residueLabels.length) return '';
+    return String(residueLabels[selectedResidueIndex] || `res_${selectedResidueIndex}`);
+  }, [selectedResidueIndex, residueLabels]);
+
+  const selectedResidueQ = useMemo(() => {
+    const q = Array.isArray(qRowValues) ? Number(qRowValues[selectedResidueIndex]) : NaN;
+    return Number.isFinite(q) ? q : NaN;
+  }, [qRowValues, selectedResidueIndex]);
+
+  const selectedResidueQVis = useMemo(() => {
+    const q = Array.isArray(qRowValuesEdgeSmoothed) ? Number(qRowValuesEdgeSmoothed[selectedResidueIndex]) : NaN;
+    return Number.isFinite(q) ? q : selectedResidueQ;
+  }, [qRowValuesEdgeSmoothed, selectedResidueIndex, selectedResidueQ]);
+
+  const nodeSlices = useMemo(() => {
+    const probs = residueProfile?.node_probs;
+    return compressPieSlices(vecToSlices(probs, 'c'), 8);
+  }, [residueProfile]);
+
+  const edgeProfileByKey = useMemo(() => {
+    const map = new Map();
+    const rows = Array.isArray(residueProfile?.edge_profiles) ? residueProfile.edge_profiles : [];
+    for (const row of rows) {
+      const r = Number(row?.r);
+      const s = Number(row?.s);
+      if (!Number.isInteger(r) || !Number.isInteger(s)) continue;
+      const key = `${Math.min(r, s)}-${Math.max(r, s)}`;
+      map.set(key, row);
+    }
+    return map;
+  }, [residueProfile]);
 
   if (loadingSystem) return <Loader message="Loading 3D commitment viewer..." />;
   if (systemError) return <ErrorMessage message={systemError} />;
@@ -1611,6 +1965,146 @@ export default function DeltaCommitment3DPage() {
           {analysisDataLoading && <p className="mt-2 text-sm text-gray-400">Loading analysis…</p>}
           {!analysisDataLoading && selectedCommitmentMeta && !analysisData && (
             <p className="mt-2 text-sm text-gray-400">Select an analysis to color residues.</p>
+          )}
+        </div>
+
+        <div className="rounded-lg border border-gray-800 bg-gray-900/40 p-3 space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <h2 className="text-sm font-semibold text-gray-200">Selected Residue Details</h2>
+              <p className="text-[11px] text-gray-500">
+                Click a residue in 3D or select it here. Distributions are computed from the sample selected in
+                <span className="font-mono"> Color by commitment</span>.
+              </p>
+            </div>
+            <div className="w-56">
+              <select
+                value={String(selectedResidueIndex)}
+                onChange={(e) => setSelectedResidueIndex(Number(e.target.value))}
+                className="w-full bg-gray-950 border border-gray-800 rounded-md px-2 py-2 text-sm text-gray-100"
+              >
+                {residueLabels.map((name, idx) => (
+                  <option key={`res-opt:${idx}:${name}`} value={String(idx)}>
+                    {name} (#{idx})
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+
+          {(residueProfileLoading || !selectedSampleId) && (
+            <p className="text-sm text-gray-400">
+              {selectedSampleId ? 'Computing residue profile…' : 'Select a sample in Color by commitment.'}
+            </p>
+          )}
+          {residueProfileError && <ErrorMessage message={residueProfileError} />}
+
+          {residueProfile && (
+            <div className="space-y-3">
+              <div className="grid grid-cols-1 xl:grid-cols-[320px_1fr] gap-3">
+                <div className="rounded-md border border-gray-800 bg-gray-950/40 p-3 space-y-2">
+                  <p className="text-xs text-gray-400">Node distribution</p>
+                  <div className="flex items-start gap-3">
+                    <PieChart slices={nodeSlices} size={132} />
+                    <div className="space-y-2 text-xs text-gray-200 min-w-0">
+                      <p>
+                        <span className="text-gray-400">Residue:</span> {selectedResidueLabel}
+                      </p>
+                      <p>
+                        <span className="text-gray-400">Sample:</span> {selectedSampleLabel || selectedSampleId}
+                      </p>
+                      <p>
+                        <span className="text-gray-400">Valid frames:</span> {residueProfile.node_valid_count} / {residueProfile.n_frames}
+                      </p>
+                      <div className="flex items-center gap-2">
+                        <span className="text-gray-400">Commitment q:</span>
+                        <span
+                          className="inline-flex items-center rounded px-2 py-0.5 text-[11px] font-semibold text-black"
+                          style={{ backgroundColor: commitmentColor(selectedResidueQVis) }}
+                        >
+                          {Number.isFinite(selectedResidueQ) ? selectedResidueQ.toFixed(3) : 'n/a'}
+                        </span>
+                        <span className="text-[11px] text-gray-500">
+                          {Number.isFinite(selectedResidueQ)
+                            ? selectedResidueQ > 0.5
+                              ? 'towards A (red)'
+                              : selectedResidueQ < 0.5
+                              ? 'towards B (blue)'
+                              : 'neutral'
+                            : ''}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                  {nodeSlices.length > 0 && (
+                    <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-[11px]">
+                      {nodeSlices.map((s) => (
+                        <div key={`node-slice:${s.label}`} className="flex items-center gap-1 text-gray-300">
+                          <span className="inline-block h-2.5 w-2.5 rounded-sm" style={{ backgroundColor: s.color }} />
+                          <span className="truncate">{s.label}</span>
+                          <span className="ml-auto text-gray-400">{(100 * s.value).toFixed(1)}%</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                <div className="rounded-md border border-gray-800 bg-gray-950/40 p-3 space-y-2">
+                  <p className="text-xs text-gray-400">
+                    Edge distributions for edges containing this residue (from analysis top edges)
+                  </p>
+                  {selectedEdgeEntries.length === 0 && (
+                    <p className="text-sm text-gray-500">No analyzed top edge contains this residue.</p>
+                  )}
+                  {selectedEdgeEntries.length > 0 && (
+                    <div className="grid grid-cols-1 2xl:grid-cols-2 gap-2 max-h-[420px] overflow-auto pr-1">
+                      {selectedEdgeEntries.map((edge) => {
+                        const key = `${Math.min(edge.r, edge.s)}-${Math.max(edge.r, edge.s)}`;
+                        const profile = edgeProfileByKey.get(key);
+                        const slices = compressPieSlices(jointToSlices(profile?.joint_probs), 10);
+                        const rLabel = residueLabels[edge.r] || `res_${edge.r}`;
+                        const sLabel = residueLabels[edge.s] || `res_${edge.s}`;
+                        const q = Number(edge.q);
+                        return (
+                          <div key={`edge-card:${key}:${edge.eidx}`} className="rounded border border-gray-800 bg-gray-900/50 p-2 space-y-2">
+                            <div className="flex items-center justify-between gap-2 text-xs">
+                              <span className="text-gray-200 truncate">
+                                {rLabel} - {sLabel}
+                              </span>
+                              <span
+                                className="inline-flex items-center rounded px-2 py-0.5 text-[11px] font-semibold text-black"
+                                style={{ backgroundColor: Number.isFinite(q) ? commitmentColor(q) : '#9ca3af' }}
+                              >
+                                {Number.isFinite(q) ? q.toFixed(3) : 'n/a'}
+                              </span>
+                            </div>
+                            <div className="flex items-start gap-3">
+                              <PieChart slices={slices} size={96} />
+                              <div className="text-[11px] text-gray-400 space-y-1">
+                                <div>edge idx: {edge.eidx}</div>
+                                <div>|ΔJ|: {Number.isFinite(edge.d) ? Math.abs(edge.d).toFixed(3) : 'n/a'}</div>
+                                <div>
+                                  valid: {profile?.valid_count ?? 0} / {residueProfile.n_frames}
+                                </div>
+                                <div>
+                                  {Number.isFinite(q)
+                                    ? q > 0.5
+                                      ? 'towards A (red)'
+                                      : q < 0.5
+                                      ? 'towards B (blue)'
+                                      : 'neutral'
+                                    : ''}
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
           )}
         </div>
       </main>

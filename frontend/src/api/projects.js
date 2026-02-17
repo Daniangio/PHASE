@@ -179,10 +179,30 @@ export function fetchSampleStats(projectId, systemId, clusterId, sampleId) {
   );
 }
 
+export function fetchSampleResidueProfile(projectId, systemId, clusterId, sampleId, payload) {
+  return requestJSON(
+    `/projects/${projectId}/systems/${systemId}/metastable/clusters/${clusterId}/samples/${sampleId}/residue_profile`,
+    {
+      method: 'POST',
+      body: payload,
+    }
+  );
+}
+
 export function deleteSamplingSample(projectId, systemId, clusterId, sampleId) {
   return requestJSON(
     `/projects/${projectId}/systems/${systemId}/metastable/clusters/${clusterId}/samples/${sampleId}`,
     { method: 'DELETE' }
+  );
+}
+
+export function assignClusterStates(projectId, systemId, clusterId, stateIds = []) {
+  return requestJSON(
+    `/projects/${projectId}/systems/${systemId}/metastable/clusters/${clusterId}/assign_states`,
+    {
+      method: 'POST',
+      body: { state_ids: Array.isArray(stateIds) ? stateIds : [] },
+    }
   );
 }
 
@@ -294,6 +314,18 @@ export function addSystemState(projectId, systemId, payload) {
   return requestJSON(`/projects/${projectId}/systems/${systemId}/states`, {
     method: 'POST',
     body: payload,
+  });
+}
+
+export function rescanSystemStates(projectId, systemId) {
+  return requestJSON(`/projects/${projectId}/systems/${systemId}/states/rescan`, {
+    method: 'POST',
+  });
+}
+
+export function unlockMacroStateEditing(projectId, systemId) {
+  return requestJSON(`/projects/${projectId}/systems/${systemId}/states/unlock-editing`, {
+    method: 'POST',
   });
 }
 

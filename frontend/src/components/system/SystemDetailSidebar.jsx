@@ -22,10 +22,19 @@ export default function SystemDetailSidebar({
   selectedClusterId,
   openDescriptorExplorer,
   openDoc,
+  handleEnableMacroEditing,
+  macroLocked,
   navigate,
   projectId,
   systemId,
 }) {
+  const buildSamplingSuffix = () => {
+    const params = new URLSearchParams();
+    if (selectedClusterId) params.set('cluster_id', selectedClusterId);
+    const suffix = params.toString();
+    return suffix ? `?${suffix}` : '';
+  };
+
   return (
     <aside className="bg-gray-800 border border-gray-700 rounded-lg p-4 space-y-4 lg:sticky lg:top-6 h-fit">
       <div>
@@ -43,19 +52,66 @@ export default function SystemDetailSidebar({
         <Eye className="h-4 w-4" />
         Visualize descriptors
       </button>
+      {macroLocked && (
+        <button
+          type="button"
+          onClick={handleEnableMacroEditing}
+          className="w-full text-xs px-3 py-2 rounded-md border border-emerald-500 text-emerald-300 hover:bg-emerald-500/10 inline-flex items-center justify-center gap-2"
+        >
+          Enable macro-state editing
+        </button>
+      )}
       <button
         type="button"
-        onClick={() => {
-          const params = new URLSearchParams();
-          if (selectedClusterId) params.set('cluster_id', selectedClusterId);
-          const suffix = params.toString() ? `?${params.toString()}` : '';
-          navigate(`/projects/${projectId}/systems/${systemId}/sampling/visualize${suffix}`);
-        }}
+        onClick={() => navigate(`/projects/${projectId}/systems/${systemId}/sampling/visualize${buildSamplingSuffix()}`)}
         className="w-full text-xs px-3 py-2 rounded-md border border-gray-600 text-gray-200 hover:bg-gray-700/40 inline-flex items-center justify-center gap-2"
       >
         <Eye className="h-4 w-4" />
         Sampling explorer
       </button>
+      <div className="grid grid-cols-2 gap-2">
+        <button
+          type="button"
+          onClick={() => navigate(`/projects/${projectId}/systems/${systemId}/sampling/delta_eval${buildSamplingSuffix()}`)}
+          className="text-xs px-2 py-2 rounded-md border border-gray-700 text-gray-200 hover:bg-gray-700/40"
+        >
+          Delta eval
+        </button>
+        <button
+          type="button"
+          onClick={() =>
+            navigate(`/projects/${projectId}/systems/${systemId}/sampling/delta_commitment_3d${buildSamplingSuffix()}`)
+          }
+          className="text-xs px-2 py-2 rounded-md border border-gray-700 text-gray-200 hover:bg-gray-700/40"
+        >
+          Delta 3D
+        </button>
+        <button
+          type="button"
+          onClick={() => navigate(`/projects/${projectId}/systems/${systemId}/sampling/lambda_sweep${buildSamplingSuffix()}`)}
+          className="text-xs px-2 py-2 rounded-md border border-gray-700 text-gray-200 hover:bg-gray-700/40"
+        >
+          Lambda sweep
+        </button>
+        <button
+          type="button"
+          onClick={() =>
+            navigate(`/projects/${projectId}/systems/${systemId}/sampling/gibbs_relaxation${buildSamplingSuffix()}`)
+          }
+          className="text-xs px-2 py-2 rounded-md border border-gray-700 text-gray-200 hover:bg-gray-700/40"
+        >
+          Gibbs relax
+        </button>
+        <button
+          type="button"
+          onClick={() =>
+            navigate(`/projects/${projectId}/systems/${systemId}/sampling/gibbs_relaxation_3d${buildSamplingSuffix()}`)
+          }
+          className="col-span-2 text-xs px-2 py-2 rounded-md border border-gray-700 text-gray-200 hover:bg-gray-700/40"
+        >
+          Gibbs relax 3D
+        </button>
+      </div>
       <div className="space-y-2">
         {states.map((state) => {
           const metaForState = metastableStates.filter((m) => m.macro_state_id === state.state_id);

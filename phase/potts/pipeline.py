@@ -191,6 +191,37 @@ def _load_assigned_labels(path: Path) -> np.ndarray | None:
     return None
 
 
+def _iter_md_sample_entries(npz_path: str | Path) -> list[dict]:
+    cluster_dir = Path(npz_path).resolve().parent
+    samples_dir = cluster_dir / "samples"
+    if not samples_dir.exists():
+        return []
+    entries: list[dict] = []
+    for sample_dir in sorted(p for p in samples_dir.iterdir() if p.is_dir()):
+        meta_path = sample_dir / "sample_metadata.json"
+        if not meta_path.exists():
+            continue
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(meta, dict):
+            continue
+        if str(meta.get("type") or "") != "md_eval":
+            continue
+        if not meta.get("path"):
+            candidate = sample_dir / "sample.npz"
+            if candidate.exists():
+                meta = dict(meta)
+                try:
+                    meta["path"] = str(candidate.relative_to(cluster_dir.parent))
+                except Exception:
+                    meta["path"] = str(candidate)
+        entries.append(meta)
+    entries.sort(key=lambda m: str(m.get("created_at") or ""))
+    return entries
+
+
 def _tokenize_label(label: str) -> set[str]:
     cleaned = re.sub(r"[^a-z0-9]+", " ", label.lower()).strip()
     if not cleaned:
@@ -282,16 +313,22 @@ def _compute_cross_likelihood_classification(
         return None
 
     meta = metadata or {}
-    assigned_state_paths = meta.get("assigned_state_paths") or {}
-    assigned_meta_paths = meta.get("assigned_metastable_paths") or {}
     state_labels = meta.get("state_labels") or {}
     metastable_labels = meta.get("metastable_labels") or {}
-    if not assigned_state_paths and not assigned_meta_paths:
+    available_state_ids = {
+        str(src.get("id", "")).split(":", 1)[1]
+        for src in md_sources
+        if str(src.get("id", "")).startswith("state:")
+    }
+    available_meta_ids = {
+        str(src.get("id", "")).split(":", 1)[1]
+        for src in md_sources
+        if str(src.get("id", "")).startswith("meta:")
+    }
+    if not available_state_ids and not available_meta_ids:
         return None
 
     selected_meta_ids = {str(v) for v in (meta.get("selected_metastable_ids") or [])}
-    assigned_state_ids = {str(k) for k in assigned_state_paths.keys()}
-    assigned_meta_ids = {str(k) for k in assigned_meta_paths.keys()}
     metastable_kinds = meta.get("metastable_kinds") or {}
     fit_state_ids = set()
     fit_meta_ids = set()
@@ -311,11 +348,11 @@ def _compute_cross_likelihood_classification(
         src_id = str(src.get("id", ""))
         if src_id.startswith("state:"):
             state_id = src_id.split(":", 1)[1]
-            if state_id in assigned_state_ids and state_id not in fit_state_ids:
+            if state_id in available_state_ids and state_id not in fit_state_ids:
                 other_sources.append(src)
         elif src_id.startswith("meta:"):
             meta_id = src_id.split(":", 1)[1]
-            if meta_id in assigned_meta_ids and meta_id not in fit_meta_ids and meta_id not in selected_meta_ids:
+            if meta_id in available_meta_ids and meta_id not in fit_meta_ids and meta_id not in selected_meta_ids:
                 other_sources.append(src)
 
     model_fit = fit_potts_pmi(labels, K, edges)
@@ -486,12 +523,8 @@ def _build_md_sources(
     meta = metadata or {}
     state_labels = meta.get("state_labels") or {}
     metastable_labels = meta.get("metastable_labels") or {}
-    assigned_state_paths = meta.get("assigned_state_paths") or {}
-    assigned_meta_paths = meta.get("assigned_metastable_paths") or {}
     metastable_kinds = meta.get("metastable_kinds") or {}
     analysis_mode = meta.get("analysis_mode")
-
-    base_dir = Path(npz_path).resolve().parent
 
     def add_source(source_id: str, label: str, source_type: str, subset: np.ndarray) -> None:
         if subset.size == 0:
@@ -508,28 +541,51 @@ def _build_md_sources(
             }
         )
 
-    for state_id, rel_path in assigned_state_paths.items():
+    by_source: dict[str, dict] = {}
+    cluster_dir = Path(npz_path).resolve().parent
+    system_dir = cluster_dir.parent
+    for sample in _iter_md_sample_entries(npz_path):
+        rel_path = sample.get("path")
+        if not isinstance(rel_path, str) or not rel_path:
+            continue
         abs_path = Path(rel_path)
         if not abs_path.is_absolute():
-            abs_path = base_dir / rel_path
+            candidate_system = system_dir / rel_path
+            candidate_cluster = cluster_dir / rel_path
+            if candidate_system.exists():
+                abs_path = candidate_system
+            elif candidate_cluster.exists():
+                abs_path = candidate_cluster
+            else:
+                abs_path = candidate_system
         assigned = _load_assigned_labels(abs_path)
         if assigned is None:
             continue
-        label = state_labels.get(str(state_id), str(state_id))
-        add_source(f"state:{state_id}", f"Macro: {label}", "macro", assigned)
-
-    if analysis_mode != "macro":
-        for meta_id, rel_path in assigned_meta_paths.items():
-            if metastable_kinds.get(str(meta_id)) == "macro":
+        state_id = sample.get("state_id")
+        metastable_id = sample.get("metastable_id")
+        if state_id:
+            source_id = f"state:{state_id}"
+            label = sample.get("name") or f"Macro: {state_labels.get(str(state_id), str(state_id))}"
+            source_type = "macro"
+        elif metastable_id:
+            if analysis_mode == "macro" or metastable_kinds.get(str(metastable_id)) == "macro":
                 continue
-            abs_path = Path(rel_path)
-            if not abs_path.is_absolute():
-                abs_path = base_dir / rel_path
-            assigned = _load_assigned_labels(abs_path)
-            if assigned is None:
-                continue
-            label = metastable_labels.get(str(meta_id), str(meta_id))
-            add_source(f"meta:{meta_id}", f"Metastable: {label}", "metastable", assigned)
+            source_id = f"meta:{metastable_id}"
+            label = sample.get("name") or f"Metastable: {metastable_labels.get(str(metastable_id), str(metastable_id))}"
+            source_type = "metastable"
+        else:
+            sample_id = sample.get("sample_id") or abs_path.stem
+            source_id = f"sample:{sample_id}"
+            label = sample.get("name") or str(sample_id)
+            source_type = "md_eval"
+        by_source[source_id] = {
+            "id": source_id,
+            "label": str(label),
+            "type": source_type,
+            "labels": np.asarray(assigned, dtype=np.int32),
+        }
+    for src in by_source.values():
+        add_source(src["id"], src["label"], src["type"], src["labels"])
 
     if not sources:
         fallback = labels

@@ -11,10 +11,6 @@ from fastapi import APIRouter, HTTPException, Query, Response, UploadFile, File,
 from fastapi.responses import FileResponse
 
 from backend.api.v1.common import DATA_ROOT, get_cluster_entry, project_store, stream_upload
-from phase.workflows.clustering import (
-    assign_cluster_labels_to_states,
-    update_cluster_metadata_with_assignments,
-)
 
 
 router = APIRouter()
@@ -86,8 +82,9 @@ def _load_assigned_labels(path: Path) -> np.ndarray | None:
 def _labels_for_cluster_frames(
     cluster_path: Path,
     *,
-    assigned_state_paths: dict,
-    base_dir: Path,
+    md_sample_paths_by_state: dict[str, str],
+    project_id: str,
+    system_id: str,
     n_residues: int,
 ) -> np.ndarray | None:
     with np.load(cluster_path, allow_pickle=True) as data:
@@ -101,12 +98,14 @@ def _labels_for_cluster_frames(
 
     labels_chunks: list[np.ndarray] = []
     for state_id in np.unique(state_ids):
-        rel_path = assigned_state_paths.get(str(state_id))
+        rel_path = md_sample_paths_by_state.get(str(state_id))
         if not rel_path:
             continue
-        path = Path(rel_path)
-        if not path.is_absolute():
-            path = base_dir / rel_path
+        path = project_store.resolve_path(project_id, system_id, rel_path)
+        if not path.exists():
+            alt = cluster_path.parent / rel_path
+            if alt.exists():
+                path = alt
         assigned = _load_assigned_labels(path)
         if assigned is None or assigned.size == 0:
             continue
@@ -153,9 +152,6 @@ def _augment_sampling_summary(
         _compute_nn_cdfs,
     )
     from phase.potts.potts_model import load_potts_model
-
-    assignments = assign_cluster_labels_to_states(base_cluster_path, project_id, system_id)
-    update_cluster_metadata_with_assignments(base_cluster_path, assignments)
 
     ds = load_npz(str(base_cluster_path), allow_missing_edges=True)
     labels = ds.labels
@@ -212,9 +208,22 @@ def _augment_sampling_summary(
         ds.metadata,
         base_cluster_path,
     )
-    meta = ds.metadata or {}
-    assigned_state_paths = meta.get("assigned_state_paths") or {}
-    base_dir = base_cluster_path.resolve().parent
+    try:
+        base_cluster_entry = get_cluster_entry(project_store.get_system(project_id, system_id), base_cluster_id)
+    except Exception:
+        base_cluster_entry = {}
+    base_samples = base_cluster_entry.get("samples") if isinstance(base_cluster_entry, dict) else []
+    md_sample_paths_by_state: dict[str, str] = {}
+    if isinstance(base_samples, list):
+        for sample in base_samples:
+            if not isinstance(sample, dict):
+                continue
+            if (sample.get("type") or "") != "md_eval":
+                continue
+            sid = sample.get("state_id")
+            rel = sample.get("path")
+            if sid and isinstance(rel, str) and rel:
+                md_sample_paths_by_state[str(sid)] = rel
 
     def _normalize_label(raw: str) -> str:
         label = str(raw or "").lower().strip()
@@ -229,10 +238,24 @@ def _augment_sampling_summary(
         cid = str(info.get("cluster_id"))
         if not cid or cid == base_cluster_id:
             continue
+        info_sample_paths_by_state: dict[str, str] = {}
+        info_samples = info.get("samples") if isinstance(info, dict) else None
+        if isinstance(info_samples, list):
+            for sample in info_samples:
+                if not isinstance(sample, dict):
+                    continue
+                if (sample.get("type") or "") != "md_eval":
+                    continue
+                sid = sample.get("state_id")
+                rel = sample.get("path")
+                if sid and isinstance(rel, str) and rel:
+                    info_sample_paths_by_state[str(sid)] = rel
+        sample_path_map = info_sample_paths_by_state or md_sample_paths_by_state
         labels_other = _labels_for_cluster_frames(
             info["path"],
-            assigned_state_paths=assigned_state_paths,
-            base_dir=base_dir,
+            md_sample_paths_by_state=sample_path_map,
+            project_id=project_id,
+            system_id=system_id,
             n_residues=labels.shape[1],
         )
         if labels_other is None or labels_other.size == 0:

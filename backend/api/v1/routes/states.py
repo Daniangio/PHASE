@@ -1,3 +1,4 @@
+import json
 import os
 import shutil
 import uuid
@@ -19,6 +20,7 @@ from backend.api.v1.common import (
 )
 from phase.workflows.macro_states import register_state_from_pdb
 from phase.common.slice_utils import parse_slice_spec
+from backend.services.project_store import DescriptorState
 
 
 router = APIRouter()
@@ -130,6 +132,134 @@ async def add_system_state(
         pdb_path=pdb_path,
         stride=1,
     )
+    return serialize_system(system_meta)
+
+
+@router.post(
+    "/projects/{project_id}/systems/{system_id}/states/rescan",
+    summary="Rescan structures/descriptors on disk and sync states into system metadata",
+)
+async def rescan_states_from_disk(project_id: str, system_id: str):
+    try:
+        system_meta = project_store.get_system(project_id, system_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"System '{system_id}' not found.")
+
+    dirs = project_store.ensure_directories(project_id, system_id)
+    system_dir = dirs["system_dir"]
+    structures_dir = dirs["structures_dir"]
+    descriptors_dir = dirs["descriptors_dir"]
+    trajectories_dir = dirs["trajectories_dir"]
+
+    states = dict(system_meta.states or {})
+    discovered_ids: set[str] = set()
+    added = 0
+    updated = 0
+
+    for pdb_path in sorted(structures_dir.glob("*.pdb")):
+        state_id = pdb_path.stem
+        discovered_ids.add(state_id)
+        state_meta = states.get(state_id)
+        is_new = False
+        if not state_meta:
+            state_meta = DescriptorState(state_id=state_id, name=state_id)
+            states[state_id] = state_meta
+            is_new = True
+
+        new_pdb_rel = str(pdb_path.relative_to(system_dir))
+        changed = bool(state_meta.pdb_file != new_pdb_rel)
+        state_meta.pdb_file = new_pdb_rel
+        if not state_meta.name:
+            state_meta.name = state_id
+            changed = True
+
+        desc_npz = descriptors_dir / f"{state_id}_descriptors.npz"
+        if desc_npz.exists():
+            rel = str(desc_npz.relative_to(system_dir))
+            if state_meta.descriptor_file != rel:
+                state_meta.descriptor_file = rel
+                changed = True
+
+        desc_meta = descriptors_dir / f"{state_id}_descriptor_metadata.json"
+        if desc_meta.exists():
+            rel = str(desc_meta.relative_to(system_dir))
+            if state_meta.descriptor_metadata_file != rel:
+                state_meta.descriptor_metadata_file = rel
+                changed = True
+            try:
+                payload = json.loads(desc_meta.read_text(encoding="utf-8"))
+            except Exception:
+                payload = {}
+            keys = payload.get("descriptor_keys")
+            if isinstance(keys, list):
+                clean_keys = [str(v) for v in keys]
+                if clean_keys != list(state_meta.residue_keys or []):
+                    state_meta.residue_keys = clean_keys
+                    changed = True
+            mapping = payload.get("residue_mapping")
+            if isinstance(mapping, dict):
+                clean_map = {str(k): str(v) for k, v in mapping.items()}
+                if clean_map != dict(state_meta.residue_mapping or {}):
+                    state_meta.residue_mapping = clean_map
+                    changed = True
+            n_frames = payload.get("n_frames")
+            if isinstance(n_frames, (int, float)):
+                nf = int(n_frames)
+                if nf >= 0 and state_meta.n_frames != nf:
+                    state_meta.n_frames = nf
+                    changed = True
+            selection = payload.get("residue_selection")
+            if isinstance(selection, str) and selection.strip() and not state_meta.residue_selection:
+                state_meta.residue_selection = selection.strip()
+                changed = True
+
+        if not state_meta.trajectory_file:
+            traj_candidates = sorted(p for p in trajectories_dir.glob(f"{state_id}.*") if p.is_file())
+            if traj_candidates:
+                rel = str(traj_candidates[0].relative_to(system_dir))
+                state_meta.trajectory_file = rel
+                state_meta.source_traj = traj_candidates[0].name
+                changed = True
+
+        if is_new:
+            added += 1
+        elif changed:
+            updated += 1
+
+    # If new states appeared while macro was locked, require reconfirmation.
+    if added > 0 and getattr(system_meta, "macro_locked", False):
+        system_meta.macro_locked = False
+        system_meta.metastable_locked = False
+        system_meta.analysis_mode = None
+
+    system_meta.states = states
+    refresh_system_metadata(system_meta)
+    project_store.save_system(system_meta)
+
+    return {
+        **serialize_system(system_meta),
+        "rescan_summary": {
+            "states_discovered_from_structures": len(discovered_ids),
+            "states_added": added,
+            "states_updated": updated,
+        },
+    }
+
+
+@router.post(
+    "/projects/{project_id}/systems/{system_id}/states/unlock-editing",
+    summary="Unlock macro state editing and reset downstream locks",
+)
+async def unlock_macro_state_editing(project_id: str, system_id: str):
+    try:
+        system_meta = project_store.get_system(project_id, system_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"System '{system_id}' not found.")
+
+    system_meta.macro_locked = False
+    system_meta.metastable_locked = False
+    system_meta.analysis_mode = None
+    project_store.save_system(system_meta)
     return serialize_system(system_meta)
 
 

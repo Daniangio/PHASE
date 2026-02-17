@@ -4,7 +4,7 @@ import ErrorMessage from '../common/ErrorMessage';
 import { AnalysisResultsList, InfoTooltip } from './SystemDetailWidgets';
 import SimulationAnalysisForm from '../analysis/SimulationAnalysisForm';
 import SimulationUploadForm from '../analysis/SimulationUploadForm';
-import { createLambdaPottsModel, fetchSampleStats } from '../../api/projects';
+import { assignClusterStates, createLambdaPottsModel, fetchSampleStats } from '../../api/projects';
 
 export default function SystemDetailPottsSection(props) {
   const {
@@ -105,6 +105,9 @@ export default function SystemDetailPottsSection(props) {
   const [lambdaModelBId, setLambdaModelBId] = useState('');
   const [lambdaValue, setLambdaValue] = useState(0.5);
   const [lambdaModelName, setLambdaModelName] = useState('');
+  const [assignBusy, setAssignBusy] = useState(false);
+  const [assignError, setAssignError] = useState(null);
+  const [assignStateIds, setAssignStateIds] = useState([]);
 
   const clusterLabel =
     selectedClusterName || selectedCluster?.name || selectedCluster?.cluster_id || '';
@@ -175,6 +178,16 @@ export default function SystemDetailPottsSection(props) {
       setLambdaModelAId(fallback);
     }
   }, [fitOverlayOpen, pottsFitMode, pottsModels, lambdaModelAId, lambdaModelBId]);
+
+  useEffect(() => {
+    if (!samplingOverlayOpen) return;
+    if (samplingMode !== 'assign') return;
+    const defaults = (states || [])
+      .filter((state) => Boolean(state?.descriptor_file))
+      .map((state) => state.state_id)
+      .filter(Boolean);
+    setAssignStateIds(defaults);
+  }, [samplingOverlayOpen, samplingMode, states]);
 
   const handleCreateLambdaModel = async () => {
     setLambdaCreateError(null);
@@ -1349,10 +1362,21 @@ export default function SystemDetailPottsSection(props) {
               >
                 Upload results
               </button>
+              <button
+                type="button"
+                onClick={() => setSamplingMode('assign')}
+                className={`px-2 py-1 rounded-md border ${
+                  samplingMode === 'assign'
+                    ? 'border-cyan-400 text-cyan-200'
+                    : 'border-gray-700 text-gray-400 hover:text-gray-200'
+                }`}
+              >
+                Assign MD states
+              </button>
             </div>
             {samplingMode === 'run' ? (
               <SimulationAnalysisForm clusterRuns={readyClusterRuns} onSubmit={enqueueSimulationJob} />
-            ) : (
+            ) : samplingMode === 'upload' ? (
               <div className="space-y-3">
                 {samplingUploadProgress !== null && (
                   <p className="text-xs text-gray-500">Uploading... {samplingUploadProgress}%</p>
@@ -1362,6 +1386,83 @@ export default function SystemDetailPottsSection(props) {
                   onSubmit={handleUploadSimulationResults}
                   isBusy={samplingUploadBusy}
                 />
+              </div>
+            ) : (
+              <div className="space-y-3">
+                <p className="text-xs text-gray-400">
+                  Create or refresh MD assignment samples for selected macro states.
+                </p>
+                <div className="max-h-64 overflow-auto rounded-md border border-gray-800 bg-gray-950/50 p-2 space-y-2">
+                  {(states || [])
+                    .filter((state) => Boolean(state?.descriptor_file))
+                    .map((state) => (
+                      <label key={state.state_id} className="flex items-center gap-2 text-xs text-gray-200">
+                        <input
+                          type="checkbox"
+                          checked={assignStateIds.includes(state.state_id)}
+                          onChange={(event) => {
+                            const checked = event.target.checked;
+                            setAssignStateIds((prev) => {
+                              const set = new Set(prev);
+                              if (checked) set.add(state.state_id);
+                              else set.delete(state.state_id);
+                              return Array.from(set);
+                            });
+                          }}
+                        />
+                        <span>{state.name || state.state_id}</span>
+                        <span className="text-gray-500">{state.state_id}</span>
+                      </label>
+                    ))}
+                </div>
+                {assignError && <ErrorMessage message={assignError} />}
+                <div className="flex items-center justify-between gap-2">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setAssignStateIds(
+                        (states || [])
+                          .filter((state) => Boolean(state?.descriptor_file))
+                          .map((state) => state.state_id)
+                          .filter(Boolean)
+                      )
+                    }
+                    className="text-xs px-3 py-2 rounded-md border border-gray-700 text-gray-300 hover:bg-gray-800"
+                    disabled={assignBusy}
+                  >
+                    Select all
+                  </button>
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      setAssignError(null);
+                      if (!pottsFitClusterId) {
+                        setAssignError('Select a cluster first.');
+                        return;
+                      }
+                      if (!assignStateIds.length) {
+                        setAssignError('Select at least one state.');
+                        return;
+                      }
+                      setAssignBusy(true);
+                      try {
+                        await assignClusterStates(projectId, systemId, pottsFitClusterId, assignStateIds);
+                        if (typeof props.refreshSystem === 'function') {
+                          await props.refreshSystem();
+                        }
+                        setSamplingOverlayOpen(false);
+                      } catch (err) {
+                        setAssignError(err.message || 'Failed to assign selected states.');
+                      } finally {
+                        setAssignBusy(false);
+                      }
+                    }}
+                    className="text-xs px-3 py-2 rounded-md border border-cyan-500 text-cyan-200 hover:bg-cyan-500/10 disabled:opacity-50"
+                    disabled={assignBusy || !pottsFitClusterId}
+                  >
+                    {assignBusy ? 'Assigning…' : 'Run assignment'}
+                  </button>
+                </div>
               </div>
             )}
           </div>

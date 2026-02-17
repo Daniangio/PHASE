@@ -27,6 +27,7 @@ from phase.potts.analysis_run import (
     upsert_delta_commitment_analysis,
     compute_lambda_sweep_analysis,
     compute_md_delta_preference,
+    run_gibbs_relaxation_analysis,
 )
 from phase.potts.potts_model import interpolate_potts_models, load_potts_model, zero_sum_gauge_model
 from phase.potts.sample_io import save_sample_npz
@@ -39,9 +40,8 @@ from phase.workflows.clustering import (
     prepare_cluster_workspace,
     reduce_cluster_workspace,
     run_cluster_chunk,
-    assign_cluster_labels_to_states,
+    build_md_eval_samples_for_cluster,
     evaluate_state_with_models,
-    update_cluster_metadata_with_assignments,
     build_cluster_output_path,
 )
 from phase.workflows.backmapping import build_backmapping_npz
@@ -2132,6 +2132,142 @@ def run_delta_commitment_job(
     return sanitized_payload
 
 
+def run_gibbs_relaxation_job(
+    job_uuid: str,
+    dataset_ref: Dict[str, str],
+    params: Dict[str, Any],
+):
+    """
+    Gibbs relaxation analysis:
+      - choose random starting frames from one sample
+      - run Gibbs trajectories under a selected Potts model
+      - store first-flip percentile statistics for visualization
+    """
+    job = get_current_job()
+    start_time = datetime.utcnow()
+    rq_job_id = job.id if job else f"gibbs-relaxation-{job_uuid}"
+
+    project_id = dataset_ref.get("project_id")
+    system_id = dataset_ref.get("system_id")
+    cluster_id = dataset_ref.get("cluster_id")
+    if not project_id or not system_id or not cluster_id:
+        raise ValueError("gibbs_relaxation requires project_id/system_id/cluster_id.")
+
+    results_dirs = project_store.ensure_results_directories(project_id, system_id)
+    result_filepath = results_dirs["jobs_dir"] / f"{job_uuid}.json"
+
+    result_payload: Dict[str, Any] = {
+        "job_id": job_uuid,
+        "rq_job_id": rq_job_id,
+        "analysis_type": "gibbs_relaxation",
+        "status": "started",
+        "created_at": start_time.isoformat(),
+        "params": params,
+        "results": None,
+        "system_reference": {
+            "project_id": project_id,
+            "system_id": system_id,
+            "cluster_id": cluster_id,
+        },
+        "error": None,
+        "completed_at": None,
+    }
+
+    def save_progress(status_msg: str, progress: int):
+        if job:
+            job.meta["status"] = status_msg
+            job.meta["progress"] = progress
+            job.save_meta()
+        print(f"[GibbsRelaxation {job_uuid}] {status_msg}")
+
+    def write_result_to_disk(payload: Dict[str, Any]):
+        try:
+            with open(result_filepath, "w") as f:
+                json.dump(payload, f, indent=2)
+        except Exception as e:
+            print(f"CRITICAL: Failed to save result file {result_filepath}: {e}")
+            payload["status"] = "failed"
+            payload["error"] = f"Failed to save result file: {e}"
+
+    def progress_cb(message: str, current: int, total: int):
+        if total <= 0:
+            return
+        ratio = max(0.0, min(1.0, float(current) / float(total)))
+        pct = 10 + int(80 * ratio)
+        save_progress(message, pct)
+
+    try:
+        save_progress("Initializing...", 0)
+        write_result_to_disk(result_payload)
+
+        start_sample_id = str(params.get("start_sample_id") or "").strip()
+        if not start_sample_id:
+            raise ValueError("gibbs_relaxation requires start_sample_id.")
+
+        model_ref = str(params.get("model_id") or "").strip()
+        if not model_ref:
+            model_ref = str(params.get("model_path") or "").strip()
+        if not model_ref:
+            raise ValueError("gibbs_relaxation requires model_id or model_path.")
+
+        beta = float(params.get("beta", 1.0))
+        n_start_frames = int(params.get("n_start_frames", 100))
+        gibbs_sweeps = int(params.get("gibbs_sweeps", 1000))
+        seed = int(params.get("seed", 0))
+        workers = params.get("workers")
+        workers_val = int(workers) if workers is not None else None
+        start_label_mode = str(params.get("start_label_mode") or "assigned").strip().lower()
+        keep_invalid = bool(params.get("keep_invalid", False))
+
+        save_progress("Running Gibbs relaxation analysis...", 10)
+        out = run_gibbs_relaxation_analysis(
+            project_id=project_id,
+            system_id=system_id,
+            cluster_id=cluster_id,
+            start_sample_id=start_sample_id,
+            model_ref=model_ref,
+            beta=beta,
+            n_start_frames=n_start_frames,
+            gibbs_sweeps=gibbs_sweeps,
+            seed=seed,
+            start_label_mode=start_label_mode,
+            drop_invalid=not keep_invalid,
+            n_workers=workers_val,
+            progress_callback=progress_cb,
+        )
+
+        meta = out.get("metadata") or {}
+        analysis_id = str(meta.get("analysis_id") or "")
+        analysis_dir = Path(str(out.get("analysis_dir") or "")).resolve()
+        npz_path = Path(str(out.get("analysis_npz") or "")).resolve()
+        if not analysis_id or not analysis_dir.exists() or not npz_path.exists():
+            raise RuntimeError("gibbs_relaxation did not write analysis artifacts as expected.")
+
+        result_payload["status"] = "finished"
+        result_payload["results"] = {
+            "analysis_type": "gibbs_relaxation",
+            "analysis_id": analysis_id,
+            "analysis_dir": _relativize_path(analysis_dir),
+            "analysis_npz": _relativize_path(npz_path),
+        }
+
+    except Exception as e:
+        print(f"[GibbsRelaxation {job_uuid}] FAILED: {e}")
+        traceback.print_exc()
+        result_payload["status"] = "failed"
+        result_payload["error"] = str(e)
+        raise e
+
+    finally:
+        save_progress("Saving final result", 95)
+        result_payload["completed_at"] = datetime.utcnow().isoformat()
+        sanitized_payload = _convert_nan_to_none(result_payload)
+        write_result_to_disk(sanitized_payload)
+
+    save_progress("Gibbs relaxation analysis completed", 100)
+    return sanitized_payload
+
+
 def run_potts_fit_job(
     job_uuid: str,
     dataset_ref: Dict[str, str],
@@ -2686,14 +2822,28 @@ def run_cluster_job(
         except Exception:
             rel_path = str(npz_path)
 
+        selected_state_ids = []
+        try:
+            system_meta = project_store.get_system(project_id, system_id)
+            descriptor_state_ids = {
+                str(sid)
+                for sid, state in (system_meta.states or {}).items()
+                if getattr(state, "descriptor_file", None)
+            }
+            selected_state_ids = [str(v) for v in meta_ids if str(v) in descriptor_state_ids]
+        except Exception:
+            selected_state_ids = []
+
         save_progress("Assigning clusters to MD states...", 92)
-        assignments = assign_cluster_labels_to_states(
-            npz_path,
+        assignments = build_md_eval_samples_for_cluster(
             project_id,
             system_id,
-            output_dir=dirs["samples_dir"],
+            cluster_id,
+            cluster_path=npz_path,
+            selected_state_ids=selected_state_ids,
+            include_remaining_states=True,
+            store=project_store,
         )
-        update_cluster_metadata_with_assignments(npz_path, assignments)
 
         _update_cluster_entry(
             project_id,
@@ -2703,8 +2853,6 @@ def run_cluster_job(
                 "status": "finished",
                 "progress": 100,
                 "path": rel_path,
-                "assigned_state_paths": assignments.get("assigned_state_paths", {}),
-                "assigned_metastable_paths": assignments.get("assigned_metastable_paths", {}),
                 "samples": assignments.get("samples", []),
                 "generated_at": meta.get("generated_at") if isinstance(meta, dict) else None,
                 "contact_edge_count": meta.get("contact_edge_count") if isinstance(meta, dict) else None,

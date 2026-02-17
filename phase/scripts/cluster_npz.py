@@ -120,8 +120,7 @@ def main(argv: list[str] | None = None) -> int:
             from phase.workflows.clustering import (
                 generate_metastable_cluster_npz,
                 build_cluster_output_path,
-                assign_cluster_labels_to_states,
-                update_cluster_metadata_with_assignments,
+                build_md_eval_samples_for_cluster,
                 build_cluster_entry,
             )
             from phase.services.project_store import ProjectStore
@@ -150,14 +149,22 @@ def main(argv: list[str] | None = None) -> int:
                 progress_callback=progress_callback,
             )
             cluster_dirs = store.ensure_cluster_directories(args.project_id, args.system_id, cluster_id)
-            assignments = assign_cluster_labels_to_states(
-                npz_path,
+            system_meta = store.get_system(args.project_id, args.system_id)
+            descriptor_state_ids = {
+                str(sid)
+                for sid, state in (system_meta.states or {}).items()
+                if getattr(state, "descriptor_file", None)
+            }
+            selected_state_ids = [str(v) for v in state_ids if str(v) in descriptor_state_ids]
+            assignments = build_md_eval_samples_for_cluster(
                 args.project_id,
                 args.system_id,
-                output_dir=cluster_dirs["samples_dir"],
+                cluster_id,
+                cluster_path=npz_path,
+                selected_state_ids=selected_state_ids,
+                include_remaining_states=True,
+                store=store,
             )
-            update_cluster_metadata_with_assignments(npz_path, assignments)
-            system_meta = store.get_system(args.project_id, args.system_id)
             rel_path = str(npz_path.relative_to(cluster_dirs["system_dir"]))
             entry = build_cluster_entry(
                 cluster_id=cluster_id,
@@ -173,8 +180,6 @@ def main(argv: list[str] | None = None) -> int:
                     "path": rel_path,
                     "generated_at": metadata.get("generated_at") if isinstance(metadata, dict) else None,
                     "contact_edge_count": metadata.get("contact_edge_count") if isinstance(metadata, dict) else None,
-                    "assigned_state_paths": assignments.get("assigned_state_paths", {}),
-                    "assigned_metastable_paths": assignments.get("assigned_metastable_paths", {}),
                     "samples": assignments.get("samples", []),
                 }
             )
