@@ -14,7 +14,7 @@ from fastapi.responses import FileResponse
 import numpy as np
 
 from backend.api.v1.common import DATA_ROOT, get_queue, project_store, stream_upload, get_cluster_entry
-from backend.api.v1.schemas import LambdaPottsModelCreateRequest
+from backend.api.v1.schemas import LambdaPottsModelCreateRequest, UiSetupUpsertRequest
 from phase.workflows.clustering import (
     generate_metastable_cluster_npz,
     build_md_eval_samples_for_cluster,
@@ -204,6 +204,132 @@ def _decode_metadata_json(meta_raw: Any) -> Dict[str, Any]:
                 value = match.group(1)
         return json.loads(value)
     raise ValueError("metadata_json is not a valid JSON string.")
+
+
+def _ui_setups_dir(project_id: str, system_id: str, cluster_id: str) -> Path:
+    dirs = project_store.ensure_cluster_directories(project_id, system_id, cluster_id)
+    setup_dir = dirs["cluster_dir"] / "ui_setups"
+    setup_dir.mkdir(parents=True, exist_ok=True)
+    return setup_dir
+
+
+@router.get(
+    "/projects/{project_id}/systems/{system_id}/metastable/clusters/{cluster_id}/ui_setups",
+    summary="List persisted UI setups for a cluster",
+)
+async def list_cluster_ui_setups(
+    project_id: str,
+    system_id: str,
+    cluster_id: str,
+    setup_type: Optional[str] = None,
+    page: Optional[str] = None,
+):
+    try:
+        project_store.get_cluster_entry(project_id, system_id, cluster_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    setup_dir = _ui_setups_dir(project_id, system_id, cluster_id)
+    entries: List[Dict[str, Any]] = []
+    for path in sorted(setup_dir.glob("*.json")):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        if setup_type and str(payload.get("setup_type") or "") != str(setup_type):
+            continue
+        if page and str(payload.get("page") or "") != str(page):
+            continue
+        payload.setdefault("setup_id", path.stem)
+        payload.setdefault("name", path.stem)
+        payload.setdefault("setup_type", None)
+        payload.setdefault("page", None)
+        payload.setdefault("created_at", None)
+        payload.setdefault("updated_at", None)
+        payload.setdefault("payload", {})
+        entries.append(payload)
+    entries.sort(key=lambda x: (str(x.get("name") or "").lower(), str(x.get("setup_id") or "")))
+    return {"setups": entries}
+
+
+@router.post(
+    "/projects/{project_id}/systems/{system_id}/metastable/clusters/{cluster_id}/ui_setups",
+    summary="Create or update a persisted UI setup for a cluster",
+)
+async def upsert_cluster_ui_setup(
+    project_id: str,
+    system_id: str,
+    cluster_id: str,
+    payload: UiSetupUpsertRequest,
+):
+    try:
+        project_store.get_cluster_entry(project_id, system_id, cluster_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    name = str(payload.name or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="name is required.")
+    setup_type = str(payload.setup_type or "").strip()
+    if not setup_type:
+        raise HTTPException(status_code=400, detail="setup_type is required.")
+    page_name = str(payload.page or "").strip() or None
+
+    setup_id = str(payload.setup_id or "").strip() or str(uuid.uuid4())
+    setup_dir = _ui_setups_dir(project_id, system_id, cluster_id)
+    out_path = setup_dir / f"{setup_id}.json"
+
+    now = datetime.utcnow().isoformat()
+    created_at = now
+    if out_path.exists():
+        try:
+            old = json.loads(out_path.read_text(encoding="utf-8"))
+            created_at = str(old.get("created_at") or created_at)
+        except Exception:
+            created_at = now
+
+    obj = {
+        "setup_id": setup_id,
+        "name": name,
+        "setup_type": setup_type,
+        "page": page_name,
+        "created_at": created_at,
+        "updated_at": now,
+        "payload": payload.payload if isinstance(payload.payload, dict) else {},
+    }
+    out_path.write_text(json.dumps(obj, indent=2), encoding="utf-8")
+    return obj
+
+
+@router.delete(
+    "/projects/{project_id}/systems/{system_id}/metastable/clusters/{cluster_id}/ui_setups/{setup_id}",
+    summary="Delete a persisted UI setup for a cluster",
+)
+async def delete_cluster_ui_setup(
+    project_id: str,
+    system_id: str,
+    cluster_id: str,
+    setup_id: str,
+):
+    try:
+        project_store.get_cluster_entry(project_id, system_id, cluster_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    sid = str(setup_id or "").strip()
+    if not sid:
+        raise HTTPException(status_code=400, detail="setup_id is required.")
+    setup_dir = _ui_setups_dir(project_id, system_id, cluster_id)
+    path = setup_dir / f"{sid}.json"
+    if not path.exists():
+        raise HTTPException(status_code=404, detail=f"Setup '{sid}' not found.")
+    try:
+        path.unlink()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to delete setup '{sid}': {exc}") from exc
+    return {"status": "deleted", "setup_id": sid}
 
 
 @router.get(

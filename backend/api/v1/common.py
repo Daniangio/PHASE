@@ -117,6 +117,7 @@ async def build_state_descriptors(
     state_meta: DescriptorState,
     *,
     residue_filter: Optional[str] = None,
+    resid_shift: Optional[int] = None,
     traj_path_override: Optional[Path] = None,
 ) -> SystemMetadata:
     try:
@@ -128,6 +129,7 @@ async def build_state_descriptors(
                 system_meta,
                 state_meta,
                 residue_filter=residue_filter,
+                resid_shift=resid_shift,
                 traj_path_override=traj_path_override,
             )
         )

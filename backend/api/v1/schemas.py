@@ -3,7 +3,7 @@ Pydantic Schemas for API request/response models.
 """
 
 from pydantic import BaseModel
-from typing import Dict, Optional, List, Union, Tuple
+from typing import Any, Dict, Optional, List, Union, Tuple
 
 class AnalysisPaths(BaseModel):
     """Input model for file paths."""
@@ -192,6 +192,32 @@ class DeltaCommitmentJobRequest(BaseModel):
     energy_bins: Optional[int] = None
 
 
+class DeltaJsJobRequest(BaseModel):
+    """
+    Incremental delta-JS A/B/Other analysis for a fixed (model A, model B) pair.
+    """
+
+    project_id: str
+    system_id: str
+    cluster_id: str
+    model_a_id: Optional[str] = None
+    model_b_id: Optional[str] = None
+    sample_ids: List[str]
+    reference_sample_ids_a: Optional[List[str]] = None
+    reference_sample_ids_b: Optional[List[str]] = None
+    md_label_mode: Optional[str] = None  # assigned|halo
+    keep_invalid: Optional[bool] = None
+    top_k_residues: Optional[int] = None
+    top_k_edges: Optional[int] = None
+    ranking_method: Optional[str] = None
+    node_edge_alpha: Optional[float] = None
+    edge_mode: Optional[str] = None  # cluster|all_vs_all|contact (required if no model pair)
+    contact_state_ids: Optional[List[str]] = None
+    contact_pdbs: Optional[List[str]] = None
+    contact_cutoff: Optional[float] = None
+    contact_atom_mode: Optional[str] = None  # CA|CM
+
+
 class LambdaSweepJobRequest(BaseModel):
     """
     Validation ladder 4: sample from an interpolated model E_λ between two endpoint Potts models.
@@ -232,6 +258,16 @@ class LambdaSweepJobRequest(BaseModel):
     gibbs_thin: Optional[int] = None
 
     rex_betas: Optional[Union[str, List[float]]] = None
+
+
+class UiSetupUpsertRequest(BaseModel):
+    """Persist UI setup/preset payloads on a cluster."""
+
+    name: str
+    setup_type: str
+    page: Optional[str] = None
+    payload: Dict[str, Any]
+    setup_id: Optional[str] = None
     rex_beta_min: Optional[float] = None
     rex_beta_max: Optional[float] = None
     rex_spacing: Optional[str] = None

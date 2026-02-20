@@ -818,7 +818,7 @@ export default function SystemDetailPage() {
     }
   };
 
-  const handleUploadTrajectory = async (stateId, file, sliceSpec, residueSelection) => {
+  const handleUploadTrajectory = async (stateId, file, sliceSpec, residueSelection, residShift) => {
     if (!file) return;
     setUploadingState(stateId);
     setActionError(null);
@@ -832,6 +832,10 @@ export default function SystemDetailPage() {
       }
       if (residueSelection && residueSelection.trim()) {
         payload.append('residue_selection', residueSelection.trim());
+      }
+      const parsedShift = Number.parseInt(String(residShift ?? '').trim(), 10);
+      if (!Number.isNaN(parsedShift)) {
+        payload.append('resid_shift', String(parsedShift));
       }
       await uploadStateTrajectory(projectId, systemId, stateId, payload, {
         onUploadProgress: (percent) =>
@@ -914,7 +918,7 @@ export default function SystemDetailPage() {
     }
   };
 
-  const handleAddState = async ({ name, file, copyFrom }) => {
+  const handleAddState = async ({ name, file, copyFrom, residShift }) => {
     setActionError(null);
     setAddingState(true);
     try {
@@ -922,6 +926,10 @@ export default function SystemDetailPage() {
       payload.append('name', name);
       if (file) payload.append('pdb', file);
       if (copyFrom) payload.append('source_state_id', copyFrom);
+      const parsedShift = Number.parseInt(String(residShift ?? '').trim(), 10);
+      if (!Number.isNaN(parsedShift)) {
+        payload.append('resid_shift', String(parsedShift));
+      }
       await addSystemState(projectId, systemId, payload);
       setActionMessage(`State "${name}" added.`);
       await refreshSystem();

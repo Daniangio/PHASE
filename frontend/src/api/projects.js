@@ -173,6 +173,32 @@ export function fetchClusterAnalysisData(projectId, systemId, clusterId, analysi
   );
 }
 
+export function fetchClusterUiSetups(projectId, systemId, clusterId, options = {}) {
+  const params = new URLSearchParams();
+  if (options?.setupType) params.set('setup_type', String(options.setupType));
+  if (options?.page) params.set('page', String(options.page));
+  const q = params.toString();
+  return requestJSON(
+    `/projects/${projectId}/systems/${systemId}/metastable/clusters/${clusterId}/ui_setups${q ? `?${q}` : ''}`
+  );
+}
+
+export function saveClusterUiSetup(projectId, systemId, clusterId, payload) {
+  return requestJSON(`/projects/${projectId}/systems/${systemId}/metastable/clusters/${clusterId}/ui_setups`, {
+    method: 'POST',
+    body: payload,
+  });
+}
+
+export function deleteClusterUiSetup(projectId, systemId, clusterId, setupId) {
+  return requestJSON(
+    `/projects/${projectId}/systems/${systemId}/metastable/clusters/${clusterId}/ui_setups/${encodeURIComponent(
+      setupId
+    )}`,
+    { method: 'DELETE' }
+  );
+}
+
 export function fetchSampleStats(projectId, systemId, clusterId, sampleId) {
   return requestJSON(
     `/projects/${projectId}/systems/${systemId}/metastable/clusters/${clusterId}/samples/${sampleId}/stats`

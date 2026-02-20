@@ -403,6 +403,15 @@ export default function DeltaCommitment3DPage() {
     if (typeof raw === 'object') return Object.values(raw);
     return [];
   }, [system]);
+  const loadedStateResidShift = useMemo(() => {
+    if (!loadedStructureStateId) return 0;
+    const st =
+      stateOptions.find((s) => String(s?.state_id || '') === String(loadedStructureStateId)) ||
+      stateOptions.find((s) => String(s?.id || '') === String(loadedStructureStateId)) ||
+      null;
+    const raw = Number(st?.resid_shift);
+    return Number.isFinite(raw) ? Math.trunc(raw) : 0;
+  }, [stateOptions, loadedStructureStateId]);
 
   const residueLabels = useMemo(() => {
     const keys = clusterInfo?.residue_keys || [];
@@ -1084,7 +1093,10 @@ export default function DeltaCommitment3DPage() {
       const q = Number(qRowValuesEdgeSmoothed[ridx]);
       const isSingle = Boolean(singleClusterByResidue[ridx]);
       const label = residueLabels[ridx];
-      const auth = parseResidueId(label);
+      const canonicalAuth = parseResidueId(label);
+      const auth = Number.isFinite(canonicalAuth)
+        ? Number(canonicalAuth) - Number(loadedStateResidShift || 0)
+        : null;
       if (auth !== null) {
         residueIdsAuth.push(auth);
         qValuesAuth.push(Number.isFinite(q) ? q : NaN);
@@ -1108,7 +1120,7 @@ export default function DeltaCommitment3DPage() {
       singleClusterAuth,
       singleClusterLabel,
     };
-  }, [qRowValuesEdgeSmoothed, residueLabels, singleClusterByResidue]);
+  }, [qRowValuesEdgeSmoothed, residueLabels, singleClusterByResidue, loadedStateResidShift]);
 
   const residueIndexByAuth = useMemo(() => {
     const map = new Map();

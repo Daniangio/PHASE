@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
@@ -11,6 +12,82 @@ from phase.io.descriptors import save_descriptor_npz
 from phase.services.project_store import DescriptorState, ProjectStore, SystemMetadata
 from phase.services.state_utils import build_analysis_states
 from phase.workflows.descriptors import DescriptorPreprocessor
+
+
+_RESIDUE_KEY_PATTERN = re.compile(r"^res_(-?\d+(?:_-?\d+)*)$")
+_RESID_SELECTION_PATTERN = re.compile(r"\bresid\s+((?:-?\d+\s*)+)")
+
+
+def _shift_residue_key(key: str, resid_shift: int) -> str:
+    if resid_shift == 0:
+        return key
+    match = _RESIDUE_KEY_PATTERN.match(str(key))
+    if not match:
+        return key
+    parts = match.group(1).split("_")
+    try:
+        shifted = [str(int(part) + resid_shift) for part in parts]
+    except ValueError:
+        return key
+    return f"res_{'_'.join(shifted)}"
+
+
+def _shift_residue_key_from_mapping(key: str, selection: Optional[str], resid_shift: int) -> str:
+    if resid_shift == 0 or not isinstance(selection, str) or not selection.strip():
+        return _shift_residue_key(key, resid_shift)
+    match = _RESID_SELECTION_PATTERN.search(selection)
+    if not match:
+        return _shift_residue_key(key, resid_shift)
+    try:
+        numbers = [int(v) for v in re.findall(r"-?\d+", match.group(1))]
+    except ValueError:
+        return _shift_residue_key(key, resid_shift)
+    if not numbers:
+        return _shift_residue_key(key, resid_shift)
+    shifted = [str(v + resid_shift) for v in numbers]
+    return f"res_{'_'.join(shifted)}"
+
+
+def _apply_residue_shift(
+    *,
+    features: Dict[str, Any],
+    residue_keys: list[str],
+    residue_mapping: Dict[str, str],
+    resid_shift: int,
+) -> tuple[Dict[str, Any], list[str], Dict[str, str]]:
+    if resid_shift == 0:
+        return features, residue_keys, residue_mapping
+
+    shifted_features: Dict[str, Any] = {}
+    shifted_mapping: Dict[str, str] = {}
+    key_translation: Dict[str, str] = {}
+
+    for key in residue_keys:
+        old_key = str(key)
+        shifted_key = _shift_residue_key_from_mapping(
+            old_key,
+            (residue_mapping or {}).get(old_key),
+            resid_shift,
+        )
+        if shifted_key in key_translation.values() and key_translation.get(old_key) != shifted_key:
+            raise ValueError(f"Residue shift created duplicate residue key '{shifted_key}'.")
+        key_translation[old_key] = shifted_key
+
+    for key, value in features.items():
+        old_key = str(key)
+        shifted_key = key_translation.get(old_key, _shift_residue_key(old_key, resid_shift))
+        if shifted_key in shifted_features and shifted_key != old_key:
+            raise ValueError(f"Residue shift created duplicate feature key '{shifted_key}'.")
+        shifted_features[shifted_key] = value
+
+    for key, selection in (residue_mapping or {}).items():
+        old_key = str(key)
+        shifted_key = key_translation.get(old_key, _shift_residue_key(old_key, resid_shift))
+        shifted_mapping[shifted_key] = str(selection)
+
+    shifted_keys = [key_translation.get(str(key), _shift_residue_key(str(key), resid_shift)) for key in residue_keys]
+
+    return shifted_features, shifted_keys, shifted_mapping
 
 
 def update_system_status(system_meta: SystemMetadata) -> None:
@@ -60,11 +137,22 @@ def _build_state_artifacts(
     pdb_path: Path,
     descriptors_dir: Path,
     slice_spec: Optional[str],
+    resid_shift: int,
     state_id: str,
     state_name: Optional[str],
     selection_used: str,
 ) -> Tuple[Any, Dict[str, Path]]:
     build_result = preprocessor.build_single(str(traj_path), str(pdb_path), slice_spec)
+    (
+        build_result.features,
+        build_result.residue_keys,
+        build_result.residue_mapping,
+    ) = _apply_residue_shift(
+        features=build_result.features,
+        residue_keys=list(build_result.residue_keys),
+        residue_mapping=dict(build_result.residue_mapping),
+        resid_shift=resid_shift,
+    )
     artifact_paths = {
         "npz": descriptors_dir / f"{state_id}_descriptors.npz",
         "metadata": descriptors_dir / f"{state_id}_descriptor_metadata.json",
@@ -76,6 +164,7 @@ def _build_state_artifacts(
         "residue_mapping": build_result.residue_mapping,
         "n_frames": build_result.n_frames,
         "residue_selection": selection_used,
+        "resid_shift": int(resid_shift),
     }
     artifact_paths["metadata"].write_text(json.dumps(metadata_payload, indent=2))
     return build_result, artifact_paths
@@ -88,6 +177,7 @@ def build_state_descriptors(
     state_meta: DescriptorState,
     *,
     residue_filter: Optional[str] = None,
+    resid_shift: Optional[int] = None,
     traj_path_override: Optional[Path] = None,
 ) -> SystemMetadata:
     if not state_meta.trajectory_file and traj_path_override is None:
@@ -112,12 +202,14 @@ def build_state_descriptors(
 
     selection_used, selections_config = _resolve_selection_config(system_meta, residue_filter)
     preprocessor = DescriptorPreprocessor(residue_selections=selections_config)
+    shift_value = int(state_meta.resid_shift if resid_shift is None else resid_shift)
     build_result, artifact_paths = _build_state_artifacts(
         preprocessor,
         traj_path=traj_path,
         pdb_path=pdb_path,
         descriptors_dir=descriptors_dir,
         slice_spec=state_meta.slice_spec,
+        resid_shift=shift_value,
         state_id=state_meta.state_id,
         state_name=state_meta.name,
         selection_used=selection_used,
@@ -131,6 +223,7 @@ def build_state_descriptors(
     state_meta.n_frames = build_result.n_frames
     state_meta.residue_keys = build_result.residue_keys
     state_meta.residue_mapping = build_result.residue_mapping
+    state_meta.resid_shift = shift_value
     state_meta.residue_selection = residue_filter.strip() if residue_filter else None
 
     refresh_system_metadata(system_meta)
@@ -150,6 +243,7 @@ def add_state(
     copy_traj: bool,
     build_descriptors: bool,
     slice_spec: Optional[str],
+    resid_shift: int = 0,
 ) -> DescriptorState:
     system = store.get_system(project_id, system_id)
     dirs = store.ensure_directories(project_id, system_id)
@@ -185,6 +279,7 @@ def add_state(
             residue_selection=residue_selection,
             slice_spec=slice_value,
             stride=stride_val,
+            resid_shift=int(resid_shift),
         )
         system.states[state_id] = state
         refresh_system_metadata(system)
@@ -196,6 +291,7 @@ def add_state(
                 system,
                 state,
                 residue_filter=residue_selection,
+                resid_shift=int(resid_shift),
             )
     except Exception:
         system.states.pop(state_id, None)
@@ -225,6 +321,7 @@ def register_state_from_pdb(
     name: str,
     pdb_path: Path,
     stride: int = 1,
+    resid_shift: int = 0,
 ) -> DescriptorState:
     if state_id in system_meta.states:
         raise ValueError(f"State '{state_id}' already exists.")
@@ -238,6 +335,7 @@ def register_state_from_pdb(
         name=name,
         pdb_file=rel_pdb,
         stride=stride,
+        resid_shift=int(resid_shift),
     )
     system_meta.states[state_id] = state
     refresh_system_metadata(system_meta)

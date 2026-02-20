@@ -15,6 +15,7 @@ import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 import shutil
+import numpy as np
 
 
 # Allow overriding the data root (e.g., to point to a larger, persistent volume).
@@ -45,6 +46,30 @@ def _utc_now() -> str:
     return datetime.utcnow().isoformat()
 
 
+def _read_cluster_npz_metadata(cluster_npz: Path) -> Dict[str, Any]:
+    """Best-effort metadata extraction from cluster.npz when sidecar JSON is missing."""
+    if not cluster_npz.exists():
+        return {}
+    try:
+        with np.load(cluster_npz, allow_pickle=False) as data:
+            if "metadata_json" not in data:
+                return {}
+            raw = data["metadata_json"]
+            try:
+                if isinstance(raw, np.ndarray):
+                    raw = raw.item()
+            except Exception:
+                return {}
+            if isinstance(raw, bytes):
+                raw = raw.decode("utf-8", errors="ignore")
+            if not isinstance(raw, str) or not raw.strip():
+                return {}
+            parsed = json.loads(raw)
+            return parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        return {}
+
+
 @dataclass
 class DescriptorState:
     """Metadata about one state inside a system."""
@@ -59,6 +84,7 @@ class DescriptorState:
     stride: int = 1
     source_traj: Optional[str] = None
     slice_spec: Optional[str] = None
+    resid_shift: int = 0
     residue_selection: Optional[str] = None
     residue_keys: List[str] = field(default_factory=list)
     residue_mapping: Dict[str, str] = field(default_factory=dict)
@@ -349,11 +375,42 @@ class ProjectStore:
         entries: List[Dict[str, Any]] = []
         for cluster_dir in sorted(p for p in clusters_dir.iterdir() if p.is_dir()):
             meta_path = cluster_dir / CLUSTER_METADATA_FILENAME
-            if not meta_path.exists():
-                continue
-            try:
-                meta = _read_json(meta_path)
-            except Exception:
+            cluster_npz = cluster_dir / "cluster.npz"
+            meta: Dict[str, Any]
+            if meta_path.exists():
+                try:
+                    meta = _read_json(meta_path)
+                except Exception:
+                    meta = {}
+            else:
+                meta = {}
+
+            if not meta and cluster_npz.exists():
+                # Backward compatibility: discover clusters from folder + cluster.npz even
+                # when sidecar metadata was never created.
+                npz_meta = _read_cluster_npz_metadata(cluster_npz)
+                cluster_id = cluster_dir.name
+                selected_ids = npz_meta.get("selected_state_ids") or npz_meta.get("selected_metastable_ids") or []
+                meta = {
+                    "cluster_id": cluster_id,
+                    "name": npz_meta.get("cluster_name") or npz_meta.get("name") or cluster_id,
+                    "status": "finished",
+                    "progress": 100,
+                    "status_message": "Complete",
+                    "path": str(cluster_npz.relative_to(system_dir)),
+                    "generated_at": npz_meta.get("generated_at"),
+                    "state_ids": selected_ids,
+                    "metastable_ids": selected_ids,
+                    "contact_edge_count": npz_meta.get("contact_edge_count"),
+                    "cluster_algorithm": npz_meta.get("cluster_algorithm") or "density_peaks",
+                    "algorithm_params": npz_meta.get("cluster_params") or {},
+                }
+                try:
+                    _write_json(meta_path, meta)
+                except Exception:
+                    pass
+
+            if not meta:
                 continue
             if isinstance(meta, dict):
                 cleaned = False
@@ -371,7 +428,6 @@ class ProjectStore:
             cluster_id = meta.get("cluster_id") or cluster_dir.name
             meta["cluster_id"] = cluster_id
             if not meta.get("path"):
-                cluster_npz = cluster_dir / "cluster.npz"
                 if cluster_npz.exists():
                     try:
                         meta["path"] = str(cluster_npz.relative_to(system_dir))
@@ -570,6 +626,9 @@ class ProjectStore:
                 selection = payload.get("residue_selection")
                 if isinstance(selection, str):
                     st.residue_selection = selection
+                resid_shift = payload.get("resid_shift")
+                if isinstance(resid_shift, (int, float)):
+                    st.resid_shift = int(resid_shift)
                 state_name = payload.get("state_name")
                 if isinstance(state_name, str) and state_name.strip():
                     st.name = state_name.strip()

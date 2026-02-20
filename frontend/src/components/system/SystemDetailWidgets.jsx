@@ -175,14 +175,16 @@ export function AddStateForm({ states, onAdd, isAdding }) {
   const [name, setName] = useState('');
   const [file, setFile] = useState(null);
   const [copyFrom, setCopyFrom] = useState('');
+  const [residShift, setResidShift] = useState('0');
   const handleSubmit = async (e) => {
     e.preventDefault();
     if (!name.trim()) return;
     if (!file && !copyFrom) return;
-    await onAdd({ name: name.trim(), file, copyFrom });
+    await onAdd({ name: name.trim(), file, copyFrom, residShift });
     setName('');
     setFile(null);
     setCopyFrom('');
+    setResidShift('0');
   };
   return (
     <form onSubmit={handleSubmit} className="bg-gray-900 border border-gray-700 rounded-lg p-4 space-y-3">
@@ -220,8 +222,18 @@ export function AddStateForm({ states, onAdd, isAdding }) {
           ))}
         </select>
       </div>
+      <div>
+        <label className="block text-xs text-gray-400 mb-1">Residue shift offset</label>
+        <input
+          type="number"
+          step="1"
+          value={residShift}
+          onChange={(e) => setResidShift(e.target.value)}
+          className="w-full bg-gray-800 border border-gray-700 rounded-md px-3 py-2 text-white focus:ring-cyan-500"
+        />
+      </div>
       <p className="text-xs text-gray-500">
-        Provide a new PDB or select an existing state to duplicate its structure.
+        Provide a new PDB or select an existing state to duplicate its structure. Residue shift is applied when descriptors are built.
       </p>
       <button
         type="submit"

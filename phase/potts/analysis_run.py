@@ -3,6 +3,7 @@ from __future__ import annotations
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import json
 import os
+import re
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
@@ -73,6 +74,72 @@ def _ensure_analysis_dir(cluster_dir: Path, kind: str) -> Path:
     root = cluster_dir / "analyses" / kind
     root.mkdir(parents=True, exist_ok=True)
     return root
+
+
+def _default_residue_selection(key: str) -> str:
+    match = re.search(r"(?:res[_-]?)(\d+)$", key, flags=re.IGNORECASE)
+    if match:
+        return f"resid {match.group(1)}"
+    if key.isdigit():
+        return f"resid {key}"
+    return key
+
+
+def _extract_residue_positions(
+    pdb_path: Path,
+    residue_keys: Sequence[str],
+    residue_mapping: dict[str, str],
+    contact_mode: str,
+) -> list[np.ndarray | None]:
+    import MDAnalysis as mda
+
+    positions: list[np.ndarray | None] = []
+    u = mda.Universe(str(pdb_path))
+    for key in residue_keys:
+        sel = residue_mapping.get(key) or _default_residue_selection(key)
+        try:
+            res_atoms = u.select_atoms(sel)
+        except Exception:
+            positions.append(None)
+            continue
+        if res_atoms.n_atoms == 0:
+            positions.append(None)
+            continue
+        if contact_mode == "CA":
+            ca_atoms = res_atoms.select_atoms("name CA")
+            if ca_atoms.n_atoms > 0:
+                positions.append(np.array(ca_atoms[0].position, dtype=float))
+            else:
+                positions.append(np.array(res_atoms.center_of_mass(), dtype=float))
+        else:
+            positions.append(np.array(res_atoms.center_of_mass(), dtype=float))
+    return positions
+
+
+def _compute_contact_edges_from_pdbs(
+    pdb_paths: Sequence[Path],
+    residue_keys: Sequence[str],
+    residue_mapping: dict[str, str],
+    cutoff: float,
+    contact_mode: str,
+) -> list[tuple[int, int]]:
+    edges: set[tuple[int, int]] = set()
+    for pdb_path in pdb_paths:
+        if not pdb_path.exists():
+            continue
+        positions = _extract_residue_positions(pdb_path, residue_keys, residue_mapping, contact_mode)
+        valid_indices = [i for i, pos in enumerate(positions) if pos is not None]
+        if len(valid_indices) < 2:
+            continue
+        coords = np.stack([positions[i] for i in valid_indices], axis=0)
+        diff = coords[:, None, :] - coords[None, :, :]
+        dist = np.sqrt(np.sum(diff * diff, axis=-1))
+        for a_idx, i in enumerate(valid_indices):
+            for b_idx in range(a_idx + 1, len(valid_indices)):
+                j = valid_indices[b_idx]
+                if dist[a_idx, b_idx] < cutoff:
+                    edges.add((min(i, j), max(i, j)))
+    return sorted(edges)
 
 
 _GIBBS_RELAX_MODEL_CACHE: dict[str, PottsModel] = {}
@@ -1855,6 +1922,666 @@ def upsert_delta_commitment_analysis(
         "top_k_edges": int(top_k_e),
         "ranking_method": ranking_method,
         "energy_bins": int(energy_bins),
+        "paths": {"analysis_npz": str(npz_path.relative_to(system_dir))},
+        "summary": {
+            "n_residues": int(N),
+            "n_edges": int(len(edges)),
+            "n_samples": int(len(merged)),
+            "sample_ids": merged,
+        },
+    }
+    meta_path.write_text(json.dumps(_convert_nan_to_none(meta), indent=2), encoding="utf-8")
+
+    return {"metadata": _convert_nan_to_none(meta), "analysis_npz": str(npz_path), "analysis_dir": str(analysis_dir)}
+
+
+def upsert_delta_js_analysis(
+    *,
+    project_id: str,
+    system_id: str,
+    cluster_id: str,
+    model_a_ref: str | None = None,
+    model_b_ref: str | None = None,
+    sample_ids: Sequence[str],
+    reference_sample_ids_a: Sequence[str] | None = None,
+    reference_sample_ids_b: Sequence[str] | None = None,
+    md_label_mode: str = "assigned",
+    drop_invalid: bool = True,
+    top_k_residues: int = 20,
+    top_k_edges: int = 30,
+    ranking_method: str = "js_ab",
+    node_edge_alpha: float = 0.5,
+    edge_mode: str | None = None,
+    contact_state_ids: Sequence[str] | None = None,
+    contact_pdbs: Sequence[str] | None = None,
+    contact_cutoff: float = 10.0,
+    contact_atom_mode: str = "CA",
+) -> dict[str, Any]:
+    """
+    Incremental JS A-vs-B-vs-Other store.
+
+    For each selected sample:
+      - compute per-residue JS distances to A and B references
+      - compute per-edge JS distances to A and B references (on top edges)
+      - store weighted node/edge aggregate distances for trajectory-level scoring
+
+    Potts models are optional.
+
+    Edge definition:
+      - with model A/B: use the intersection of Potts edges and allow automatic reference
+        inference from model state_ids.
+      - without models: require edge_mode in {'cluster','all_vs_all','contact'} and explicit
+        reference_sample_ids_a/b.
+    """
+    md_label_mode = (md_label_mode or "assigned").strip().lower()
+    if md_label_mode not in {"assigned", "halo"}:
+        raise ValueError("md_label_mode must be 'assigned' or 'halo'.")
+    top_k_residues = int(top_k_residues)
+    top_k_edges = int(top_k_edges)
+    if top_k_residues < 1:
+        raise ValueError("top_k_residues must be >= 1.")
+    if top_k_edges < 1:
+        raise ValueError("top_k_edges must be >= 1.")
+    ranking_method = (ranking_method or "js_ab").strip().lower()
+    if ranking_method not in {"js_ab"}:
+        raise ValueError("ranking_method must be 'js_ab'.")
+    node_edge_alpha = float(node_edge_alpha)
+    if not np.isfinite(node_edge_alpha) or node_edge_alpha < 0.0 or node_edge_alpha > 1.0:
+        raise ValueError("node_edge_alpha must be in [0,1].")
+
+    edge_mode = (edge_mode or "").strip().lower()
+    if edge_mode and edge_mode not in {"cluster", "all_vs_all", "contact"}:
+        raise ValueError("edge_mode must be one of: cluster, all_vs_all, contact.")
+    contact_cutoff = float(contact_cutoff)
+    if not np.isfinite(contact_cutoff) or contact_cutoff <= 0:
+        raise ValueError("contact_cutoff must be > 0.")
+    contact_atom_mode = str(contact_atom_mode or "CA").strip().upper()
+    if contact_atom_mode not in {"CA", "CM"}:
+        raise ValueError("contact_atom_mode must be 'CA' or 'CM'.")
+
+    data_root = Path(os.getenv("PHASE_DATA_ROOT", "/app/data"))
+    store = ProjectStore(base_dir=data_root / "projects")
+    cluster_dirs = store.ensure_cluster_directories(project_id, system_id, cluster_id)
+    system_dir = cluster_dirs["system_dir"]
+    cluster_dir = cluster_dirs["cluster_dir"]
+
+    cluster_npz_path = cluster_dir / "cluster.npz"
+    if not cluster_npz_path.exists():
+        raise FileNotFoundError(f"Cluster NPZ not found: {cluster_npz_path}")
+
+    def _load_cluster_topology(path: Path) -> tuple[int, list[int], list[tuple[int, int]], list[str]]:
+        with np.load(path, allow_pickle=True) as data:
+            if "residue_keys" in data:
+                residue_keys_raw = np.asarray(data["residue_keys"], dtype=str)
+                residue_keys_local = [str(x) for x in residue_keys_raw.tolist()]
+            else:
+                residue_keys_local = []
+            if "cluster_counts" in data:
+                cc = np.asarray(data["cluster_counts"], dtype=int)
+            elif "merged__cluster_counts" in data:
+                cc = np.asarray(data["merged__cluster_counts"], dtype=int)
+            else:
+                raise KeyError("cluster_counts / merged__cluster_counts not found in cluster NPZ.")
+
+            raw_edges: np.ndarray
+            if "contact_edge_index" in data:
+                edge_idx = np.asarray(data["contact_edge_index"], dtype=int)
+                if edge_idx.ndim == 2 and edge_idx.shape[0] == 2:
+                    raw_edges = edge_idx.T
+                else:
+                    raw_edges = np.zeros((0, 2), dtype=int)
+            elif "edges" in data:
+                edge_arr = np.asarray(data["edges"], dtype=int)
+                if edge_arr.ndim == 2 and edge_arr.shape[1] >= 2:
+                    raw_edges = edge_arr[:, :2]
+                elif edge_arr.ndim == 2 and edge_arr.shape[0] == 2:
+                    raw_edges = edge_arr.T
+                else:
+                    raw_edges = np.zeros((0, 2), dtype=int)
+            else:
+                raw_edges = np.zeros((0, 2), dtype=int)
+
+        N_local = int(cc.shape[0])
+        if N_local <= 0:
+            raise ValueError("Invalid cluster topology (zero residues).")
+        if len(residue_keys_local) != N_local:
+            residue_keys_local = [f"res_{i}" for i in range(N_local)]
+        K_local = [int(x) for x in cc.tolist()]
+        if any(k <= 0 for k in K_local):
+            raise ValueError("Invalid cluster_counts in cluster NPZ.")
+
+        edge_set: set[tuple[int, int]] = set()
+        if raw_edges.size:
+            for pair in np.asarray(raw_edges, dtype=int):
+                if pair.shape[0] < 2:
+                    continue
+                r = int(pair[0])
+                s = int(pair[1])
+                if r == s:
+                    continue
+                if r < 0 or s < 0 or r >= N_local or s >= N_local:
+                    continue
+                if r > s:
+                    r, s = s, r
+                edge_set.add((r, s))
+        return N_local, K_local, sorted(edge_set), residue_keys_local
+
+    cluster_N, cluster_K_list, cluster_edges, residue_keys = _load_cluster_topology(cluster_npz_path)
+
+    models_meta = store.list_potts_models(project_id, system_id, cluster_id)
+    model_by_id: dict[str, dict[str, Any]] = {
+        str(m.get("model_id")): m for m in models_meta if isinstance(m, dict) and m.get("model_id")
+    }
+
+    def _model_state_ids(model_entry: dict[str, Any] | None) -> list[str]:
+        if not isinstance(model_entry, dict):
+            return []
+        params = model_entry.get("params")
+        if not isinstance(params, dict):
+            return []
+        raw = params.get("state_ids")
+        if not isinstance(raw, list):
+            return []
+        out: list[str] = []
+        for sid in raw:
+            s = str(sid or "").strip()
+            if s:
+                out.append(s)
+        return out
+
+    def _resolve_model(ref: str) -> tuple[PottsModel, str | None, str, str, dict[str, Any] | None]:
+        model_id = None
+        model_name = None
+        model_path = Path(str(ref))
+        model_entry = None
+        if not model_path.suffix:
+            model_id = str(ref)
+            model_entry = model_by_id.get(model_id)
+            if not model_entry or not model_entry.get("path"):
+                raise FileNotFoundError(f"Potts model_id not found on this cluster: {model_id}")
+            model_name = str(model_entry.get("name") or model_id)
+            model_path = store.resolve_path(project_id, system_id, str(model_entry.get("path")))
+        else:
+            if not model_path.is_absolute():
+                model_path = store.resolve_path(project_id, system_id, str(model_path))
+            model_name = model_path.stem
+        if not model_path.exists():
+            raise FileNotFoundError(f"Potts model NPZ not found: {model_path}")
+        return (
+            load_potts_model(str(model_path)),
+            model_id,
+            str(model_name),
+            _relativize(model_path, system_dir),
+            model_entry,
+        )
+
+    model_a_ref = str(model_a_ref or "").strip()
+    model_b_ref = str(model_b_ref or "").strip()
+    use_models = bool(model_a_ref or model_b_ref)
+    if use_models and (not model_a_ref or not model_b_ref):
+        raise ValueError("Provide both model_a_ref and model_b_ref, or neither.")
+
+    model_a_id: str | None = None
+    model_b_id: str | None = None
+    model_a_name: str | None = None
+    model_b_name: str | None = None
+    model_a_path: str | None = None
+    model_b_path: str | None = None
+    model_a_entry: dict[str, Any] | None = None
+    model_b_entry: dict[str, Any] | None = None
+    edge_source = "cluster"
+
+    if use_models:
+        model_a, model_a_id, model_a_name, model_a_path, model_a_entry = _resolve_model(model_a_ref)
+        model_b, model_b_id, model_b_name, model_b_path, model_b_entry = _resolve_model(model_b_ref)
+        if model_a_id and model_b_id and model_a_id == model_b_id:
+            raise ValueError("Select two different models.")
+        if len(model_a.h) != len(model_b.h):
+            raise ValueError("Model sizes do not match.")
+
+        model_a = zero_sum_gauge_model(model_a)
+        model_b = zero_sum_gauge_model(model_b)
+        N = int(len(model_a.h))
+        if N <= 0:
+            raise ValueError("Invalid Potts model size.")
+        K_list = [int(k) for k in model_a.K_list()]
+        K_list_b = [int(k) for k in model_b.K_list()]
+        if len(K_list) != N or len(K_list_b) != N:
+            raise ValueError("Invalid model K_list length.")
+        if K_list != K_list_b:
+            raise ValueError("Model alphabet sizes do not match.")
+
+        if cluster_N != N:
+            raise ValueError(
+                f"Model size mismatch with cluster topology: model N={N}, cluster N={cluster_N}."
+            )
+        if cluster_K_list and K_list != cluster_K_list:
+            raise ValueError("Model alphabet sizes do not match cluster_counts.")
+
+        edges_a = {(min(int(r), int(s)), max(int(r), int(s))) for r, s in (model_a.edges or []) if int(r) != int(s)}
+        edges_b = {(min(int(r), int(s)), max(int(r), int(s))) for r, s in (model_b.edges or []) if int(r) != int(s)}
+        edges = sorted(edges_a & edges_b)
+        edge_source = "potts_intersection"
+    else:
+        if not edge_mode:
+            raise ValueError("edge_mode is required when Potts models are not provided.")
+        N = int(cluster_N)
+        K_list = list(cluster_K_list)
+        if edge_mode == "cluster":
+            edges = list(cluster_edges)
+            edge_source = "cluster"
+        elif edge_mode == "all_vs_all":
+            edges = [(i, j) for i in range(N) for j in range(i + 1, N)]
+            edge_source = "all_vs_all"
+        else:
+            system_meta = store.get_system(project_id, system_id)
+            state_map = system_meta.states or {}
+
+            raw_state_ids = [str(s or "").strip() for s in (contact_state_ids or []) if str(s or "").strip()]
+            raw_pdbs = [str(p or "").strip() for p in (contact_pdbs or []) if str(p or "").strip()]
+
+            resolved_pdbs: list[Path] = []
+            seen_pdb: set[str] = set()
+
+            for sid in raw_state_ids:
+                state = state_map.get(sid)
+                pdb_rel = state.pdb_file if state and getattr(state, "pdb_file", None) else ""
+                if not pdb_rel:
+                    continue
+                p = Path(str(pdb_rel))
+                if not p.is_absolute():
+                    p = store.resolve_path(project_id, system_id, str(pdb_rel))
+                key = str(p.resolve()) if p.exists() else str(p)
+                if key in seen_pdb:
+                    continue
+                seen_pdb.add(key)
+                resolved_pdbs.append(p)
+
+            for raw in raw_pdbs:
+                p = Path(raw)
+                if not p.is_absolute():
+                    p = store.resolve_path(project_id, system_id, raw)
+                key = str(p.resolve()) if p.exists() else str(p)
+                if key in seen_pdb:
+                    continue
+                seen_pdb.add(key)
+                resolved_pdbs.append(p)
+
+            resolved_pdbs = [p for p in resolved_pdbs if p.exists()]
+            if not resolved_pdbs:
+                raise ValueError(
+                    "edge_mode=contact requires at least one valid PDB from contact_state_ids or contact_pdbs."
+                )
+            edges = _compute_contact_edges_from_pdbs(
+                resolved_pdbs,
+                residue_keys,
+                {},
+                float(contact_cutoff),
+                str(contact_atom_mode).upper(),
+            )
+            edge_source = "contact"
+
+    K_max = int(max(K_list)) if K_list else 0
+    if K_max <= 0:
+        raise ValueError("Invalid alphabet size.")
+
+    samples = store.list_samples(project_id, system_id, cluster_id)
+    sample_by_id: dict[str, dict[str, Any]] = {
+        str(s.get("sample_id")): s for s in samples if isinstance(s, dict) and s.get("sample_id")
+    }
+
+    def _resolve_sample_path(entry: dict[str, Any]) -> Path:
+        paths = entry.get("paths") or {}
+        rel = None
+        if isinstance(paths, dict):
+            rel = paths.get("summary_npz") or paths.get("path")
+        rel = rel or entry.get("path")
+        if not rel:
+            raise FileNotFoundError("Sample entry missing path.")
+        p = Path(str(rel))
+        if not p.is_absolute():
+            resolved = store.resolve_path(project_id, system_id, str(rel))
+            if not resolved.exists():
+                alt = cluster_dir / str(rel)
+                p = alt if alt.exists() else resolved
+            else:
+                p = resolved
+        return p
+
+    def _load_labels(entry: dict[str, Any]) -> np.ndarray:
+        p = _resolve_sample_path(entry)
+        s = load_sample_npz(p)
+        X = s.labels
+        if md_label_mode in {"halo", "labels_halo"} and s.labels_halo is not None:
+            X = s.labels_halo
+        if drop_invalid and s.invalid_mask is not None:
+            keep = ~np.asarray(s.invalid_mask, dtype=bool)
+            if keep.shape[0] == X.shape[0]:
+                X = X[keep]
+        return np.asarray(X, dtype=int)
+
+    def _resolve_reference_ids(
+        provided_ids: Sequence[str] | None,
+        model_entry: dict[str, Any] | None,
+        side_label: str,
+        *,
+        allow_infer_from_model: bool,
+    ) -> list[str]:
+        if provided_ids:
+            out: list[str] = []
+            seen: set[str] = set()
+            for sid in provided_ids:
+                s = str(sid or "").strip()
+                if not s or s in seen:
+                    continue
+                if s not in sample_by_id:
+                    raise FileNotFoundError(f"Reference sample not found ({side_label}): {s}")
+                out.append(s)
+                seen.add(s)
+            if not out:
+                raise ValueError(f"No valid reference samples selected for side {side_label}.")
+            return out
+
+        if not allow_infer_from_model:
+            raise ValueError(
+                f"reference_sample_ids_{side_label.lower()} is required when Potts models are not provided."
+            )
+
+        state_ids = _model_state_ids(model_entry)
+        if not state_ids:
+            raise ValueError(
+                f"Could not infer reference samples for side {side_label}: model has no state_ids. "
+                f"Provide reference_sample_ids_{side_label.lower()} explicitly."
+            )
+        refs: list[str] = []
+        for sid, entry in sample_by_id.items():
+            if str(entry.get("type") or "") != "md_eval":
+                continue
+            state_id = str(entry.get("state_id") or "").strip()
+            if state_ids and state_id not in state_ids:
+                continue
+            refs.append(sid)
+        if refs:
+            return refs
+        raise ValueError(
+            f"Could not infer reference samples for side {side_label}. "
+            f"Provide reference_sample_ids_{side_label.lower()} explicitly."
+        )
+
+    ref_ids_a = _resolve_reference_ids(
+        reference_sample_ids_a,
+        model_a_entry,
+        "A",
+        allow_infer_from_model=use_models,
+    )
+    ref_ids_b = _resolve_reference_ids(
+        reference_sample_ids_b,
+        model_b_entry,
+        "B",
+        allow_infer_from_model=use_models,
+    )
+
+    def _analysis_key() -> str:
+        payload = {
+            "analysis_type": "delta_js",
+            "model_a_id": model_a_id,
+            "model_b_id": model_b_id,
+            "model_a_path": model_a_path,
+            "model_b_path": model_b_path,
+            "edge_source": edge_source,
+            "edge_mode": edge_mode,
+            "contact_state_ids": list(map(str, sorted({str(s).strip() for s in (contact_state_ids or []) if str(s).strip()}))),
+            "contact_pdbs": list(map(str, sorted({str(p).strip() for p in (contact_pdbs or []) if str(p).strip()}))),
+            "contact_cutoff": float(contact_cutoff),
+            "contact_atom_mode": str(contact_atom_mode).upper(),
+            "md_label_mode": md_label_mode,
+            "drop_invalid": bool(drop_invalid),
+            "ranking_method": ranking_method,
+            "node_edge_alpha": float(node_edge_alpha),
+            "ref_a": list(map(str, sorted(ref_ids_a))),
+            "ref_b": list(map(str, sorted(ref_ids_b))),
+        }
+        return json.dumps(payload, sort_keys=True)
+
+    analysis_id = str(uuid.uuid5(uuid.NAMESPACE_URL, _analysis_key()))
+    analyses_root = _ensure_analysis_dir(cluster_dir, "delta_js")
+    analysis_dir = analyses_root / analysis_id
+    analysis_dir.mkdir(parents=True, exist_ok=True)
+    npz_path = analysis_dir / "analysis.npz"
+    meta_path = analysis_dir / ANALYSIS_METADATA_FILENAME
+
+    existing_sample_ids: list[str] = []
+    if npz_path.exists():
+        try:
+            with np.load(npz_path, allow_pickle=False) as data:
+                if "sample_ids" in data:
+                    existing_sample_ids = [str(x) for x in np.asarray(data["sample_ids"], dtype=str).tolist()]
+        except Exception:
+            existing_sample_ids = []
+
+    requested = [str(s).strip() for s in sample_ids if str(s).strip()]
+    seen: set[str] = set()
+    merged: list[str] = []
+    for sid in existing_sample_ids + requested:
+        if not sid or sid in seen:
+            continue
+        seen.add(sid)
+        merged.append(sid)
+    if not merged:
+        raise ValueError("No samples selected.")
+
+    def _aggregate_refs(ref_ids: list[str]) -> tuple[list[np.ndarray], list[np.ndarray]]:
+        node_counts = [np.zeros((int(K_list[i]),), dtype=float) for i in range(N)]
+        edge_counts = [np.zeros((int(K_list[r]), int(K_list[s])), dtype=float) for (r, s) in edges]
+        total = 0
+        for sid in ref_ids:
+            entry = sample_by_id.get(sid)
+            if not entry:
+                continue
+            X = _load_labels(entry)
+            if X.ndim != 2 or X.size == 0:
+                continue
+            if int(X.shape[1]) != N:
+                raise ValueError(f"Reference sample size mismatch ({sid}): got N={X.shape[1]}, expected {N}")
+            if np.min(X) < 0:
+                raise ValueError(
+                    f"Reference sample contains negative labels ({sid}). "
+                    "Use md_label_mode='assigned' or remap unassigned labels first."
+                )
+            for i in range(N):
+                Ki = int(K_list[i])
+                if Ki <= 0:
+                    continue
+                col = X[:, i]
+                mx = int(np.max(col)) if col.size else -1
+                if mx >= Ki:
+                    raise ValueError(
+                        f"Reference sample labels out of range for {sid} at residue {i}: max={mx}, expected in [0,{Ki-1}]"
+                    )
+            T = int(X.shape[0])
+            total += T
+            for i in range(N):
+                node_counts[i] += np.bincount(np.asarray(X[:, i], dtype=int), minlength=int(K_list[i])).astype(float)
+            if edges:
+                P = pairwise_joints_on_edges(X, K_list, edges)
+                for eidx, e in enumerate(edges):
+                    edge_counts[eidx] += np.asarray(P[e], dtype=float) * float(T)
+        if total <= 0:
+            raise ValueError("Reference samples are empty after filtering.")
+        p_node = [c / max(1.0, float(np.sum(c))) for c in node_counts]
+        p_edge = [c / max(1.0, float(np.sum(c))) for c in edge_counts]
+        return p_node, p_edge
+
+    p_node_a, p_edge_a = _aggregate_refs(ref_ids_a)
+    p_node_b, p_edge_b = _aggregate_refs(ref_ids_b)
+
+    D_residue = np.zeros((N,), dtype=float)
+    for i in range(N):
+        D_residue[i] = float(js_divergence(np.asarray(p_node_a[i], dtype=float), np.asarray(p_node_b[i], dtype=float)))
+    D_edge = np.zeros((len(edges),), dtype=float)
+    for eidx, _ in enumerate(edges):
+        D_edge[eidx] = float(js_divergence(np.asarray(p_edge_a[eidx], dtype=float).ravel(), np.asarray(p_edge_b[eidx], dtype=float).ravel()))
+
+    top_k_r = min(top_k_residues, N)
+    top_k_e = min(top_k_edges, len(edges))
+    top_residue_indices = np.argsort(D_residue)[::-1][:top_k_r].astype(int)
+    top_edge_indices = np.argsort(D_edge)[::-1][:top_k_e].astype(int) if top_k_e > 0 else np.zeros((0,), dtype=int)
+    top_edges = [edges[int(eidx)] for eidx in top_edge_indices.tolist()]
+
+    def _weighted_mean(vals: np.ndarray, weights: np.ndarray) -> float:
+        v = np.asarray(vals, dtype=float)
+        w = np.asarray(weights, dtype=float)
+        good = np.isfinite(v) & np.isfinite(w) & (w > 0)
+        if not np.any(good):
+            return float(np.nan)
+        ws = float(np.sum(w[good]))
+        if ws <= 0:
+            return float(np.nan)
+        return float(np.sum(v[good] * w[good]) / ws)
+
+    sample_labels: list[str] = []
+    sample_types: list[str] = []
+    js_node_a = np.zeros((len(merged), N), dtype=float)
+    js_node_b = np.zeros((len(merged), N), dtype=float)
+    js_edge_a = np.zeros((len(merged), top_k_e), dtype=float)
+    js_edge_b = np.zeros((len(merged), top_k_e), dtype=float)
+    js_node_weighted_a = np.zeros((len(merged),), dtype=float)
+    js_node_weighted_b = np.zeros((len(merged),), dtype=float)
+    js_edge_weighted_a = np.zeros((len(merged),), dtype=float)
+    js_edge_weighted_b = np.zeros((len(merged),), dtype=float)
+    js_mixed_a = np.zeros((len(merged),), dtype=float)
+    js_mixed_b = np.zeros((len(merged),), dtype=float)
+
+    top_edge_weights = np.asarray([float(D_edge[int(eidx)]) for eidx in top_edge_indices.tolist()], dtype=float)
+    for row, sid in enumerate(merged):
+        entry = sample_by_id.get(sid)
+        if not entry:
+            raise FileNotFoundError(f"Sample not found on this cluster: {sid}")
+        sample_labels.append(str(entry.get("name") or sid))
+        sample_types.append(str(entry.get("type") or "sample"))
+        X = _load_labels(entry)
+        if X.ndim != 2 or X.size == 0:
+            raise ValueError(f"Sample labels are empty: {sid}")
+        if int(X.shape[1]) != N:
+            raise ValueError(f"Sample labels do not match model size for {sid}: got N={X.shape[1]}, expected {N}")
+        if np.min(X) < 0:
+            raise ValueError(
+                f"Sample contains negative labels for {sid}. "
+                "Use md_label_mode='assigned' or remap unassigned labels before analysis."
+            )
+        for i in range(N):
+            Ki = int(K_list[i])
+            if Ki <= 0:
+                continue
+            col = X[:, i]
+            mx = int(np.max(col)) if col.size else -1
+            if mx >= Ki:
+                raise ValueError(
+                    f"Sample labels out of range for {sid} at residue {i}: max={mx}, expected in [0,{Ki-1}]"
+                )
+
+        p_s = marginals(X, K_list)
+        for i in range(N):
+            js_node_a[row, i] = float(js_divergence(np.asarray(p_s[i], dtype=float), np.asarray(p_node_a[i], dtype=float)))
+            js_node_b[row, i] = float(js_divergence(np.asarray(p_s[i], dtype=float), np.asarray(p_node_b[i], dtype=float)))
+        js_node_weighted_a[row] = _weighted_mean(js_node_a[row], D_residue)
+        js_node_weighted_b[row] = _weighted_mean(js_node_b[row], D_residue)
+
+        if top_k_e > 0:
+            p2_s_top = pairwise_joints_on_edges(X, K_list, top_edges)
+            for col, e in enumerate(top_edges):
+                eidx = int(top_edge_indices[col])
+                js_edge_a[row, col] = float(
+                    js_divergence(np.asarray(p2_s_top[e], dtype=float).ravel(), np.asarray(p_edge_a[eidx], dtype=float).ravel())
+                )
+                js_edge_b[row, col] = float(
+                    js_divergence(np.asarray(p2_s_top[e], dtype=float).ravel(), np.asarray(p_edge_b[eidx], dtype=float).ravel())
+                )
+            js_edge_weighted_a[row] = _weighted_mean(js_edge_a[row], top_edge_weights)
+            js_edge_weighted_b[row] = _weighted_mean(js_edge_b[row], top_edge_weights)
+        else:
+            js_edge_weighted_a[row] = js_node_weighted_a[row]
+            js_edge_weighted_b[row] = js_node_weighted_b[row]
+
+        a_node = float(js_node_weighted_a[row])
+        b_node = float(js_node_weighted_b[row])
+        a_edge = float(js_edge_weighted_a[row])
+        b_edge = float(js_edge_weighted_b[row])
+        js_mixed_a[row] = (1.0 - node_edge_alpha) * a_node + node_edge_alpha * a_edge
+        js_mixed_b[row] = (1.0 - node_edge_alpha) * b_node + node_edge_alpha * b_edge
+
+    p_node_ref_a_padded = np.zeros((N, K_max), dtype=float)
+    p_node_ref_b_padded = np.zeros((N, K_max), dtype=float)
+    for i in range(N):
+        Ki = int(K_list[i])
+        p_node_ref_a_padded[i, :Ki] = np.asarray(p_node_a[i], dtype=float)
+        p_node_ref_b_padded[i, :Ki] = np.asarray(p_node_b[i], dtype=float)
+
+    np.savez_compressed(
+        npz_path,
+        edges=np.asarray(edges, dtype=int),
+        D_residue=np.asarray(D_residue, dtype=float),
+        D_edge=np.asarray(D_edge, dtype=float),
+        top_residue_indices=np.asarray(top_residue_indices, dtype=int),
+        top_edge_indices=np.asarray(top_edge_indices, dtype=int),
+        sample_ids=np.asarray(merged, dtype=str),
+        sample_labels=np.asarray(sample_labels, dtype=str),
+        sample_types=np.asarray(sample_types, dtype=str),
+        K_list=np.asarray(K_list, dtype=int),
+        ref_sample_ids_a=np.asarray(ref_ids_a, dtype=str),
+        ref_sample_ids_b=np.asarray(ref_ids_b, dtype=str),
+        p_node_ref_a=np.asarray(p_node_ref_a_padded, dtype=float),
+        p_node_ref_b=np.asarray(p_node_ref_b_padded, dtype=float),
+        js_node_a=np.asarray(js_node_a, dtype=float),
+        js_node_b=np.asarray(js_node_b, dtype=float),
+        js_edge_a=np.asarray(js_edge_a, dtype=float),
+        js_edge_b=np.asarray(js_edge_b, dtype=float),
+        js_node_weighted_a=np.asarray(js_node_weighted_a, dtype=float),
+        js_node_weighted_b=np.asarray(js_node_weighted_b, dtype=float),
+        js_edge_weighted_a=np.asarray(js_edge_weighted_a, dtype=float),
+        js_edge_weighted_b=np.asarray(js_edge_weighted_b, dtype=float),
+        js_mixed_a=np.asarray(js_mixed_a, dtype=float),
+        js_mixed_b=np.asarray(js_mixed_b, dtype=float),
+        node_edge_alpha=np.asarray([float(node_edge_alpha)], dtype=float),
+    )
+
+    now = _utc_now()
+    created_at = now
+    if meta_path.exists():
+        try:
+            old = json.loads(meta_path.read_text(encoding="utf-8"))
+            created_at = str(old.get("created_at") or created_at)
+        except Exception:
+            created_at = now
+
+    meta = {
+        "analysis_id": analysis_id,
+        "analysis_type": "delta_js",
+        "created_at": created_at,
+        "updated_at": now,
+        "project_id": project_id,
+        "system_id": system_id,
+        "cluster_id": cluster_id,
+        "model_a_id": model_a_id,
+        "model_a_name": model_a_name,
+        "model_a_path": model_a_path,
+        "model_b_id": model_b_id,
+        "model_b_name": model_b_name,
+        "model_b_path": model_b_path,
+        "edge_source": edge_source,
+        "edge_mode": edge_mode or edge_source,
+        "contact_state_ids": [str(s).strip() for s in (contact_state_ids or []) if str(s).strip()],
+        "contact_pdbs": [str(p).strip() for p in (contact_pdbs or []) if str(p).strip()],
+        "contact_cutoff": float(contact_cutoff) if str(edge_mode).lower() == "contact" else None,
+        "contact_atom_mode": str(contact_atom_mode).upper() if str(edge_mode).lower() == "contact" else None,
+        "md_label_mode": md_label_mode,
+        "drop_invalid": bool(drop_invalid),
+        "top_k_residues": int(top_k_r),
+        "top_k_edges": int(top_k_e),
+        "ranking_method": ranking_method,
+        "node_edge_alpha": float(node_edge_alpha),
+        "reference_sample_ids_a": list(ref_ids_a),
+        "reference_sample_ids_b": list(ref_ids_b),
         "paths": {"analysis_npz": str(npz_path.relative_to(system_dir))},
         "summary": {
             "n_residues": int(N),

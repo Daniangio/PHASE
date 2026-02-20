@@ -8,6 +8,7 @@ from backend.api.v1.schemas import (
     GibbsRelaxationJobRequest,
     DeltaEvalJobRequest,
     DeltaCommitmentJobRequest,
+    DeltaJsJobRequest,
     DeltaTransitionJobRequest,
     LambdaSweepJobRequest,
     MdSamplesRefreshJobRequest,
@@ -21,6 +22,7 @@ from backend.tasks import (
     run_analysis_job,
     run_delta_eval_job,
     run_delta_commitment_job,
+    run_delta_js_job,
     run_delta_transition_job,
     run_lambda_sweep_job,
     run_md_samples_refresh_job,
@@ -582,6 +584,20 @@ async def submit_delta_commitment_job(
     if not payload.sample_ids or not isinstance(payload.sample_ids, list):
         raise HTTPException(status_code=400, detail="sample_ids must be a non-empty list.")
 
+    model_a_id = str(payload.model_a_id or "").strip()
+    model_b_id = str(payload.model_b_id or "").strip()
+    using_models = bool(model_a_id or model_b_id)
+    if using_models and (not model_a_id or not model_b_id):
+        raise HTTPException(status_code=400, detail="Provide both model_a_id and model_b_id, or neither.")
+    if using_models and model_a_id == model_b_id:
+        raise HTTPException(status_code=400, detail="model_a_id and model_b_id must be different.")
+    if not using_models:
+        if not payload.reference_sample_ids_a or not payload.reference_sample_ids_b:
+            raise HTTPException(
+                status_code=400,
+                detail="reference_sample_ids_a and reference_sample_ids_b are required when no model pair is provided.",
+            )
+
     if payload.top_k_residues is not None and int(payload.top_k_residues) < 1:
         raise HTTPException(status_code=400, detail="top_k_residues must be >= 1.")
     if payload.top_k_edges is not None and int(payload.top_k_edges) < 1:
@@ -604,6 +620,95 @@ async def submit_delta_commitment_job(
             job_timeout="2h",
             result_ttl=86400,
             job_id=f"delta-commitment-{job_uuid}",
+        )
+        return {"status": "queued", "job_id": job.id, "analysis_uuid": job_uuid}
+    except Exception as exc:  # pragma: no cover
+        raise HTTPException(status_code=500, detail=f"Job submission failed: {exc}") from exc
+
+
+@router.post(
+    "/submit/delta_js",
+    summary="Submit an incremental delta-JS A/B/Other analysis (model-pair optional).",
+)
+async def submit_delta_js_job(
+    payload: DeltaJsJobRequest,
+    task_queue: Any = Depends(get_queue),
+):
+    try:
+        system_meta = project_store.get_system(payload.project_id, payload.system_id)
+    except FileNotFoundError:
+        raise HTTPException(
+            status_code=404,
+            detail=f"System '{payload.system_id}' not found in project '{payload.project_id}'.",
+        )
+
+    get_cluster_entry(system_meta, payload.cluster_id)
+
+    md_label_mode = (payload.md_label_mode or "assigned").lower()
+    if md_label_mode not in {"assigned", "halo"}:
+        raise HTTPException(status_code=400, detail="md_label_mode must be 'assigned' or 'halo'.")
+
+    if not payload.sample_ids or not isinstance(payload.sample_ids, list):
+        raise HTTPException(status_code=400, detail="sample_ids must be a non-empty list.")
+
+    model_a_id = str(payload.model_a_id or "").strip()
+    model_b_id = str(payload.model_b_id or "").strip()
+    using_models = bool(model_a_id or model_b_id)
+    if using_models and (not model_a_id or not model_b_id):
+        raise HTTPException(status_code=400, detail="Provide both model_a_id and model_b_id, or neither.")
+    if using_models and model_a_id == model_b_id:
+        raise HTTPException(status_code=400, detail="model_a_id and model_b_id must be different.")
+
+    if payload.top_k_residues is not None and int(payload.top_k_residues) < 1:
+        raise HTTPException(status_code=400, detail="top_k_residues must be >= 1.")
+    if payload.top_k_edges is not None and int(payload.top_k_edges) < 1:
+        raise HTTPException(status_code=400, detail="top_k_edges must be >= 1.")
+    if payload.node_edge_alpha is not None:
+        alpha = float(payload.node_edge_alpha)
+        if not (0.0 <= alpha <= 1.0):
+            raise HTTPException(status_code=400, detail="node_edge_alpha must be in [0,1].")
+
+    edge_mode = str(payload.edge_mode or "").strip().lower()
+    if edge_mode and edge_mode not in {"cluster", "all_vs_all", "contact"}:
+        raise HTTPException(status_code=400, detail="edge_mode must be one of: cluster, all_vs_all, contact.")
+    if not using_models:
+        if not edge_mode:
+            raise HTTPException(status_code=400, detail="edge_mode is required when no model pair is provided.")
+        if not payload.reference_sample_ids_a or not payload.reference_sample_ids_b:
+            raise HTTPException(
+                status_code=400,
+                detail="reference_sample_ids_a and reference_sample_ids_b are required when no model pair is provided.",
+            )
+        if edge_mode == "contact":
+            has_states = bool(payload.contact_state_ids)
+            has_pdbs = bool(payload.contact_pdbs)
+            if not (has_states or has_pdbs):
+                raise HTTPException(
+                    status_code=400,
+                    detail="edge_mode=contact requires contact_state_ids and/or contact_pdbs.",
+                )
+            if payload.contact_cutoff is not None and float(payload.contact_cutoff) <= 0:
+                raise HTTPException(status_code=400, detail="contact_cutoff must be > 0.")
+            if payload.contact_atom_mode is not None:
+                mode = str(payload.contact_atom_mode).upper()
+                if mode not in {"CA", "CM"}:
+                    raise HTTPException(status_code=400, detail="contact_atom_mode must be 'CA' or 'CM'.")
+
+    params = payload.dict(exclude_none=True, exclude={"project_id", "system_id", "cluster_id"})
+    dataset_ref = {
+        "project_id": payload.project_id,
+        "system_id": payload.system_id,
+        "cluster_id": payload.cluster_id,
+    }
+
+    try:
+        job_uuid = str(uuid.uuid4())
+        job = task_queue.enqueue(
+            run_delta_js_job,
+            args=(job_uuid, dataset_ref, params),
+            job_timeout="2h",
+            result_ttl=86400,
+            job_id=f"delta-js-{job_uuid}",
         )
         return {"status": "queued", "job_id": job.id, "analysis_uuid": job_uuid}
     except Exception as exc:  # pragma: no cover

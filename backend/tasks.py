@@ -25,6 +25,7 @@ from phase.potts.analysis_run import (
     analyze_cluster_samples,
     compute_delta_transition_analysis,
     upsert_delta_commitment_analysis,
+    upsert_delta_js_analysis,
     compute_lambda_sweep_analysis,
     compute_md_delta_preference,
     run_gibbs_relaxation_analysis,
@@ -2129,6 +2130,187 @@ def run_delta_commitment_job(
         write_result_to_disk(sanitized_payload)
 
     save_progress("Delta commitment analysis completed", 100)
+    return sanitized_payload
+
+
+def run_delta_js_job(
+    job_uuid: str,
+    dataset_ref: Dict[str, str],
+    params: Dict[str, Any],
+):
+    """
+    Incremental delta-JS analysis for a fixed (model A, model B) pair.
+
+    Stores A-vs-B-vs-Other JS distances (node/edge) and weighted trajectory-level distances.
+    Potts models are optional (cluster topology mode).
+    """
+    job = get_current_job()
+    start_time = datetime.utcnow()
+    rq_job_id = job.id if job else f"delta-js-{job_uuid}"
+
+    project_id = dataset_ref.get("project_id")
+    system_id = dataset_ref.get("system_id")
+    cluster_id = dataset_ref.get("cluster_id")
+    if not project_id or not system_id or not cluster_id:
+        raise ValueError("delta_js requires project_id/system_id/cluster_id.")
+
+    results_dirs = project_store.ensure_results_directories(project_id, system_id)
+    result_filepath = results_dirs["jobs_dir"] / f"{job_uuid}.json"
+
+    result_payload: Dict[str, Any] = {
+        "job_id": job_uuid,
+        "rq_job_id": rq_job_id,
+        "analysis_type": "delta_js",
+        "status": "started",
+        "created_at": start_time.isoformat(),
+        "params": params,
+        "results": None,
+        "system_reference": {
+            "project_id": project_id,
+            "system_id": system_id,
+            "cluster_id": cluster_id,
+        },
+        "error": None,
+        "completed_at": None,
+    }
+
+    def save_progress(status_msg: str, progress: int):
+        if job:
+            job.meta["status"] = status_msg
+            job.meta["progress"] = progress
+            job.save_meta()
+        print(f"[DeltaJS {job_uuid}] {status_msg}")
+
+    def write_result_to_disk(payload: Dict[str, Any]):
+        try:
+            with open(result_filepath, "w") as f:
+                json.dump(payload, f, indent=2)
+        except Exception as e:
+            print(f"CRITICAL: Failed to save result file {result_filepath}: {e}")
+            payload["status"] = "failed"
+            payload["error"] = f"Failed to save result file: {e}"
+
+    try:
+        save_progress("Initializing...", 0)
+        write_result_to_disk(result_payload)
+
+        model_a_id = str(params.get("model_a_id") or "").strip()
+        model_b_id = str(params.get("model_b_id") or "").strip()
+        using_models = bool(model_a_id or model_b_id)
+        if using_models and (not model_a_id or not model_b_id):
+            raise ValueError("Provide both model_a_id and model_b_id, or neither.")
+        if using_models and model_a_id == model_b_id:
+            raise ValueError("Select two different models.")
+
+        sample_ids = params.get("sample_ids")
+        if isinstance(sample_ids, str):
+            sample_ids = [s.strip() for s in sample_ids.split(",") if s.strip()]
+        if not isinstance(sample_ids, list) or not sample_ids:
+            raise ValueError("delta_js requires non-empty sample_ids.")
+
+        ref_a = params.get("reference_sample_ids_a")
+        if isinstance(ref_a, str):
+            ref_a = [s.strip() for s in ref_a.split(",") if s.strip()]
+        if ref_a is not None and not isinstance(ref_a, list):
+            raise ValueError("reference_sample_ids_a must be a list when provided.")
+
+        ref_b = params.get("reference_sample_ids_b")
+        if isinstance(ref_b, str):
+            ref_b = [s.strip() for s in ref_b.split(",") if s.strip()]
+        if ref_b is not None and not isinstance(ref_b, list):
+            raise ValueError("reference_sample_ids_b must be a list when provided.")
+        if not using_models:
+            if not ref_a or not ref_b:
+                raise ValueError(
+                    "reference_sample_ids_a and reference_sample_ids_b are required when no model pair is provided."
+                )
+
+        md_label_mode = (params.get("md_label_mode") or "assigned").lower()
+        keep_invalid = bool(params.get("keep_invalid", False))
+        top_k_residues = int(params.get("top_k_residues", 20))
+        top_k_edges = int(params.get("top_k_edges", 30))
+        ranking_method = str(params.get("ranking_method") or "js_ab").strip()
+        node_edge_alpha = float(params.get("node_edge_alpha", 0.5))
+        edge_mode = str(params.get("edge_mode") or "").strip().lower()
+        if edge_mode and edge_mode not in {"cluster", "all_vs_all", "contact"}:
+            raise ValueError("edge_mode must be one of: cluster, all_vs_all, contact.")
+        if not using_models and not edge_mode:
+            raise ValueError("edge_mode is required when no model pair is provided.")
+
+        contact_state_ids = params.get("contact_state_ids")
+        if isinstance(contact_state_ids, str):
+            contact_state_ids = [s.strip() for s in contact_state_ids.split(",") if s.strip()]
+        if contact_state_ids is not None and not isinstance(contact_state_ids, list):
+            raise ValueError("contact_state_ids must be a list when provided.")
+
+        contact_pdbs = params.get("contact_pdbs")
+        if isinstance(contact_pdbs, str):
+            contact_pdbs = [s.strip() for s in contact_pdbs.split(",") if s.strip()]
+        if contact_pdbs is not None and not isinstance(contact_pdbs, list):
+            raise ValueError("contact_pdbs must be a list when provided.")
+
+        contact_cutoff = float(params.get("contact_cutoff", 10.0))
+        contact_atom_mode = str(params.get("contact_atom_mode") or "CA").strip().upper()
+        if edge_mode == "contact":
+            if not (contact_state_ids or contact_pdbs):
+                raise ValueError("edge_mode=contact requires contact_state_ids and/or contact_pdbs.")
+            if not np.isfinite(contact_cutoff) or contact_cutoff <= 0:
+                raise ValueError("contact_cutoff must be > 0.")
+            if contact_atom_mode not in {"CA", "CM"}:
+                raise ValueError("contact_atom_mode must be 'CA' or 'CM'.")
+
+        save_progress("Computing JS A/B/Other store...", 20)
+        out = upsert_delta_js_analysis(
+            project_id=project_id,
+            system_id=system_id,
+            cluster_id=cluster_id,
+            model_a_ref=(model_a_id or None),
+            model_b_ref=(model_b_id or None),
+            sample_ids=sample_ids,
+            reference_sample_ids_a=ref_a,
+            reference_sample_ids_b=ref_b,
+            md_label_mode=md_label_mode,
+            drop_invalid=not keep_invalid,
+            top_k_residues=top_k_residues,
+            top_k_edges=top_k_edges,
+            ranking_method=ranking_method,
+            node_edge_alpha=node_edge_alpha,
+            edge_mode=(edge_mode or None),
+            contact_state_ids=contact_state_ids,
+            contact_pdbs=contact_pdbs,
+            contact_cutoff=contact_cutoff,
+            contact_atom_mode=contact_atom_mode,
+        )
+
+        meta = out.get("metadata") or {}
+        analysis_id = str(meta.get("analysis_id") or "")
+        analysis_dir = Path(str(out.get("analysis_dir") or "")).resolve()
+        npz_path = Path(str(out.get("analysis_npz") or "")).resolve()
+        if not analysis_id or not analysis_dir.exists() or not npz_path.exists():
+            raise RuntimeError("delta_js did not write analysis artifacts as expected.")
+
+        result_payload["status"] = "finished"
+        result_payload["results"] = {
+            "analysis_type": "delta_js",
+            "analysis_id": analysis_id,
+            "analysis_dir": _relativize_path(analysis_dir),
+            "analysis_npz": _relativize_path(npz_path),
+        }
+
+    except Exception as e:
+        print(f"[DeltaJS {job_uuid}] FAILED: {e}")
+        traceback.print_exc()
+        result_payload["status"] = "failed"
+        result_payload["error"] = str(e)
+        raise e
+
+    finally:
+        save_progress("Saving final result", 95)
+        result_payload["completed_at"] = datetime.utcnow().isoformat()
+        sanitized_payload = _convert_nan_to_none(result_payload)
+        write_result_to_disk(sanitized_payload)
+
+    save_progress("Delta JS analysis completed", 100)
     return sanitized_payload
 
 

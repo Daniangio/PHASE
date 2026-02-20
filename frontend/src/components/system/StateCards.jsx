@@ -14,6 +14,7 @@ export function StateCard({
   const [file, setFile] = useState(null);
   const [sliceSpec, setSliceSpec] = useState(state?.slice_spec || '');
   const [residueSelection, setResidueSelection] = useState(state?.residue_selection || '');
+  const [residShift, setResidShift] = useState(String(state?.resid_shift ?? 0));
 
   const descriptorLabel = state?.descriptor_file ? 'Ready' : 'Not built';
   const trajectoryLabel = state?.source_traj || '—';
@@ -47,6 +48,10 @@ export function StateCard({
         <div className="flex justify-between">
           <dt>Slice</dt>
           <dd>{state?.slice_spec || `::${state?.stride ?? 1}`}</dd>
+        </div>
+        <div className="flex justify-between">
+          <dt>Resid shift</dt>
+          <dd>{state?.resid_shift ?? 0}</dd>
         </div>
         <div className="flex justify-between">
           <dt>Descriptors</dt>
@@ -100,8 +105,21 @@ export function StateCard({
           />
           <p className="text-[11px] text-gray-500 mt-1">Applied as: protein and (&lt;filter&gt;).</p>
         </div>
+        <div>
+          <label className="block text-sm text-gray-300 mb-1">Residue shift offset</label>
+          <input
+            type="number"
+            step="1"
+            value={residShift}
+            onChange={(e) => setResidShift(e.target.value)}
+            className="w-full bg-gray-800 border border-gray-700 rounded-md px-2 py-1 text-white"
+          />
+          <p className="text-[11px] text-gray-500 mt-1">
+            Applied to saved residue keys (e.g. -2 maps <span className="font-mono">res_4</span> to <span className="font-mono">res_2</span>).
+          </p>
+        </div>
         <button
-          onClick={() => onUpload(state.state_id, file, sliceSpec, residueSelection)}
+          onClick={() => onUpload(state.state_id, file, sliceSpec, residueSelection, residShift)}
           disabled={uploading || !file}
           className="w-full bg-cyan-600 hover:bg-cyan-500 text-white font-semibold py-2 rounded-md transition-colors disabled:opacity-50"
         >

@@ -95,6 +95,12 @@ export default function DeltaEvalPage() {
   const [jobError, setJobError] = useState(null);
 
   const [helpOpen, setHelpOpen] = useState(false);
+  const samplingSuffix = useMemo(() => {
+    const params = new URLSearchParams();
+    if (selectedClusterId) params.set('cluster_id', selectedClusterId);
+    const s = params.toString();
+    return s ? `?${s}` : '';
+  }, [selectedClusterId]);
 
   useEffect(() => {
     const loadSystem = async () => {
@@ -859,10 +865,17 @@ export default function DeltaEvalPage() {
           </button>
           <button
             type="button"
-            onClick={() => navigate(`/projects/${projectId}/systems/${systemId}/sampling/delta_commitment_3d`)}
+            onClick={() => navigate(`/projects/${projectId}/systems/${systemId}/sampling/delta_commitment_3d${samplingSuffix}`)}
             className="text-xs px-3 py-2 rounded-md border border-gray-700 text-gray-200 hover:border-gray-500"
           >
             3D Commitment View
+          </button>
+          <button
+            type="button"
+            onClick={() => navigate(`/projects/${projectId}/systems/${systemId}/sampling/delta_js${samplingSuffix}`)}
+            className="text-xs px-3 py-2 rounded-md border border-gray-700 text-gray-200 hover:border-gray-500"
+          >
+            Delta JS View
           </button>
         </div>
       </div>

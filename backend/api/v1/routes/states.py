@@ -26,6 +26,25 @@ from backend.services.project_store import DescriptorState
 router = APIRouter()
 
 
+def _unlink_if_inside_system(project_id: str, system_id: str, rel_path: Optional[str]) -> None:
+    """Delete file only if it resolves under the system directory."""
+    if not rel_path:
+        return
+    try:
+        abs_path = project_store.resolve_path(project_id, system_id, rel_path).resolve()
+    except Exception:
+        return
+    system_dir = project_store.ensure_directories(project_id, system_id)["system_dir"].resolve()
+    try:
+        abs_path.relative_to(system_dir)
+    except ValueError:
+        return
+    try:
+        abs_path.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
 @router.get(
     "/projects/{project_id}/systems/{system_id}/structures/{state_id}",
     summary="Download the stored PDB file for a system state",
@@ -91,6 +110,7 @@ async def add_system_state(
     name: str = Form(...),
     pdb: Optional[UploadFile] = File(None),
     source_state_id: Optional[str] = Form(None),
+    resid_shift: Optional[int] = Form(None),
 ):
     try:
         system_meta = project_store.get_system(project_id, system_id)
@@ -112,6 +132,7 @@ async def add_system_state(
     state_id = str(uuid.uuid4())
     pdb_path = structures_dir / f"{state_id}.pdb"
 
+    shift_value = int(resid_shift or 0)
     if pdb:
         await stream_upload(pdb, pdb_path)
     else:
@@ -122,6 +143,8 @@ async def add_system_state(
         if not source_path.exists():
             raise HTTPException(status_code=404, detail="Source PDB file missing on disk.")
         shutil.copy(source_path, pdb_path)
+        if resid_shift is None:
+            shift_value = int(getattr(source_state, "resid_shift", 0) or 0)
 
     register_state_from_pdb(
         project_store,
@@ -131,6 +154,7 @@ async def add_system_state(
         name=state_name,
         pdb_path=pdb_path,
         stride=1,
+        resid_shift=shift_value,
     )
     return serialize_system(system_meta)
 
@@ -212,6 +236,12 @@ async def rescan_states_from_disk(project_id: str, system_id: str):
             if isinstance(selection, str) and selection.strip() and not state_meta.residue_selection:
                 state_meta.residue_selection = selection.strip()
                 changed = True
+            resid_shift = payload.get("resid_shift")
+            if isinstance(resid_shift, (int, float)):
+                shift_val = int(resid_shift)
+                if state_meta.resid_shift != shift_val:
+                    state_meta.resid_shift = shift_val
+                    changed = True
 
         if not state_meta.trajectory_file:
             traj_candidates = sorted(p for p in trajectories_dir.glob(f"{state_id}.*") if p.is_file())
@@ -275,6 +305,7 @@ async def upload_state_trajectory(
     stride: int = Form(1),
     slice_spec: str = Form(None),
     residue_selection: str = Form(None),
+    resid_shift: Optional[int] = Form(None),
 ):
     try:
         system_meta = project_store.get_system(project_id, system_id)
@@ -300,28 +331,17 @@ async def upload_state_trajectory(
     await stream_upload(trajectory, traj_path)
 
     if state_meta.trajectory_file:
-        old_traj = project_store.resolve_path(project_id, system_id, state_meta.trajectory_file)
-        try:
-            old_traj.unlink(missing_ok=True)
-        except Exception:
-            pass
+        _unlink_if_inside_system(project_id, system_id, state_meta.trajectory_file)
         state_meta.trajectory_file = None
     state_meta.source_traj = trajectory.filename
     state_meta.stride = stride_val
     state_meta.slice_spec = slice_spec
+    state_meta.resid_shift = int(state_meta.resid_shift if resid_shift is None else resid_shift)
     state_meta.residue_selection = residue_selection.strip() if residue_selection else None
     if state_meta.descriptor_file:
-        old_descriptor = project_store.resolve_path(project_id, system_id, state_meta.descriptor_file)
-        try:
-            old_descriptor.unlink(missing_ok=True)
-        except Exception:
-            pass
+        _unlink_if_inside_system(project_id, system_id, state_meta.descriptor_file)
     if state_meta.descriptor_metadata_file:
-        old_meta = project_store.resolve_path(project_id, system_id, state_meta.descriptor_metadata_file)
-        try:
-            old_meta.unlink(missing_ok=True)
-        except Exception:
-            pass
+        _unlink_if_inside_system(project_id, system_id, state_meta.descriptor_metadata_file)
     state_meta.descriptor_file = None
     state_meta.descriptor_metadata_file = None
     state_meta.residue_keys = []
@@ -339,6 +359,7 @@ async def upload_state_trajectory(
             system_meta,
             state_meta,
             residue_filter=residue_selection,
+            resid_shift=state_meta.resid_shift,
             traj_path_override=traj_path,
         )
     except Exception as exc:
@@ -368,26 +389,14 @@ async def delete_state_trajectory(project_id: str, system_id: str, state_id: str
     state_meta = get_state_or_404(system_meta, state_id)
 
     if state_meta.descriptor_file:
-        abs_path = project_store.resolve_path(project_id, system_id, state_meta.descriptor_file)
-        try:
-            abs_path.unlink(missing_ok=True)
-        except Exception:
-            pass
+        _unlink_if_inside_system(project_id, system_id, state_meta.descriptor_file)
         state_meta.descriptor_file = None
         state_meta.n_frames = 0
     if state_meta.descriptor_metadata_file:
-        meta_path = project_store.resolve_path(project_id, system_id, state_meta.descriptor_metadata_file)
-        try:
-            meta_path.unlink(missing_ok=True)
-        except Exception:
-            pass
+        _unlink_if_inside_system(project_id, system_id, state_meta.descriptor_metadata_file)
         state_meta.descriptor_metadata_file = None
     if state_meta.trajectory_file:
-        traj_path = project_store.resolve_path(project_id, system_id, state_meta.trajectory_file)
-        try:
-            traj_path.unlink(missing_ok=True)
-        except Exception:
-            pass
+        _unlink_if_inside_system(project_id, system_id, state_meta.trajectory_file)
         state_meta.trajectory_file = None
         state_meta.source_traj = None
 
@@ -416,14 +425,7 @@ async def delete_state(project_id: str, system_id: str, state_id: str):
     state_meta = get_state_or_404(system_meta, state_id)
 
     for field in ("descriptor_file", "descriptor_metadata_file", "trajectory_file", "pdb_file"):
-        rel_path = getattr(state_meta, field, None)
-        if not rel_path:
-            continue
-        abs_path = project_store.resolve_path(project_id, system_id, rel_path)
-        try:
-            abs_path.unlink(missing_ok=True)
-        except Exception:
-            pass
+        _unlink_if_inside_system(project_id, system_id, getattr(state_meta, field, None))
 
     system_meta.states.pop(state_id, None)
     refresh_system_metadata(system_meta)

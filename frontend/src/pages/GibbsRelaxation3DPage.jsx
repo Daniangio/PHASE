@@ -94,6 +94,15 @@ function Gibbs3DPane({
   const [viewerStatus, setViewerStatus] = useState('initializing');
   const [structureLoading, setStructureLoading] = useState(false);
   const [loadedStructureStateId, setLoadedStructureStateId] = useState('');
+  const loadedStateResidShift = useMemo(() => {
+    if (!loadedStructureStateId) return 0;
+    const st =
+      stateOptions.find((s) => String(s?.state_id || '') === String(loadedStructureStateId)) ||
+      stateOptions.find((s) => String(s?.id || '') === String(loadedStructureStateId)) ||
+      null;
+    const raw = Number(st?.resid_shift);
+    return Number.isFinite(raw) ? Math.trunc(raw) : 0;
+  }, [stateOptions, loadedStructureStateId]);
 
   const hoverRef = useRef({
     residueIdMode: 'auth',
@@ -290,7 +299,10 @@ function Gibbs3DPane({
     for (let i = 0; i < n; i += 1) {
       const v = Number(colorMetric[i]);
       const ff = Number(firstFlipByStat[i]);
-      const auth = parseResidueId(residueLabels[i]);
+      const canonicalAuth = parseResidueId(residueLabels[i]);
+      const auth = Number.isFinite(canonicalAuth)
+        ? Number(canonicalAuth) - Number(loadedStateResidShift || 0)
+        : null;
       if (auth !== null) {
         residueIdsAuth.push(auth);
         valuesAuth.push(v);
@@ -309,7 +321,7 @@ function Gibbs3DPane({
       valuesLabel,
       firstLabel,
     };
-  }, [residueLabels, colorMetric, firstFlipByStat, dataKind]);
+  }, [residueLabels, colorMetric, firstFlipByStat, dataKind, loadedStateResidShift]);
 
   useEffect(() => {
     const authToData = new Map();

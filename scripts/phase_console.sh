@@ -221,7 +221,7 @@ cluster_menu() {
     echo "System: ${OFFLINE_SYSTEM_NAME:-$OFFLINE_SYSTEM_ID} (${OFFLINE_SYSTEM_ID})"
     echo "Cluster: ${OFFLINE_CLUSTER_NAME:-$OFFLINE_CLUSTER_ID} (${OFFLINE_CLUSTER_ID})"
     echo ""
-    ACTION_LINES=$'list-models|List Potts models\nlist-samples|List sampling runs\nfit|Fit Potts model\nfit-delta|Fit delta Potts model\nlambda-model|Create lambda model\nsample|Run sampling\nlambda-sweep|Lambda sweep sampling\ngibbs-relax|Gibbs relaxation analysis\npatch-cluster|Patch cluster residues\nrefresh-md|Recompute MD samples\nassign-md|Assign selected macro states\nback|Back to systems'
+    ACTION_LINES=$'list-models|List Potts models\nlist-samples|List sampling runs\nfit|Fit Potts model\nfit-delta|Fit delta Potts model\nlambda-model|Create lambda model\nsample|Run sampling\nlambda-sweep|Lambda sweep sampling\ngibbs-relax|Gibbs relaxation analysis\ndelta-js|Delta JS analysis\npatch-cluster|Patch cluster residues\nrefresh-md|Recompute MD samples\nassign-md|Assign selected macro states\nback|Back to systems'
     ACTION_ROW="$(offline_choose_one "Cluster actions:" "$ACTION_LINES")"
     ACTION="$(printf "%s" "$ACTION_ROW" | awk -F'|' '{print $1}')"
     case "$ACTION" in
@@ -294,6 +294,15 @@ cluster_menu() {
           --cluster-id "$OFFLINE_CLUSTER_ID"
         pause
         ;;
+      delta-js)
+        ensure_env || return 0
+        "${ROOT_DIR}/scripts/potts_delta_js.sh" \
+          --root "$OFFLINE_ROOT" \
+          --project-id "$OFFLINE_PROJECT_ID" \
+          --system-id "$OFFLINE_SYSTEM_ID" \
+          --cluster-id "$OFFLINE_CLUSTER_ID"
+        pause
+        ;;
       patch-cluster)
         ensure_env || return 0
         "${ROOT_DIR}/scripts/cluster_patch.sh" \
@@ -357,7 +366,7 @@ state_menu() {
     STATE_LINES="$(_offline_list list-states --project-id "$OFFLINE_PROJECT_ID" --system-id "$OFFLINE_SYSTEM_ID" || true)"
     print_state_summary "$STATE_LINES"
     echo ""
-    ACTION_LINES=$'open-cluster|Open cluster\nadd-state|Add state (PDB+trajectory)\nlist-clusters|List clusters\ncluster|Run clustering\nback|Back to systems'
+    ACTION_LINES=$'open-cluster|Open cluster\nadd-state|Add state (PDB+trajectory)\ndelete-state|Delete state\nlist-clusters|List clusters\ncluster|Run clustering\nback|Back to systems'
     ACTION_ROW="$(offline_choose_one "System actions:" "$ACTION_LINES")"
     ACTION="$(printf "%s" "$ACTION_ROW" | awk -F'|' '{print $1}')"
     case "$ACTION" in
@@ -379,6 +388,7 @@ state_menu() {
         PDB_PATH="$(prompt "PDB path" "")"
         TRAJ_PATH="$(prompt "Trajectory path" "")"
         SLICE_SPEC="$(prompt "Frame slice start:stop:step (blank = full; number = step)" "")"
+        RESID_SHIFT="$(prompt "Residue shift offset (integer)" "0")"
         RES_SEL="$(prompt "Residue selection (optional)" "")"
         COPY_TRAJ="false"
         if prompt_bool "Copy trajectory into system folder? (y/N)" "N"; then
@@ -401,8 +411,33 @@ state_menu() {
         if [ -n "$RES_SEL" ]; then
           CMD+=(--residue-selection "$RES_SEL")
         fi
+        if [ -n "$RESID_SHIFT" ]; then
+          CMD+=(--resid-shift "$RESID_SHIFT")
+        fi
         if ! "${CMD[@]}"; then
           echo "Add state failed. Check paths and try again."
+        fi
+        pause
+        ;;
+      delete-state)
+        STATE_ROW="$(offline_select_state_one)"
+        STATE_ID="$(printf "%s" "$STATE_ROW" | awk -F'|' '{print $1}')"
+        STATE_NAME="$(printf "%s" "$STATE_ROW" | awk -F'|' '{print $2}')"
+        if [ -z "$STATE_ID" ]; then
+          echo "No state selected."
+          pause
+          continue
+        fi
+        if ! prompt_bool "Delete state '${STATE_NAME:-$STATE_ID}' and its files? (y/N)" "N"; then
+          echo "Canceled."
+          pause
+          continue
+        fi
+        if ! python -m phase.scripts.offline_system --root "$OFFLINE_ROOT" delete-state \
+          --project-id "$OFFLINE_PROJECT_ID" \
+          --system-id "$OFFLINE_SYSTEM_ID" \
+          --state-id "$STATE_ID"; then
+          echo "Delete state failed."
         fi
         pause
         ;;

@@ -19,7 +19,7 @@ prompt_bool() {
 
 offline_prompt_root "${ROOT_DIR}/data"
 
-ACTION_LINES=$'init-project|Initialize a new project\ncreate-system|Create a new system\nadd-state|Add a state (PDB+trajectory)\nlist|List projects/systems'
+ACTION_LINES=$'init-project|Initialize a new project\ncreate-system|Create a new system\nadd-state|Add a state (PDB+trajectory)\ndelete-state|Delete a state\nlist|List projects/systems'
 ACTION_ROW="$(offline_choose_one "Select action:" "$ACTION_LINES")"
 MODE="$(printf "%s" "$ACTION_ROW" | awk -F'|' '{print $1}')"
 MODE="$(printf "%s" "$MODE" | tr '[:upper:]' '[:lower:]')"
@@ -57,6 +57,7 @@ if [ "$MODE" = "add-state" ]; then
   PDB_PATH="$(prompt "PDB path" "")"
   TRAJ_PATH="$(prompt "Trajectory path" "")"
   SLICE_SPEC="$(prompt "Frame slice start:stop:step (blank = full; number = step)" "")"
+  RESID_SHIFT="$(prompt "Residue shift offset (integer)" "0")"
   RES_SEL="$(prompt "Residue selection (optional)" "")"
   COPY_TRAJ_ARGS=()
   if prompt_bool "Copy trajectory into system folder? (y/N)" "N"; then
@@ -71,7 +72,32 @@ if [ "$MODE" = "add-state" ]; then
   --traj "$TRAJ_PATH" \
   ${RES_SEL:+--residue-selection "$RES_SEL"} \
   ${SLICE_SPEC:+--slice-spec "$SLICE_SPEC"} \
+  --resid-shift "$RESID_SHIFT" \
   "${COPY_TRAJ_ARGS[@]}"
+  exit 0
+fi
+
+if [ "$MODE" = "delete-state" ]; then
+  if ! offline_select_project; then
+    echo "No projects found." >&2
+    exit 1
+  fi
+  offline_select_system
+  STATE_ROW="$(offline_select_state_one)"
+  STATE_ID="$(printf "%s" "$STATE_ROW" | awk -F'|' '{print $1}')"
+  STATE_NAME="$(printf "%s" "$STATE_ROW" | awk -F'|' '{print $2}')"
+  if [ -z "$STATE_ID" ]; then
+    echo "No state selected." >&2
+    exit 1
+  fi
+  if ! prompt_bool "Delete state '${STATE_NAME:-$STATE_ID}' and all related files? (y/N)" "N"; then
+    echo "Canceled."
+    exit 0
+  fi
+  python -m phase.scripts.offline_system --root "$OFFLINE_ROOT" delete-state \
+    --project-id "$OFFLINE_PROJECT_ID" \
+    --system-id "$OFFLINE_SYSTEM_ID" \
+    --state-id "$STATE_ID"
   exit 0
 fi
 
