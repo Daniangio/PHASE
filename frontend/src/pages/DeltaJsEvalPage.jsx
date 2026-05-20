@@ -6,7 +6,12 @@ import Plot from 'react-plotly.js';
 import Loader from '../components/common/Loader';
 import ErrorMessage from '../components/common/ErrorMessage';
 import HelpDrawer from '../components/common/HelpDrawer';
-import JsRangeFilterBuilder, { passesAnyJsFilter } from '../components/common/JsRangeFilterBuilder';
+import JsRangeFilterBuilder, {
+  jsRulesFromPayload,
+  jsRulesToRaw,
+  normalizeJsRules,
+  passesAnyJsFilter,
+} from '../components/common/JsRangeFilterBuilder';
 import FilterSetupManager from '../components/common/FilterSetupManager';
 import {
   fetchClusterAnalyses,
@@ -30,6 +35,12 @@ function normJs(x) {
   return clamp01(Number(x) / JS_MAX);
 }
 
+function jsForDisplay(value, normalized) {
+  const v = Number(value);
+  if (!Number.isFinite(v)) return NaN;
+  return normalized ? v / JS_MAX : v;
+}
+
 function passesFiltersByMode(dA, dB, rules, normalizedMode) {
   if (normalizedMode) return passesAnyJsFilter(Number(dA) / JS_MAX, Number(dB) / JS_MAX, rules);
   const scaledRules = (Array.isArray(rules) ? rules : []).map((r) => ({
@@ -39,6 +50,21 @@ function passesFiltersByMode(dA, dB, rules, normalizedMode) {
     bMax: Number(r?.bMax) * JS_MAX,
   }));
   return passesAnyJsFilter(Number(dA), Number(dB), scaledRules);
+}
+
+function makeFilterPayload(rules) {
+  const normalized = normalizeJsRules(rules);
+  return {
+    rules: normalized,
+    rules_normalized: normalized,
+    rules_raw: jsRulesToRaw(normalized, JS_MAX),
+    units: {
+      storage: 'normalized_js',
+      raw: 'nats',
+      raw_max: JS_MAX,
+      normalized_max: 1,
+    },
+  };
 }
 
 function edgeLabel(edge, residueLabels) {
@@ -517,7 +543,7 @@ export default function DeltaJsEvalPage() {
         name,
         setup_type: 'js_range_filters',
         page: 'delta_js',
-        payload: { rules: jsFilters },
+        payload: makeFilterPayload(jsFilters),
       });
       setNewFilterSetupName('');
       await loadFilterSetups();
@@ -537,7 +563,7 @@ export default function DeltaJsEvalPage() {
   const handleLoadFilterSetup = useCallback(() => {
     if (!selectedFilterSetupId) return;
     const entry = filterSetups.find((x) => String(x?.setup_id) === String(selectedFilterSetupId));
-    const rules = entry?.payload?.rules;
+    const rules = jsRulesFromPayload(entry?.payload, JS_MAX);
     if (Array.isArray(rules) && rules.length) {
       setJsFilters(rules);
       setFilterSetupsError(null);
@@ -661,7 +687,7 @@ export default function DeltaJsEvalPage() {
         x.push(residueAxis.labels[c]);
         y.push(analysisSampleLabels[row] || String(analysisSampleIds[row] || row));
         color.push(singleClusterByResidue[ridx] ? 'rgba(156,163,175,1)' : jsABOColor(dA, dB));
-        custom.push([dA, dB, aboLabel(dA, dB), singleClusterByResidue[ridx] ? 1 : 0]);
+        custom.push([jsForDisplay(dA, displayNormalizedJs), jsForDisplay(dB, displayNormalizedJs), aboLabel(dA, dB), singleClusterByResidue[ridx] ? 1 : 0]);
       }
     }
     return { x, y, color, custom };
@@ -706,7 +732,7 @@ export default function DeltaJsEvalPage() {
         x.push(xLabels[c]);
         y.push(analysisSampleLabels[row] || String(analysisSampleIds[row] || row));
         color.push(jsABOColor(dA, dB));
-        custom.push([dA, dB, aboLabel(dA, dB)]);
+        custom.push([jsForDisplay(dA, displayNormalizedJs), jsForDisplay(dB, displayNormalizedJs), aboLabel(dA, dB)]);
       }
     }
     return { x, y, color, custom };
@@ -796,7 +822,7 @@ export default function DeltaJsEvalPage() {
         x.push(residueAxis.labels[c]);
         y.push(analysisSampleLabels[row] || String(analysisSampleIds[row] || row));
         color.push(singleClusterByResidue[ridx] ? 'rgba(156,163,175,1)' : jsABOColor(dA, dB));
-        custom.push([dA, dB, aboLabel(dA, dB), singleClusterByResidue[ridx] ? 1 : 0]);
+        custom.push([jsForDisplay(dA, displayNormalizedJs), jsForDisplay(dB, displayNormalizedJs), aboLabel(dA, dB), singleClusterByResidue[ridx] ? 1 : 0]);
       }
     }
     return { x, y, color, custom };
@@ -1250,7 +1276,12 @@ export default function DeltaJsEvalPage() {
                 </div>
               )}
             </div>
-            <JsRangeFilterBuilder rules={jsFilters} onChange={setJsFilters} />
+            <JsRangeFilterBuilder
+              rules={jsFilters}
+              onChange={setJsFilters}
+              displayMax={displayNormalizedJs ? 1 : JS_MAX}
+              unitLabel={displayNormalizedJs ? 'normalized JS [0,1]' : 'raw JS [0, ln(2)]'}
+            />
             <div className="rounded-md border border-gray-800 bg-gray-950/30 p-3 space-y-2">
               <div className="text-xs text-gray-300">JS units for display/filtering</div>
               <label className="flex items-center gap-2 text-xs text-gray-200">
@@ -1259,10 +1290,10 @@ export default function DeltaJsEvalPage() {
                   checked={displayNormalizedJs}
                   onChange={(e) => setDisplayNormalizedJs(e.target.checked)}
                 />
-                Use normalized JS in [0,1] (default)
+                Show normalized JS in [0,1] (default)
               </label>
               <p className="text-[11px] text-gray-500">
-                When enabled, display filters are applied on normalized JS. Raw JS range is [0, ln(2)].
+                Filters are saved as normalized JS and mirrored as raw JS. Toggle off to view/edit the same ranges in raw nats [0, ln(2)].
               </p>
             </div>
             <FilterSetupManager

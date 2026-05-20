@@ -5,6 +5,10 @@ function clamp01(x) {
   return Math.max(0, Math.min(1, x));
 }
 
+export function normalizeJsRules(rules) {
+  return (Array.isArray(rules) && rules.length ? rules : [{ aMin: 0, aMax: 1, bMin: 0, bMax: 1 }]).map(normRule);
+}
+
 function normRule(rule) {
   const aMin = clamp01(Number(rule?.aMin));
   const aMax = clamp01(Number(rule?.aMax));
@@ -18,6 +22,37 @@ function normRule(rule) {
   };
 }
 
+export function jsRulesToRaw(rules, jsMax = Math.log(2)) {
+  const scale = Number.isFinite(Number(jsMax)) && Number(jsMax) > 0 ? Number(jsMax) : Math.log(2);
+  return normalizeJsRules(rules).map((r) => ({
+    aMin: r.aMin * scale,
+    aMax: r.aMax * scale,
+    bMin: r.bMin * scale,
+    bMax: r.bMax * scale,
+  }));
+}
+
+export function jsRulesFromPayload(payload, jsMax = Math.log(2)) {
+  const scale = Number.isFinite(Number(jsMax)) && Number(jsMax) > 0 ? Number(jsMax) : Math.log(2);
+  if (Array.isArray(payload?.rules_normalized) && payload.rules_normalized.length) {
+    return normalizeJsRules(payload.rules_normalized);
+  }
+  if (Array.isArray(payload?.rules) && payload.rules.length) {
+    return normalizeJsRules(payload.rules);
+  }
+  if (Array.isArray(payload?.rules_raw) && payload.rules_raw.length) {
+    return normalizeJsRules(
+      payload.rules_raw.map((r) => ({
+        aMin: Number(r?.aMin) / scale,
+        aMax: Number(r?.aMax) / scale,
+        bMin: Number(r?.bMin) / scale,
+        bMax: Number(r?.bMax) / scale,
+      }))
+    );
+  }
+  return [];
+}
+
 export function passesAnyJsFilter(dA, dB, rules) {
   if (!Number.isFinite(dA) || !Number.isFinite(dB)) return false;
   const arr = Array.isArray(rules) ? rules : [];
@@ -29,28 +64,33 @@ export function passesAnyJsFilter(dA, dB, rules) {
   return false;
 }
 
-function RangePair({ label, minValue, maxValue, onChange }) {
+function RangePair({ label, minValue, maxValue, onChange, displayMax }) {
+  const scale = Number.isFinite(Number(displayMax)) && Number(displayMax) > 0 ? Number(displayMax) : 1;
+  const digits = scale <= 1.000001 ? 2 : 3;
+  const step = scale <= 1.000001 ? 0.01 : 0.005;
   const minV = clamp01(Number(minValue));
   const maxV = clamp01(Number(maxValue));
   const lo = Math.min(minV, maxV);
   const hi = Math.max(minV, maxV);
+  const loDisplay = lo * scale;
+  const hiDisplay = hi * scale;
   return (
     <div className="space-y-1">
       <div className="flex items-center justify-between text-xs text-gray-400">
         <span>{label}</span>
         <span className="font-mono text-gray-300">
-          {lo.toFixed(2)} - {hi.toFixed(2)}
+          {loDisplay.toFixed(digits)} - {hiDisplay.toFixed(digits)}
         </span>
       </div>
       <div className="grid grid-cols-2 gap-2">
         <input
           type="range"
           min={0}
-          max={1}
-          step={0.01}
-          value={lo}
+          max={scale}
+          step={step}
+          value={loDisplay}
           onChange={(e) => {
-            const v = clamp01(Number(e.target.value));
+            const v = clamp01(Number(e.target.value) / scale);
             onChange(Math.min(v, hi), hi);
           }}
           className="w-full"
@@ -58,11 +98,11 @@ function RangePair({ label, minValue, maxValue, onChange }) {
         <input
           type="range"
           min={0}
-          max={1}
-          step={0.01}
-          value={hi}
+          max={scale}
+          step={step}
+          value={hiDisplay}
           onChange={(e) => {
-            const v = clamp01(Number(e.target.value));
+            const v = clamp01(Number(e.target.value) / scale);
             onChange(lo, Math.max(v, lo));
           }}
           className="w-full"
@@ -72,8 +112,8 @@ function RangePair({ label, minValue, maxValue, onChange }) {
   );
 }
 
-export default function JsRangeFilterBuilder({ rules, onChange, className = '' }) {
-  const safeRules = (Array.isArray(rules) && rules.length ? rules : [{ aMin: 0, aMax: 1, bMin: 0, bMax: 1 }]).map(normRule);
+export default function JsRangeFilterBuilder({ rules, onChange, className = '', displayMax = 1, unitLabel = 'normalized JS' }) {
+  const safeRules = normalizeJsRules(rules);
 
   const updateRule = (idx, patch) => {
     const next = safeRules.map((r, i) => (i === idx ? normRule({ ...r, ...patch }) : r));
@@ -93,7 +133,7 @@ export default function JsRangeFilterBuilder({ rules, onChange, className = '' }
   return (
     <div className={`rounded-md border border-gray-800 bg-gray-950/30 p-3 space-y-3 ${className}`}>
       <div className="flex items-center justify-between">
-        <div className="text-xs text-gray-300">Display filters (OR-combined)</div>
+        <div className="text-xs text-gray-300">Display filters ({unitLabel}, OR-combined)</div>
         <button
           type="button"
           onClick={addRule}
@@ -122,12 +162,14 @@ export default function JsRangeFilterBuilder({ rules, onChange, className = '' }
               minValue={rule.aMin}
               maxValue={rule.aMax}
               onChange={(aMin, aMax) => updateRule(idx, { aMin, aMax })}
+              displayMax={displayMax}
             />
             <RangePair
               label="JS(B)"
               minValue={rule.bMin}
               maxValue={rule.bMax}
               onChange={(bMin, bMax) => updateRule(idx, { bMin, bMax })}
+              displayMax={displayMax}
             />
           </div>
         ))}
@@ -139,4 +181,3 @@ export default function JsRangeFilterBuilder({ rules, onChange, className = '' }
     </div>
   );
 }
-

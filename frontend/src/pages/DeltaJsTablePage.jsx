@@ -4,7 +4,12 @@ import { Plus, RefreshCw } from 'lucide-react';
 
 import Loader from '../components/common/Loader';
 import ErrorMessage from '../components/common/ErrorMessage';
-import JsRangeFilterBuilder, { passesAnyJsFilter } from '../components/common/JsRangeFilterBuilder';
+import JsRangeFilterBuilder, {
+  jsRulesFromPayload,
+  jsRulesToRaw,
+  normalizeJsRules,
+  passesAnyJsFilter,
+} from '../components/common/JsRangeFilterBuilder';
 import FilterSetupManager from '../components/common/FilterSetupManager';
 import {
   fetchClusterAnalyses,
@@ -75,6 +80,21 @@ function passesFiltersByMode(dA, dB, rules, normalizedMode) {
     bMax: Number(r?.bMax) * JS_MAX,
   }));
   return passesAnyJsFilter(Number(dA), Number(dB), scaledRules);
+}
+
+function makeFilterPayload(rules) {
+  const normalized = normalizeJsRules(rules);
+  return {
+    rules: normalized,
+    rules_normalized: normalized,
+    rules_raw: jsRulesToRaw(normalized, JS_MAX),
+    units: {
+      storage: 'normalized_js',
+      raw: 'nats',
+      raw_max: JS_MAX,
+      normalized_max: 1,
+    },
+  };
 }
 
 function formatAnalysisShortMeta(entry) {
@@ -555,7 +575,7 @@ export default function DeltaJsTablePage() {
         name,
         setup_type: 'js_range_filters',
         page: 'delta_js',
-        payload: { rules: jsFilters },
+        payload: makeFilterPayload(jsFilters),
       });
       setNewFilterSetupName('');
       await loadFilterSetups();
@@ -568,7 +588,7 @@ export default function DeltaJsTablePage() {
   const handleLoadFilterSetup = useCallback(() => {
     if (!selectedFilterSetupId) return;
     const entry = filterSetups.find((x) => String(x?.setup_id) === String(selectedFilterSetupId));
-    const rules = entry?.payload?.rules;
+    const rules = jsRulesFromPayload(entry?.payload, JS_MAX);
     if (Array.isArray(rules) && rules.length) {
       setJsFilters(rules);
       setFilterSetupsError(null);
@@ -792,7 +812,12 @@ export default function DeltaJsTablePage() {
               )}
             </div>
 
-            <JsRangeFilterBuilder rules={jsFilters} onChange={setJsFilters} />
+            <JsRangeFilterBuilder
+              rules={jsFilters}
+              onChange={setJsFilters}
+              displayMax={displayNormalizedJs ? 1 : JS_MAX}
+              unitLabel={displayNormalizedJs ? 'normalized JS [0,1]' : 'raw JS [0, ln(2)]'}
+            />
             <div className="rounded-md border border-gray-800 bg-gray-950/30 p-3 space-y-2">
               <div className="text-xs text-gray-300">Residue score mode</div>
               <label className="flex items-center gap-2 text-xs text-gray-200">
@@ -831,7 +856,7 @@ export default function DeltaJsTablePage() {
                 Show normalized JS in [0,1] (default)
               </label>
               <p className="text-[11px] text-gray-500">
-                Raw JS uses natural logs and ranges in [0, ln(2)=0.693]. Normalized JS = raw / ln(2).
+                Filters are saved as normalized JS and mirrored as raw JS. Toggle off to view/edit the same ranges in raw nats [0, ln(2)=0.693].
               </p>
             </div>
             <FilterSetupManager

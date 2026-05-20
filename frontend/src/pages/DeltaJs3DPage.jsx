@@ -13,7 +13,12 @@ import 'molstar/build/viewer/molstar.css';
 import Loader from '../components/common/Loader';
 import ErrorMessage from '../components/common/ErrorMessage';
 import HelpDrawer from '../components/common/HelpDrawer';
-import JsRangeFilterBuilder, { passesAnyJsFilter } from '../components/common/JsRangeFilterBuilder';
+import JsRangeFilterBuilder, {
+  jsRulesFromPayload,
+  jsRulesToRaw,
+  normalizeJsRules,
+  passesAnyJsFilter,
+} from '../components/common/JsRangeFilterBuilder';
 import FilterSetupManager from '../components/common/FilterSetupManager';
 import {
   fetchClusterAnalyses,
@@ -43,6 +48,12 @@ function normJs(x) {
   return clamp01(Number(x) / JS_MAX);
 }
 
+function jsForDisplay(value, normalized) {
+  const v = Number(value);
+  if (!Number.isFinite(v)) return NaN;
+  return normalized ? v / JS_MAX : v;
+}
+
 function passesFiltersByMode(dA, dB, rules, normalizedMode) {
   if (normalizedMode) return passesAnyJsFilter(Number(dA) / JS_MAX, Number(dB) / JS_MAX, rules);
   const scaledRules = (Array.isArray(rules) ? rules : []).map((r) => ({
@@ -52,6 +63,21 @@ function passesFiltersByMode(dA, dB, rules, normalizedMode) {
     bMax: Number(r?.bMax) * JS_MAX,
   }));
   return passesAnyJsFilter(Number(dA), Number(dB), scaledRules);
+}
+
+function makeFilterPayload(rules) {
+  const normalized = normalizeJsRules(rules);
+  return {
+    rules: normalized,
+    rules_normalized: normalized,
+    rules_raw: jsRulesToRaw(normalized, JS_MAX),
+    units: {
+      storage: 'normalized_js',
+      raw: 'nats',
+      raw_max: JS_MAX,
+      normalized_max: 1,
+    },
+  };
 }
 
 function rgbToHex(r, g, b) {
@@ -474,6 +500,8 @@ export default function DeltaJs3DPage() {
       const info = {
         dA,
         dB,
+        dADisplay: jsForDisplay(dA, displayNormalizedJs),
+        dBDisplay: jsForDisplay(dB, displayNormalizedJs),
         tag: jsABOTag(dA, dB),
       };
       labelSeqToInfo[i] = info;
@@ -488,7 +516,7 @@ export default function DeltaJs3DPage() {
       authToInfo,
       labelSeqToInfo,
     };
-  }, [rowDistances, residueLabels, residueIdMode, sampleLabels, rowIndex, loadedStateResidShift]);
+  }, [rowDistances, residueLabels, residueIdMode, sampleLabels, rowIndex, loadedStateResidShift, displayNormalizedJs]);
 
   useEffect(() => {
     const plugin = pluginRef.current;
@@ -517,7 +545,7 @@ export default function DeltaJs3DPage() {
         const dB = Number(info.dB);
         if (!Number.isFinite(dA) || !Number.isFinite(dB)) return 'JS(A/B): n/a';
         const sample = h.sampleLabel ? ` · ${h.sampleLabel}` : '';
-        return `JS(A): ${dA.toFixed(3)} · JS(B): ${dB.toFixed(3)} · ${info.tag}${sample}`;
+        return `JS(A): ${Number(info.dADisplay).toFixed(3)} · JS(B): ${Number(info.dBDisplay).toFixed(3)} · ${info.tag}${sample}`;
       },
       group: (label) => `phase-delta-js:${label}`,
     };
@@ -577,6 +605,8 @@ export default function DeltaJs3DPage() {
       residueLabel: residueLabels[idx] || String(idx),
       dA,
       dB,
+      dADisplay: jsForDisplay(dA, displayNormalizedJs),
+      dBDisplay: jsForDisplay(dB, displayNormalizedJs),
       inRange,
       tag,
       color: inRange ? jsABOColor(dA, dB) : '#9ca3af',
@@ -602,8 +632,8 @@ export default function DeltaJs3DPage() {
       out.push({
         residueIndex: i,
         residueLabel: residueLabels[i] || String(i),
-        jsA: dAraw,
-        jsB: dBraw,
+        jsA: jsForDisplay(dAraw, displayNormalizedJs),
+        jsB: jsForDisplay(dBraw, displayNormalizedJs),
         score,
       });
     }
@@ -624,7 +654,7 @@ export default function DeltaJs3DPage() {
         name,
         setup_type: 'js_range_filters',
         page: 'delta_js',
-        payload: { rules: jsFilters },
+        payload: makeFilterPayload(jsFilters),
       });
       setNewFilterSetupName('');
       await loadFilterSetups();
@@ -644,7 +674,7 @@ export default function DeltaJs3DPage() {
   const handleLoadFilterSetup = useCallback(() => {
     if (!selectedFilterSetupId) return;
     const entry = filterSetups.find((x) => String(x?.setup_id) === String(selectedFilterSetupId));
-    const rules = entry?.payload?.rules;
+    const rules = jsRulesFromPayload(entry?.payload, JS_MAX);
     if (Array.isArray(rules) && rules.length) {
       setJsFilters(rules);
       setFilterSetupsError(null);
@@ -1031,7 +1061,12 @@ export default function DeltaJs3DPage() {
                 </label>
               </div>
             </div>
-            <JsRangeFilterBuilder rules={jsFilters} onChange={setJsFilters} />
+            <JsRangeFilterBuilder
+              rules={jsFilters}
+              onChange={setJsFilters}
+              displayMax={displayNormalizedJs ? 1 : JS_MAX}
+              unitLabel={displayNormalizedJs ? 'normalized JS [0,1]' : 'raw JS [0, ln(2)]'}
+            />
             <div className="rounded-md border border-gray-800 bg-gray-950/30 p-2 space-y-2">
               <label className="flex items-center gap-2 text-sm text-gray-200">
                 <input
@@ -1040,10 +1075,10 @@ export default function DeltaJs3DPage() {
                   onChange={(e) => setDisplayNormalizedJs(e.target.checked)}
                   className="h-4 w-4 text-cyan-500 rounded border-gray-700 bg-gray-950"
                 />
-                Use normalized JS for display filters [0,1]
+                Show normalized JS in [0,1] (default)
               </label>
               <p className="text-[11px] text-gray-500">
-                If disabled, filter values are interpreted in raw JS units [0, ln(2)].
+                Filters are saved as normalized JS and mirrored as raw JS. Toggle off to view/edit the same ranges in raw nats [0, ln(2)].
               </p>
             </div>
             <FilterSetupManager
@@ -1119,8 +1154,8 @@ export default function DeltaJs3DPage() {
                     {selectedResidueInfo.residueLabel}
                     <span className="ml-2 inline-block align-middle w-3 h-3 rounded-sm border border-gray-700" style={{ backgroundColor: selectedResidueInfo.color }} />
                   </div>
-                  <div className="text-[11px] text-gray-300">JS(A): {selectedResidueInfo.dA.toFixed(3)}</div>
-                  <div className="text-[11px] text-gray-300">JS(B): {selectedResidueInfo.dB.toFixed(3)}</div>
+                  <div className="text-[11px] text-gray-300">JS(A): {selectedResidueInfo.dADisplay.toFixed(3)}</div>
+                  <div className="text-[11px] text-gray-300">JS(B): {selectedResidueInfo.dBDisplay.toFixed(3)}</div>
                   <div className="text-[11px] text-gray-400">Tag: {selectedResidueInfo.tag}</div>
                   {!selectedResidueInfo.inRange && <div className="text-[11px] text-gray-500">Filtered out (gray).</div>}
                 </>

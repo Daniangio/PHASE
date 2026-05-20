@@ -65,6 +65,16 @@ If no edges are available, edge-weighted terms fall back to node-weighted values
 
 Colors are blended from these four modes, not hard-thresholded.
 
+## Raw Vs Normalized JS
+
+The analysis stores raw Jensen-Shannon divergence in nats, using natural logarithms. The raw range is `[0, ln(2)]`, approximately `[0, 0.693]`.
+
+The web UI shows normalized JS by default:
+
+`JS_normalized = JS_raw / ln(2)`
+
+Display filters are edited and saved in normalized units by default. When raw display is enabled, the same filter ranges are shown in raw nats, and saved filter setups include both normalized and raw copies.
+
 ## Node and Edge Weighting
 
 Node and edge separability weights are computed from A-vs-B reference distance:
