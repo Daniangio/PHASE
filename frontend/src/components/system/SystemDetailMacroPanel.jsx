@@ -53,6 +53,7 @@ export default function SystemDetailMacroPanel({
       {actionError && <ErrorMessage message={actionError} />}
       {actionMessage && <p className="text-sm text-emerald-400">{actionMessage}</p>}
       {!expanded && (
+        <div className="space-y-2">
         <div className="flex flex-wrap gap-2">
           {states.length === 0 && <p className="text-sm text-gray-400">No states yet.</p>}
           {states.map((state) => (
@@ -61,8 +62,15 @@ export default function SystemDetailMacroPanel({
               className="text-xs px-2 py-1 rounded-md border border-gray-700 text-gray-300 bg-gray-900/60"
             >
               {state.name || state.state_id}
+              <span className={`ml-1 ${state.trajectory_file ? 'text-emerald-300' : 'text-amber-300'}`}>
+                {state.trajectory_file ? 'traj' : 'no traj'}
+              </span>
             </span>
           ))}
+        </div>
+        <p className="text-[11px] text-gray-500">
+          Open state details to upload or replace trajectories and rebuild descriptors for existing states.
+        </p>
         </div>
       )}
       {expanded && (

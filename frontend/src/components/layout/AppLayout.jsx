@@ -9,7 +9,7 @@ const navItems = [
 
 export default function AppLayout({ children }) {
   return (
-    <div className="flex flex-col min-h-screen bg-gray-900 text-gray-100 font-inter">
+    <div className="flex flex-col min-h-screen bg-gray-900 text-gray-100 font-inter overflow-x-hidden">
       <header className="bg-gray-800 border-b border-gray-700 shadow-lg">
         <div className="container mx-auto px-4 py-4 flex justify-between items-center">
           <div className="flex items-center space-x-3">
@@ -41,7 +41,7 @@ export default function AppLayout({ children }) {
           </nav>
         </div>
       </header>
-      <main className="flex-grow container mx-auto px-4 py-8">{children}</main>
+      <main className="flex-grow container mx-auto px-4 py-8 min-h-0">{children}</main>
       <footer className="bg-gray-800 text-gray-400 text-sm text-center py-4 border-t border-gray-700">
         © {new Date().getFullYear()} PHASE
       </footer>

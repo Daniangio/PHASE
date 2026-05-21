@@ -123,3 +123,29 @@ delta_pmi_min = blank or 0.0
 ```
 
 For cleaner, more conservative tables, raise `p_min`, raise `enrichment_min`, or set `delta_pmi_min > 0` for edges.
+
+## Flexibility Filtering
+
+Flexible loops often generate many local clusters and can dominate transient-state tables with non-specific flickering. PHASE reports `K`, the number of clusters available for each residue. A large `K` often indicates high local flexibility or noisy conformational diversity.
+
+The web page includes a `Max residue clusters` filter. For example, setting it to `6` hides residues with more than six clusters. This is not a proof that the remaining residues are functional switches, but it is a useful first-pass filter to reduce loop-dominated hits.
+
+Interpretation rule of thumb:
+
+- Low or moderate `K` plus repeated enriched visits: more switch-like.
+- High `K`, many low-occupancy clusters, and very short dwells: more likely flexible-loop behavior.
+- High `K` residues can still be important, but they require structure/frame inspection.
+
+## 3D Viewer
+
+The transient 3D page colors residues by their strongest transient-state score after the active sample and `K` filters. The structure can be loaded either from the representative state PDB or from a specific frame of a stored state trajectory.
+
+Frame loading requires that the state has a stored trajectory. If only a PDB was uploaded, frame `0` is equivalent to the static structure.
+
+Use the 3D view to check whether hits cluster in a meaningful region, occur near known motifs, or are dominated by solvent-exposed loops.
+
+## Trajectory Frame Panel
+
+The 3D viewer has a dedicated frame panel. Choose a reference state PDB for static coloring, or enable trajectory-frame loading to extract one stored frame from that state's trajectory. If the state has no trajectory, upload one from the System page: open the States panel details, choose the trajectory file for the state, and click Upload & Build.
+
+The current implementation loads one frame at a time as a PDB instance. Use it to inspect whether a transient hit corresponds to a plausible structural switch or to broad loop flexibility.

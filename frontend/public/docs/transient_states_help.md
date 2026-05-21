@@ -14,26 +14,16 @@ Do not use this as a standalone proof of mechanism. Treat it as a ranking and hy
 
 ## Inputs
 
-- `Samples/trajectories`: Requires at least two simulation trajectories. The analysis uses a "leave-one-out" scheme: when evaluating a specific "focal" trajectory, all other selected trajectories are pooled together to form the comparative background.
+- `Samples/trajectories`: at least two samples are required. The background for each sample is built from all other selected samples.
 - `MD label mode`: `assigned` uses the nearest assigned cluster labels. `halo` uses halo labels for MD samples when available.
-- `p_min` (Default: 0.005): The minimum occupancy threshold. The state must appear in at least 0.5% of the focal trajectory's frames to filter out single-frame artifacts or simulation noise.
-- `p_max` (Default: 0.05): The maximum occupancy threshold. Restricts results to states that occur in fewer than 5% of the focal frames. This ensures the state is truly a rare, transient intermediate rather than a major stable substate.
-- `enrichment_min` (Default: 1.0): The minimum log-base-2 fold change required over the background.What is Enrichment? It measures how much more frequently a rare state occurs in your trajectory of interest compared to all other trajectories combined. Because it uses a $\log_2$ scale, an enrichment of 1.0 means the state is 2x more frequent ($2^1$) in the focal trajectory. An enrichment of 3.0 means it is 8x more frequent ($2^3$). This isolates behaviors unique to specific simulation conditions.
-- `top_k_nodes`: The maximum number of single-residue hits to save in the final output table.
-- `Compute edge states`: Toggle to expand analysis from single residues to pairs of residues moving together.
-- `edge_mode`: `cluster`: Scans only residue pairs that are in physical contact (highly recommended for performance). `all_vs_all`: Scans every possible pair of residues in the system (computationally expensive).
-- `delta_pmi_min` (Default: blank): The strictness filter for coordinated, cooperative motion.Why do we need this? A pair of residues can show high enrichment for two completely different physical reasons:
-    - True Cooperative Motion: The two residues are physically coupled and visit a joint state because they are moving together.
-    - Trivial Driven Motion: Residue $i$ changes its behavior drastically on its own, while residue $j$ does nothing unusual. The pair looks "enriched" only because residue $i$ is dominating the math.
-To separate these cases, the tool calculates the Pointwise Mutual Information ($\Delta \text{PMI} = \text{PMI}_{\text{focal}} - \text{PMI}_{\text{background}}$).$\Delta \text{PMI} \le 0$: Trivial enrichment driven by a single residue.$\Delta \text{PMI} > 0$: True cooperative or altered pairwise context. Setting a positive value (e.g., 0.2) purges trivial single-residue drivers from your edge table.
-- `top_k_edges`: The maximum number of pairwise edge hits to save in the final output table.
-
-## Recommended Balancing Regimes
-
-Regime	enrichment_min	delta_pmi_min	Best Used For...	What It Catches
-Exploratory / High Sensitivity	1.0 (2-fold)	0.0 or blank	Small systems or preliminary scans where you do not want to miss subtle trends.	Everything, including trivial single-residue drivers. Requires manual structure filtering.
-Standard Balanced (Recommended)	1.5 to 2.0 (~3 to 4-fold)	0.1 to 0.3	General production runs to find clean, distinct pocket or pathway rearrangements.	Modestly rare states that exhibit clear, mathematically verifiable cooperative motion.
-Strict Structural Coupling	2.0 to 3.0 (4 to 8-fold)	> 0.5	Identifying major localized allosteric switches or highly coordinated lock-and-key state changes.	Exclusively joint events where the two residues must move together to create the state.
+- `p_min`: minimum occupancy required in the focal trajectory. Default `0.005` means at least 0.5% of frames.
+- `p_max`: maximum occupancy allowed in the focal trajectory. Default `0.05` restricts hits to states below 5% occupancy.
+- `enrichment_min`: minimum log2 enrichment over the leave-one-out background. Default `1.0` means at least twofold enrichment.
+- `top_k_nodes`: maximum number of residue-cluster hits stored.
+- `Compute edge states`: also evaluates joint cluster states on residue pairs.
+- `edge_mode`: `cluster` uses the cluster/contact edge set; `all_vs_all` scans every residue pair and can be expensive.
+- `delta_pmi_min`: optional cutoff for pairwise-specific enrichment. Positive values keep edge states enriched beyond what is expected from marginal residue occupancies.
+- `top_k_edges`: maximum number of edge-cluster hits stored.
 
 ## Node Criterion
 
@@ -133,3 +123,29 @@ delta_pmi_min = blank or 0.0
 ```
 
 For cleaner, more conservative tables, raise `p_min`, raise `enrichment_min`, or set `delta_pmi_min > 0` for edges.
+
+## Flexibility Filtering
+
+Flexible loops often generate many local clusters and can dominate transient-state tables with non-specific flickering. PHASE reports `K`, the number of clusters available for each residue. A large `K` often indicates high local flexibility or noisy conformational diversity.
+
+The web page includes a `Max residue clusters` filter. For example, setting it to `6` hides residues with more than six clusters. This is not a proof that the remaining residues are functional switches, but it is a useful first-pass filter to reduce loop-dominated hits.
+
+Interpretation rule of thumb:
+
+- Low or moderate `K` plus repeated enriched visits: more switch-like.
+- High `K`, many low-occupancy clusters, and very short dwells: more likely flexible-loop behavior.
+- High `K` residues can still be important, but they require structure/frame inspection.
+
+## 3D Viewer
+
+The transient 3D page colors residues by their strongest transient-state score after the active sample and `K` filters. The structure can be loaded either from the representative state PDB or from a specific frame of a stored state trajectory.
+
+Frame loading requires that the state has a stored trajectory. If only a PDB was uploaded, frame `0` is equivalent to the static structure.
+
+Use the 3D view to check whether hits cluster in a meaningful region, occur near known motifs, or are dominated by solvent-exposed loops.
+
+## Trajectory Frame Panel
+
+The 3D viewer has a dedicated frame panel. Choose a reference state PDB for static coloring, or enable trajectory-frame loading to extract one stored frame from that state's trajectory. If the state has no trajectory, upload one from the System page: open the States panel details, choose the trajectory file for the state, and click Upload & Build.
+
+The current implementation loads one frame at a time as a PDB instance. Use it to inspect whether a transient hit corresponds to a plausible structural switch or to broad loop flexibility.
