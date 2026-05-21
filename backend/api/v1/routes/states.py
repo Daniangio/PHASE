@@ -5,7 +5,7 @@ import uuid
 from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 
 from backend.api.v1.analysis_cleanup import cleanup_state_linked_artifacts
 from backend.api.v1.common import (
@@ -80,6 +80,59 @@ async def download_structure(project_id: str, system_id: str, state_id: str):
         file_path,
         filename=download_name,
         media_type="chemical/x-pdb",
+    )
+
+
+@router.get(
+    "/projects/{project_id}/systems/{system_id}/states/{state_id}/trajectory/frame",
+    summary="Extract one stored state trajectory frame as PDB for 3D visualization",
+)
+async def download_state_trajectory_frame(project_id: str, system_id: str, state_id: str, frame: int = 0):
+    try:
+        system = project_store.get_system(project_id, system_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"System '{system_id}' not found.")
+
+    state_meta = get_state_or_404(system, state_id)
+    if not state_meta.pdb_file:
+        raise HTTPException(status_code=404, detail=f"No PDB stored for state '{state_id}'.")
+
+    top_path = project_store.resolve_path(project_id, system_id, state_meta.pdb_file)
+    if not top_path.exists():
+        raise HTTPException(status_code=404, detail="Stored topology file is missing on disk.")
+    traj_rel = state_meta.trajectory_file or state_meta.pdb_file
+    traj_path = project_store.resolve_path(project_id, system_id, traj_rel)
+    if not traj_path.exists():
+        raise HTTPException(status_code=404, detail="Stored trajectory file is missing on disk.")
+
+    try:
+        import tempfile
+        import MDAnalysis as mda
+
+        universe = mda.Universe(str(top_path), str(traj_path))
+        n_frames = len(universe.trajectory)
+        if n_frames <= 0:
+            raise ValueError("Trajectory has no frames.")
+        frame_i = max(0, min(int(frame), n_frames - 1))
+        universe.trajectory[frame_i]
+        with tempfile.NamedTemporaryFile(suffix=".pdb", delete=False) as tmp:
+            tmp_path = tmp.name
+        try:
+            atoms = universe.atoms
+            atoms.write(tmp_path)
+            text = open(tmp_path, "r", encoding="utf-8", errors="replace").read()
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to extract trajectory frame: {exc}") from exc
+
+    return Response(
+        content=text,
+        media_type="chemical/x-pdb",
+        headers={"X-PHASE-Frame": str(frame_i), "X-PHASE-Frame-Count": str(n_frames)},
     )
 
 

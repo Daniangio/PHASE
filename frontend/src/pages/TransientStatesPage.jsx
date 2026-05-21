@@ -61,6 +61,7 @@ export default function TransientStatesPage() {
   const [nodeSampleFilter, setNodeSampleFilter] = useState('all');
   const [edgeSampleFilter, setEdgeSampleFilter] = useState('all');
   const [helpOpen, setHelpOpen] = useState(false);
+  const [maxResidueClusters, setMaxResidueClusters] = useState(6);
 
   useEffect(() => {
     let cancelled = false;
@@ -187,6 +188,7 @@ export default function TransientStatesPage() {
 
   const data = useMemo(() => analysisData?.data || {}, [analysisData]);
   const sampleLabels = safeArray(data.sample_labels);
+  const kList = safeArray(data.K_list).map((x) => Number(x));
   const sampleOptions = useMemo(() => sampleLabels.map((label, idx) => ({ idx, label: String(label || idx) })), [sampleLabels]);
 
   const nodeRows = useMemo(() => {
@@ -195,10 +197,14 @@ export default function TransientStatesPage() {
     for (let i = 0; i < n; i += 1) {
       const sampleIndex = Number(data.node_sample_index?.[i]);
       if (nodeSampleFilter !== 'all' && String(sampleIndex) !== String(nodeSampleFilter)) continue;
+      const residueIndex = Number(data.node_residue_index?.[i]);
+      const nClusters = Number(kList[residueIndex]);
+      if (Number(maxResidueClusters) > 0 && Number.isFinite(nClusters) && nClusters > Number(maxResidueClusters)) continue;
       rows.push({
         sampleIndex,
         sample: String(data.node_sample_label?.[i] || sampleLabels[sampleIndex] || sampleIndex),
         residue: String(data.node_residue_label?.[i] || data.node_residue_index?.[i] || ''),
+        nClusters,
         cluster: Number(data.node_cluster?.[i]),
         occupancy: Number(data.node_occupancy?.[i]),
         background: Number(data.node_background?.[i]),
@@ -210,7 +216,7 @@ export default function TransientStatesPage() {
       });
     }
     return rows.sort((a, b) => b.score - a.score);
-  }, [data, sampleLabels, nodeSampleFilter]);
+  }, [data, sampleLabels, nodeSampleFilter, kList, maxResidueClusters]);
 
   const edgeRows = useMemo(() => {
     const n = safeArray(data.edge_score).length;
@@ -218,10 +224,17 @@ export default function TransientStatesPage() {
     for (let i = 0; i < n; i += 1) {
       const sampleIndex = Number(data.edge_sample_index?.[i]);
       if (edgeSampleFilter !== 'all' && String(sampleIndex) !== String(edgeSampleFilter)) continue;
+      const ri = Number(data.edge_residue_i?.[i]);
+      const rj = Number(data.edge_residue_j?.[i]);
+      const ki = Number(kList[ri]);
+      const kj = Number(kList[rj]);
+      if (Number(maxResidueClusters) > 0 && ((Number.isFinite(ki) && ki > Number(maxResidueClusters)) || (Number.isFinite(kj) && kj > Number(maxResidueClusters)))) continue;
       rows.push({
         sampleIndex,
         sample: String(data.edge_sample_label?.[i] || sampleLabels[sampleIndex] || sampleIndex),
         edge: String(data.edge_label?.[i] || ''),
+        ki,
+        kj,
         ci: Number(data.edge_cluster_i?.[i]),
         cj: Number(data.edge_cluster_j?.[i]),
         occupancy: Number(data.edge_occupancy?.[i]),
@@ -235,7 +248,7 @@ export default function TransientStatesPage() {
       });
     }
     return rows.sort((a, b) => b.score - a.score);
-  }, [data, sampleLabels, edgeSampleFilter]);
+  }, [data, sampleLabels, edgeSampleFilter, kList, maxResidueClusters]);
 
   if (loadingSystem) return <Loader message="Loading transient-state analysis..." />;
 
@@ -320,6 +333,30 @@ export default function TransientStatesPage() {
                 })}
               </div>
             </div>
+
+            <div className="rounded-lg border border-gray-800 bg-gray-900/40 p-4 space-y-2">
+              <div className="text-sm font-semibold">Flexibility filter</div>
+              <label className="block text-xs text-gray-400">
+                Max residue clusters
+                <input
+                  type="number"
+                  min="0"
+                  value={maxResidueClusters}
+                  onChange={(e) => setMaxResidueClusters(e.target.value)}
+                  className="mt-1 w-full rounded-md bg-gray-950 border border-gray-700 px-2 py-1.5 text-sm text-gray-100"
+                />
+              </label>
+              <p className="text-[11px] text-gray-500">
+                Set to 0 to disable. High-K residues often correspond to flexible loops; filtering them helps focus on switch-like states.
+              </p>
+              <button
+                type="button"
+                onClick={() => navigate(`/projects/${projectId}/systems/${systemId}/sampling/transient_states_3d${selectedClusterId ? `?cluster_id=${encodeURIComponent(selectedClusterId)}` : ''}`)}
+                className="w-full rounded-md border border-gray-700 px-3 py-2 text-xs text-gray-200 hover:bg-gray-800"
+              >
+                Open 3D transient viewer
+              </button>
+            </div>
           </aside>
 
           <section className="space-y-5 min-w-0">
@@ -332,12 +369,12 @@ export default function TransientStatesPage() {
               <div className="rounded-lg border border-gray-800 bg-gray-900/40 p-4 space-y-3">
                 <div className="flex items-center justify-between gap-3"><h2 className="font-semibold">Top transient residue states</h2><select value={nodeSampleFilter} onChange={(e) => setNodeSampleFilter(e.target.value)} className="rounded bg-gray-950 border border-gray-700 px-2 py-1 text-xs"><option value="all">all samples</option>{sampleOptions.map((s) => <option key={s.idx} value={s.idx}>{s.label}</option>)}</select></div>
                 {!!nodeRows.length && <Plot data={[{ type: 'bar', x: nodeRows.slice(0, 30).map((r) => `${r.residue} c${r.cluster} · ${r.sample}`), y: nodeRows.slice(0, 30).map((r) => r.score), marker: { color: nodeRows.slice(0, 30).map((r) => r.enrichment), colorscale: 'YlOrRd', showscale: true, colorbar: { title: 'log2 enrich' } }, customdata: nodeRows.slice(0, 30).map((r) => [fmtPct(r.occupancy), fmtPct(r.background), r.episodes, fmt(r.meanDwell, 1), r.maxDwell]), hovertemplate: '%{x}<br>score=%{y:.2f}<br>occupancy=%{customdata[0]}<br>background=%{customdata[1]}<br>episodes=%{customdata[2]}<br>mean dwell=%{customdata[3]}<br>max dwell=%{customdata[4]}<extra></extra>' }]} layout={{ paper_bgcolor: 'rgba(0,0,0,0)', plot_bgcolor: 'rgba(0,0,0,0)', font: { color: '#d1d5db' }, margin: { l: 60, r: 30, t: 10, b: 160 }, height: 430, xaxis: { tickangle: -45, automargin: true } }} config={{ responsive: true, displaylogo: false }} style={{ width: '100%' }} />}
-                <div className="max-h-96 overflow-auto rounded-md border border-gray-800"><table className="w-full text-xs"><thead className="sticky top-0 bg-gray-950"><tr className="text-gray-300"><th className="px-2 py-2 text-left">Residue</th><th>Sample</th><th>Cluster</th><th>Occ.</th><th>Bg.</th><th>log2 enrich</th><th>Episodes</th><th>Mean dwell</th><th>Max dwell</th><th>Score</th></tr></thead><tbody>{nodeRows.map((r, i) => <tr key={`n${i}`} className="border-t border-gray-900"><td className="px-2 py-1.5 text-gray-100">{r.residue}</td><td>{r.sample}</td><td className="text-center">c{r.cluster}</td><td className="text-right">{fmtPct(r.occupancy)}</td><td className="text-right">{fmtPct(r.background)}</td><td className="text-right">{fmt(r.enrichment, 2)}</td><td className="text-right">{r.episodes}</td><td className="text-right">{fmt(r.meanDwell, 1)}</td><td className="text-right">{r.maxDwell}</td><td className="text-right pr-2">{fmt(r.score, 2)}</td></tr>)}</tbody></table></div>
+                <div className="max-h-96 overflow-auto rounded-md border border-gray-800"><table className="w-full text-xs"><thead className="sticky top-0 bg-gray-950"><tr className="text-gray-300"><th className="px-2 py-2 text-left">Residue</th><th>K</th><th>Sample</th><th>Cluster</th><th>Occ.</th><th>Bg.</th><th>log2 enrich</th><th>Episodes</th><th>Mean dwell</th><th>Max dwell</th><th>Score</th></tr></thead><tbody>{nodeRows.map((r, i) => <tr key={`n${i}`} className="border-t border-gray-900"><td className="px-2 py-1.5 text-gray-100">{r.residue}</td><td className="text-right">{Number.isFinite(r.nClusters) ? r.nClusters : 'n/a'}</td><td>{r.sample}</td><td className="text-center">c{r.cluster}</td><td className="text-right">{fmtPct(r.occupancy)}</td><td className="text-right">{fmtPct(r.background)}</td><td className="text-right">{fmt(r.enrichment, 2)}</td><td className="text-right">{r.episodes}</td><td className="text-right">{fmt(r.meanDwell, 1)}</td><td className="text-right">{r.maxDwell}</td><td className="text-right pr-2">{fmt(r.score, 2)}</td></tr>)}</tbody></table></div>
               </div>
 
               <div className="rounded-lg border border-gray-800 bg-gray-900/40 p-4 space-y-3">
                 <div className="flex items-center justify-between gap-3"><h2 className="font-semibold">Top transient edge states</h2><select value={edgeSampleFilter} onChange={(e) => setEdgeSampleFilter(e.target.value)} className="rounded bg-gray-950 border border-gray-700 px-2 py-1 text-xs"><option value="all">all samples</option>{sampleOptions.map((s) => <option key={s.idx} value={s.idx}>{s.label}</option>)}</select></div>
-                <div className="max-h-96 overflow-auto rounded-md border border-gray-800"><table className="w-full text-xs"><thead className="sticky top-0 bg-gray-950"><tr className="text-gray-300"><th className="px-2 py-2 text-left">Edge</th><th>Sample</th><th>Clusters</th><th>Occ.</th><th>Bg.</th><th>log2 enrich</th><th>ΔPMI</th><th>Episodes</th><th>Mean dwell</th><th>Max dwell</th><th>Score</th></tr></thead><tbody>{edgeRows.map((r, i) => <tr key={`e${i}`} className="border-t border-gray-900"><td className="px-2 py-1.5 text-gray-100">{r.edge}</td><td>{r.sample}</td><td className="text-center">c{r.ci}/c{r.cj}</td><td className="text-right">{fmtPct(r.occupancy)}</td><td className="text-right">{fmtPct(r.background)}</td><td className="text-right">{fmt(r.enrichment, 2)}</td><td className="text-right">{fmt(r.deltaPmi, 2)}</td><td className="text-right">{r.episodes}</td><td className="text-right">{fmt(r.meanDwell, 1)}</td><td className="text-right">{r.maxDwell}</td><td className="text-right pr-2">{fmt(r.score, 2)}</td></tr>)}</tbody></table></div>
+                <div className="max-h-96 overflow-auto rounded-md border border-gray-800"><table className="w-full text-xs"><thead className="sticky top-0 bg-gray-950"><tr className="text-gray-300"><th className="px-2 py-2 text-left">Edge</th><th>K</th><th>Sample</th><th>Clusters</th><th>Occ.</th><th>Bg.</th><th>log2 enrich</th><th>ΔPMI</th><th>Episodes</th><th>Mean dwell</th><th>Max dwell</th><th>Score</th></tr></thead><tbody>{edgeRows.map((r, i) => <tr key={`e${i}`} className="border-t border-gray-900"><td className="px-2 py-1.5 text-gray-100">{r.edge}</td><td className="text-right">{Number.isFinite(r.ki) && Number.isFinite(r.kj) ? `${r.ki}/${r.kj}` : 'n/a'}</td><td>{r.sample}</td><td className="text-center">c{r.ci}/c{r.cj}</td><td className="text-right">{fmtPct(r.occupancy)}</td><td className="text-right">{fmtPct(r.background)}</td><td className="text-right">{fmt(r.enrichment, 2)}</td><td className="text-right">{fmt(r.deltaPmi, 2)}</td><td className="text-right">{r.episodes}</td><td className="text-right">{fmt(r.meanDwell, 1)}</td><td className="text-right">{r.maxDwell}</td><td className="text-right pr-2">{fmt(r.score, 2)}</td></tr>)}</tbody></table></div>
               </div>
             </>}
           </section>
