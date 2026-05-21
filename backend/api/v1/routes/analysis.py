@@ -11,6 +11,7 @@ from backend.api.v1.schemas import (
     DeltaCommitmentJobRequest,
     EndpointFrustrationJobRequest,
     DeltaJsJobRequest,
+    TransientStatesJobRequest,
     DeltaTransitionJobRequest,
     LambdaSweepJobRequest,
     MdSamplesRefreshJobRequest,
@@ -28,6 +29,7 @@ from backend.tasks import (
     run_delta_commitment_job,
     run_endpoint_frustration_job,
     run_delta_js_job,
+    run_transient_states_job,
     run_delta_transition_job,
     run_lambda_sweep_job,
     run_md_samples_refresh_job,
@@ -1115,6 +1117,61 @@ async def submit_delta_js_job(
             job_timeout="2h",
             result_ttl=86400,
             job_id=f"delta-js-{job_uuid}",
+        )
+        return {"status": "queued", "job_id": job.id, "analysis_uuid": job_uuid}
+    except Exception as exc:  # pragma: no cover
+        raise HTTPException(status_code=500, detail=f"Job submission failed: {exc}") from exc
+
+
+@router.post(
+    "/submit/transient_states",
+    summary="Submit a transient low-occupancy cluster-state enrichment analysis.",
+)
+async def submit_transient_states_job(
+    payload: TransientStatesJobRequest,
+    task_queue: Any = Depends(get_queue),
+):
+    try:
+        system_meta = project_store.get_system(payload.project_id, payload.system_id)
+    except FileNotFoundError:
+        raise HTTPException(
+            status_code=404,
+            detail=f"System '{payload.system_id}' not found in project '{payload.project_id}'.",
+        )
+
+    get_cluster_entry(system_meta, payload.cluster_id)
+
+    if not payload.sample_ids or len(payload.sample_ids) < 2:
+        raise HTTPException(status_code=400, detail="sample_ids must include at least two samples.")
+
+    md_label_mode = (payload.md_label_mode or "assigned").lower()
+    if md_label_mode not in {"assigned", "halo"}:
+        raise HTTPException(status_code=400, detail="md_label_mode must be 'assigned' or 'halo'.")
+
+    p_min = float(payload.p_min if payload.p_min is not None else 0.005)
+    p_max = float(payload.p_max if payload.p_max is not None else 0.05)
+    if not (0.0 <= p_min <= p_max <= 1.0):
+        raise HTTPException(status_code=400, detail="Require 0 <= p_min <= p_max <= 1.")
+
+    edge_mode = str(payload.edge_mode or "cluster").strip().lower()
+    if edge_mode not in {"cluster", "all_vs_all"}:
+        raise HTTPException(status_code=400, detail="edge_mode must be 'cluster' or 'all_vs_all'.")
+
+    params = payload.dict(exclude_none=True, exclude={"project_id", "system_id", "cluster_id"})
+    dataset_ref = {
+        "project_id": payload.project_id,
+        "system_id": payload.system_id,
+        "cluster_id": payload.cluster_id,
+    }
+
+    try:
+        job_uuid = str(uuid.uuid4())
+        job = task_queue.enqueue(
+            run_transient_states_job,
+            args=(job_uuid, dataset_ref, params),
+            job_timeout="4h",
+            result_ttl=86400,
+            job_id=f"transient-states-{job_uuid}",
         )
         return {"status": "queued", "job_id": job.id, "analysis_uuid": job_uuid}
     except Exception as exc:  # pragma: no cover

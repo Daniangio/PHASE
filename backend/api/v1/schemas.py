@@ -253,6 +253,31 @@ class DeltaJsJobRequest(BaseModel):
     contact_atom_mode: Optional[str] = None  # CA|CM
 
 
+class TransientStatesJobRequest(BaseModel):
+    """
+    Transient low-occupancy cluster-state enrichment analysis.
+    """
+
+    project_id: str
+    system_id: str
+    cluster_id: str
+    sample_ids: List[str]
+    md_label_mode: Optional[str] = None  # assigned|halo
+    keep_invalid: Optional[bool] = None
+    p_min: Optional[float] = None
+    p_max: Optional[float] = None
+    enrichment_min: Optional[float] = None
+    epsilon: Optional[float] = None
+    top_k_nodes: Optional[int] = None
+    include_edges: Optional[bool] = None
+    edge_mode: Optional[str] = None  # cluster|all_vs_all
+    edge_p_min: Optional[float] = None
+    edge_p_max: Optional[float] = None
+    edge_enrichment_min: Optional[float] = None
+    delta_pmi_min: Optional[float] = None
+    top_k_edges: Optional[int] = None
+
+
 class LambdaSweepJobRequest(BaseModel):
     """
     Validation ladder 4: sample from an interpolated model E_λ between two endpoint Potts models.

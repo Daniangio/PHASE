@@ -77,6 +77,13 @@ export function submitDeltaJsJob(payload) {
   });
 }
 
+export function submitTransientStatesJob(payload) {
+  return requestJSON('/submit/transient_states', {
+    method: 'POST',
+    body: payload,
+  });
+}
+
 export function submitLambdaSweepJob(payload) {
   return requestJSON('/submit/lambda_sweep', {
     method: 'POST',

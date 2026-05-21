@@ -32,6 +32,7 @@ from phase.potts.analysis_run import (
     _gibbs_relax_worker,
     _single_frame_ligand_completion_worker,
 )
+from phase.potts.transient_analysis import run_transient_state_analysis
 from phase.potts.orchestration import (
     aggregate_gibbs_relaxation_batch,
     aggregate_ligand_completion_batch,
@@ -2841,6 +2842,130 @@ def run_delta_js_job(
 
     save_progress("Delta JS analysis completed", 100)
     return sanitized_payload
+
+
+def run_transient_states_job(
+    job_uuid: str,
+    dataset_ref: Dict[str, str],
+    params: Dict[str, Any],
+):
+    """
+    Low-occupancy trajectory-enriched node/edge cluster-state analysis.
+    """
+    job = get_current_job()
+    start_time = datetime.utcnow()
+    rq_job_id = job.id if job else f"transient-states-{job_uuid}"
+
+    project_id = dataset_ref.get("project_id")
+    system_id = dataset_ref.get("system_id")
+    cluster_id = dataset_ref.get("cluster_id")
+    if not project_id or not system_id or not cluster_id:
+        raise ValueError("transient_states requires project_id/system_id/cluster_id.")
+
+    results_dirs = project_store.ensure_results_directories(project_id, system_id)
+    result_filepath = results_dirs["jobs_dir"] / f"{job_uuid}.json"
+    result_payload: Dict[str, Any] = {
+        "job_id": job_uuid,
+        "rq_job_id": rq_job_id,
+        "analysis_type": "transient_states",
+        "status": "started",
+        "created_at": start_time.isoformat(),
+        "params": params,
+        "results": None,
+        "system_reference": {
+            "project_id": project_id,
+            "system_id": system_id,
+            "cluster_id": cluster_id,
+        },
+        "error": None,
+        "completed_at": None,
+    }
+
+    def save_progress(status_msg: str, progress: int):
+        if job:
+            job.meta["status"] = status_msg
+            job.meta["progress"] = progress
+            job.save_meta()
+        print(f"[TransientStates {job_uuid}] {status_msg}")
+
+    def write_result_to_disk(payload: Dict[str, Any]):
+        try:
+            with open(result_filepath, "w") as f:
+                json.dump(payload, f, indent=2)
+        except Exception as e:
+            print(f"CRITICAL: Failed to save result file {result_filepath}: {e}")
+            payload["status"] = "failed"
+            payload["error"] = f"Failed to save result file: {e}"
+
+    try:
+        save_progress("Initializing...", 0)
+        write_result_to_disk(result_payload)
+
+        sample_ids = params.get("sample_ids")
+        if isinstance(sample_ids, str):
+            sample_ids = [s.strip() for s in sample_ids.split(",") if s.strip()]
+        if not isinstance(sample_ids, list) or len(sample_ids) < 2:
+            raise ValueError("transient_states requires at least two sample_ids.")
+
+        def progress_cb(message: str, current: int, total: int):
+            total_i = max(1, int(total))
+            ratio = max(0.0, min(1.0, float(current) / float(total_i)))
+            save_progress(message, 10 + int(80 * ratio))
+
+        out = run_transient_state_analysis(
+            project_id=project_id,
+            system_id=system_id,
+            cluster_id=cluster_id,
+            sample_ids=sample_ids,
+            md_label_mode=str(params.get("md_label_mode") or "assigned"),
+            drop_invalid=not bool(params.get("keep_invalid", False)),
+            p_min=float(params.get("p_min", 0.005)),
+            p_max=float(params.get("p_max", 0.05)),
+            enrichment_min=float(params.get("enrichment_min", 1.0)),
+            epsilon=float(params.get("epsilon", 1e-9)),
+            top_k_nodes=int(params.get("top_k_nodes", 500)),
+            include_edges=bool(params.get("include_edges", True)),
+            edge_mode=str(params.get("edge_mode") or "cluster"),
+            edge_p_min=params.get("edge_p_min"),
+            edge_p_max=params.get("edge_p_max"),
+            edge_enrichment_min=params.get("edge_enrichment_min"),
+            delta_pmi_min=params.get("delta_pmi_min"),
+            top_k_edges=int(params.get("top_k_edges", 1000)),
+            progress_callback=progress_cb,
+        )
+
+        meta = out.get("metadata") or {}
+        analysis_id = str(meta.get("analysis_id") or "")
+        analysis_dir = Path(str(out.get("analysis_dir") or "")).resolve()
+        npz_path = Path(str(out.get("analysis_npz") or "")).resolve()
+        if not analysis_id or not analysis_dir.exists() or not npz_path.exists():
+            raise RuntimeError("transient_states did not write analysis artifacts as expected.")
+
+        result_payload["status"] = "finished"
+        result_payload["results"] = {
+            "analysis_type": "transient_states",
+            "analysis_id": analysis_id,
+            "analysis_dir": _relativize_path(analysis_dir),
+            "analysis_npz": _relativize_path(npz_path),
+            "summary": meta.get("summary") or {},
+        }
+
+    except Exception as e:
+        print(f"[TransientStates {job_uuid}] FAILED: {e}")
+        traceback.print_exc()
+        result_payload["status"] = "failed"
+        result_payload["error"] = str(e)
+        raise e
+
+    finally:
+        save_progress("Saving final result", 95)
+        result_payload["completed_at"] = datetime.utcnow().isoformat()
+        sanitized_payload = _convert_nan_to_none(result_payload)
+        write_result_to_disk(sanitized_payload)
+
+    save_progress("Transient-state analysis completed", 100)
+    return sanitized_payload
+
 
 def _gibbs_relaxation_batch_keys(analysis_id: str) -> Dict[str, str]:
     return _analysis_batch_keys("gibbs_relaxation", analysis_id)
