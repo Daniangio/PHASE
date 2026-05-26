@@ -2720,6 +2720,9 @@ def _endpoint_frustration_sample_worker(payload: dict[str, Any]) -> dict[str, An
         vals = dJ[edge][labels[:, r], labels[:, s]]
         q_edge_row[col] = float(np.mean(vals < 0)) if vals.size else np.nan
 
+    # Global endpoint separation per frame: ΔE = E_model_A - E_model_B.
+    delta_energy = np.asarray(model_a.energy_batch(labels) - model_b.energy_batch(labels), dtype=np.float32)
+
     local_node_a = _compute_local_node_energies(labels, model_a, edges)
     local_node_b = _compute_local_node_energies(labels, model_b, edges)
     raw_node_a = _compute_residue_frustration_raw(local_node_a, residue_neighbors)
@@ -2782,6 +2785,7 @@ def _endpoint_frustration_sample_worker(payload: dict[str, Any]) -> dict[str, An
         "global_node_pol_framewise": np.asarray(global_node_pol_series, dtype=np.float32),
         "global_edge_sym_framewise": np.asarray(global_edge_sym_series, dtype=np.float32),
         "global_edge_pol_framewise": np.asarray(global_edge_pol_series, dtype=np.float32),
+        "delta_energy_framewise": np.asarray(delta_energy, dtype=np.float32),
         "frame_count": np.asarray([n_frames], dtype=np.int32),
         "selected_edge_indices": np.asarray(top_edge_indices, dtype=np.int32),
     }
@@ -2797,6 +2801,7 @@ def _endpoint_frustration_sample_worker(payload: dict[str, Any]) -> dict[str, An
         "p_node": np.asarray(p_node_row, dtype=np.float32),
         "q_residue_all": np.asarray(q_residue_row, dtype=np.float32),
         "q_edge": np.asarray(q_edge_row, dtype=np.float32),
+        "delta_energy": np.asarray(delta_energy, dtype=np.float32),
         "frustration_node_sym_mean": np.mean(node_sym, axis=0, dtype=np.float32).astype(np.float32, copy=False),
         "frustration_node_sym_std": np.std(node_sym, axis=0, dtype=np.float32).astype(np.float32, copy=False),
         "frustration_node_sym_median": np.median(node_sym, axis=0).astype(np.float32, copy=False),
@@ -3005,6 +3010,12 @@ def upsert_endpoint_frustration_analysis(
     global_edge_sym_std = np.zeros((len(merged),), dtype=np.float32)
     global_edge_pol_mean = np.zeros((len(merged),), dtype=np.float32)
     global_edge_pol_std = np.zeros((len(merged),), dtype=np.float32)
+    delta_energy_all: list[np.ndarray] = []
+    delta_energy_mean = np.zeros((len(merged),), dtype=np.float32)
+    delta_energy_std = np.zeros((len(merged),), dtype=np.float32)
+    delta_energy_median = np.zeros((len(merged),), dtype=np.float32)
+    delta_energy_min = np.zeros((len(merged),), dtype=np.float32)
+    delta_energy_max = np.zeros((len(merged),), dtype=np.float32)
     payloads: list[dict[str, Any]] = []
     for sid in merged:
         entry = sample_by_id.get(sid)
@@ -3057,6 +3068,20 @@ def upsert_endpoint_frustration_analysis(
         p_node[row] = np.asarray(out_row["p_node"], dtype=np.float32)
         q_residue_all[row] = np.asarray(out_row["q_residue_all"], dtype=np.float32)
         q_edge[row] = np.asarray(out_row["q_edge"], dtype=np.float32)
+        de_row = np.asarray(out_row.get("delta_energy", np.zeros((0,), dtype=np.float32)), dtype=np.float32)
+        delta_energy_all.append(de_row)
+        if de_row.size:
+            delta_energy_mean[row] = float(np.mean(de_row))
+            delta_energy_std[row] = float(np.std(de_row))
+            delta_energy_median[row] = float(np.median(de_row))
+            delta_energy_min[row] = float(np.min(de_row))
+            delta_energy_max[row] = float(np.max(de_row))
+        else:
+            delta_energy_mean[row] = np.nan
+            delta_energy_std[row] = np.nan
+            delta_energy_median[row] = np.nan
+            delta_energy_min[row] = np.nan
+            delta_energy_max[row] = np.nan
         frustration_node_sym_mean[row] = np.asarray(out_row["frustration_node_sym_mean"], dtype=np.float32)
         frustration_node_sym_std[row] = np.asarray(out_row["frustration_node_sym_std"], dtype=np.float32)
         frustration_node_sym_median[row] = np.asarray(out_row["frustration_node_sym_median"], dtype=np.float32)
@@ -3096,6 +3121,25 @@ def upsert_endpoint_frustration_analysis(
             except Exception:
                 pass
 
+    energy_bins = 80
+    de_concat = np.concatenate(delta_energy_all, axis=0) if delta_energy_all else np.zeros((0,), dtype=np.float32)
+    if de_concat.size:
+        lo = float(np.nanmin(de_concat))
+        hi = float(np.nanmax(de_concat))
+        if not np.isfinite(lo) or not np.isfinite(hi):
+            lo, hi = -1.0, 1.0
+        if hi <= lo:
+            hi = lo + 1.0
+        pad = 1e-6 * (hi - lo)
+        delta_energy_bins = np.linspace(lo - pad, hi + pad, energy_bins + 1, dtype=np.float32)
+    else:
+        delta_energy_bins = np.linspace(-1.0, 1.0, energy_bins + 1, dtype=np.float32)
+    delta_energy_hist = np.zeros((len(merged), energy_bins), dtype=np.float32)
+    for row, de_row in enumerate(delta_energy_all):
+        if de_row.size:
+            hist, _ = np.histogram(np.asarray(de_row, dtype=float), bins=np.asarray(delta_energy_bins, dtype=float), density=True)
+            delta_energy_hist[row] = np.asarray(hist, dtype=np.float32)
+
     np.savez_compressed(
         npz_path,
         analysis_format_version=np.asarray([2], dtype=np.int32),
@@ -3118,6 +3162,13 @@ def upsert_endpoint_frustration_analysis(
         p_node=np.asarray(p_node, dtype=np.float32),
         q_residue_all=np.asarray(q_residue_all, dtype=np.float32),
         q_edge=np.asarray(q_edge, dtype=np.float32),
+        delta_energy_bins=np.asarray(delta_energy_bins, dtype=np.float32),
+        delta_energy_hist=np.asarray(delta_energy_hist, dtype=np.float32),
+        delta_energy_mean=np.asarray(delta_energy_mean, dtype=np.float32),
+        delta_energy_std=np.asarray(delta_energy_std, dtype=np.float32),
+        delta_energy_median=np.asarray(delta_energy_median, dtype=np.float32),
+        delta_energy_min=np.asarray(delta_energy_min, dtype=np.float32),
+        delta_energy_max=np.asarray(delta_energy_max, dtype=np.float32),
         frustration_node_sym_mean=np.asarray(frustration_node_sym_mean, dtype=np.float32),
         frustration_node_sym_std=np.asarray(frustration_node_sym_std, dtype=np.float32),
         frustration_node_sym_median=np.asarray(frustration_node_sym_median, dtype=np.float32),
@@ -3192,6 +3243,10 @@ def upsert_endpoint_frustration_analysis(
             "n_samples": int(len(merged)),
             "workers_used": int(workers_used),
             "sample_ids": merged,
+            "delta_energy": {
+                "definition": "E_model_A - E_model_B",
+                "bins": int(energy_bins),
+            },
             "top_residues_by_commitment_weight": [
                 {"residue_index": int(idx), "score": float(d_residue[int(idx)])} for idx in residue_rank
             ],

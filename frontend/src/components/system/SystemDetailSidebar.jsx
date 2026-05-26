@@ -117,6 +117,13 @@ export default function SystemDetailSidebar({
         </button>
         <button
           type="button"
+          onClick={() => navigate(`/projects/${projectId}/systems/${systemId}/debug/molstar_trajectory`)}
+          className="text-xs px-2 py-2 rounded-md border border-gray-700 text-gray-200 hover:bg-gray-700/40"
+        >
+          Mol* traj test
+        </button>
+        <button
+          type="button"
           onClick={() => navigate(`/projects/${projectId}/systems/${systemId}/sampling/lambda_sweep${buildSamplingSuffix()}`)}
           className="text-xs px-2 py-2 rounded-md border border-gray-700 text-gray-200 hover:bg-gray-700/40"
         >

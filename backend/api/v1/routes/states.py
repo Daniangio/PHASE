@@ -2,6 +2,7 @@ import json
 import os
 import shutil
 import uuid
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
@@ -54,6 +55,13 @@ def _drop_state_metastable_data(system_meta, state_id: str) -> None:
     if not system_meta.metastable_states:
         system_meta.metastable_locked = False
         system_meta.analysis_mode = "macro" if system_meta.macro_locked else None
+
+
+def _resolve_state_file(project_id: str, system_id: str, file_ref: str):
+    path = Path(file_ref)
+    if path.is_absolute():
+        return path
+    return project_store.resolve_path(project_id, system_id, file_ref)
 
 
 @router.get(
@@ -134,6 +142,82 @@ async def download_state_trajectory_frame(project_id: str, system_id: str, state
         media_type="chemical/x-pdb",
         headers={"X-PHASE-Frame": str(frame_i), "X-PHASE-Frame-Count": str(n_frames)},
     )
+
+
+@router.get(
+    "/projects/{project_id}/systems/{system_id}/states/{state_id}/trajectory/raw",
+    summary="Download the raw stored state trajectory for Mol* trajectory playback",
+)
+async def download_state_trajectory_raw(project_id: str, system_id: str, state_id: str):
+    try:
+        system = project_store.get_system(project_id, system_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"System '{system_id}' not found.")
+
+    state_meta = get_state_or_404(system, state_id)
+    if not state_meta.trajectory_file:
+        raise HTTPException(status_code=404, detail=f"No trajectory stored for state '{state_id}'.")
+
+    file_path = _resolve_state_file(project_id, system_id, state_meta.trajectory_file)
+    if not file_path.exists():
+        if Path(state_meta.trajectory_file).is_absolute():
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    "Stored trajectory points to an absolute host path that is not visible inside the backend "
+                    "container. Re-upload the trajectory from the System page so it is copied into the shared "
+                    "PHASE data root, or bind-mount that host path into the backend/worker containers."
+                ),
+            )
+        raise HTTPException(status_code=404, detail="Stored trajectory file is missing on disk.")
+
+    download_name = state_meta.source_traj or os.path.basename(file_path)
+    return FileResponse(
+        file_path,
+        filename=download_name,
+        media_type="application/octet-stream",
+    )
+
+
+@router.get(
+    "/projects/{project_id}/systems/{system_id}/states/{state_id}/trajectory/raw/info",
+    summary="Check whether the raw stored state trajectory is reachable by the backend",
+)
+async def get_state_trajectory_raw_info(project_id: str, system_id: str, state_id: str):
+    try:
+        system = project_store.get_system(project_id, system_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"System '{system_id}' not found.")
+
+    state_meta = get_state_or_404(system, state_id)
+    if not state_meta.trajectory_file:
+        return {
+            "available": False,
+            "detail": f"No trajectory stored for state '{state_id}'.",
+            "trajectory_file": None,
+            "absolute_path": False,
+        }
+
+    file_path = _resolve_state_file(project_id, system_id, state_meta.trajectory_file)
+    exists = file_path.exists()
+    detail = "Trajectory is reachable by the backend."
+    if not exists and Path(state_meta.trajectory_file).is_absolute():
+        detail = (
+            "Stored trajectory points to an absolute host path that is not visible inside the backend container. "
+            "Re-upload the trajectory from the System page so it is copied into the shared PHASE data root, "
+            "or bind-mount that host path into the backend/worker containers."
+        )
+    elif not exists:
+        detail = "Stored trajectory file is missing on disk."
+
+    return {
+        "available": bool(exists),
+        "detail": detail,
+        "trajectory_file": state_meta.trajectory_file,
+        "source_traj": state_meta.source_traj,
+        "absolute_path": Path(state_meta.trajectory_file).is_absolute(),
+        "size_bytes": file_path.stat().st_size if exists else None,
+    }
 
 
 @router.get(
@@ -269,6 +353,7 @@ async def upload_state_trajectory(
     slice_spec: str = Form(None),
     residue_selection: str = Form(None),
     resid_shift: Optional[int] = Form(None),
+    build_descriptors_after_upload: bool = Form(True),
 ):
     try:
         system_meta = project_store.get_system(project_id, system_id)
@@ -313,27 +398,34 @@ async def upload_state_trajectory(
     state_meta.slice_spec = slice_spec
     state_meta.resid_shift = int(state_meta.resid_shift if resid_shift is None else resid_shift)
     state_meta.residue_selection = residue_selection.strip() if residue_selection else None
-    if state_meta.descriptor_file:
-        _unlink_if_inside_system(project_id, system_id, state_meta.descriptor_file)
-    if state_meta.descriptor_metadata_file:
-        _unlink_if_inside_system(project_id, system_id, state_meta.descriptor_metadata_file)
-    state_meta.descriptor_file = None
-    state_meta.descriptor_metadata_file = None
-    if state_meta.metastable_metadata_file:
-        _unlink_if_inside_system(project_id, system_id, state_meta.metastable_metadata_file)
-        state_meta.metastable_metadata_file = None
-    if state_meta.metastable_labels_file:
-        _unlink_if_inside_system(project_id, system_id, state_meta.metastable_labels_file)
-        state_meta.metastable_labels_file = None
-    _drop_state_metastable_data(system_meta, state_id)
-    state_meta.residue_keys = []
-    state_meta.residue_mapping = {}
-    state_meta.n_frames = 0
+
+    if build_descriptors_after_upload:
+        if state_meta.descriptor_file:
+            _unlink_if_inside_system(project_id, system_id, state_meta.descriptor_file)
+        if state_meta.descriptor_metadata_file:
+            _unlink_if_inside_system(project_id, system_id, state_meta.descriptor_metadata_file)
+        state_meta.descriptor_file = None
+        state_meta.descriptor_metadata_file = None
+        if state_meta.metastable_metadata_file:
+            _unlink_if_inside_system(project_id, system_id, state_meta.metastable_metadata_file)
+            state_meta.metastable_metadata_file = None
+        if state_meta.metastable_labels_file:
+            _unlink_if_inside_system(project_id, system_id, state_meta.metastable_labels_file)
+            state_meta.metastable_labels_file = None
+        _drop_state_metastable_data(system_meta, state_id)
+        state_meta.residue_keys = []
+        state_meta.residue_mapping = {}
+        state_meta.n_frames = 0
 
     if not state_meta.pdb_file:
         raise HTTPException(status_code=400, detail="No stored PDB for this state. Upload PDB first.")
 
     project_store.save_system(system_meta)
+
+    if not build_descriptors_after_upload:
+        refresh_system_metadata(system_meta)
+        project_store.save_system(system_meta)
+        return serialize_system(system_meta)
 
     try:
         await build_state_descriptors(

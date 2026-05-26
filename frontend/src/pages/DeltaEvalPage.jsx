@@ -6,6 +6,7 @@ import Plot from 'react-plotly.js';
 import Loader from '../components/common/Loader';
 import ErrorMessage from '../components/common/ErrorMessage';
 import HelpDrawer from '../components/common/HelpDrawer';
+import EnergyDistributionPlot, { buildEnergyDistributionPlot } from '../components/common/EnergyDistributionPlot';
 import { fetchClusterAnalyses, fetchClusterAnalysisData, fetchPottsClusterInfo, fetchSystem } from '../api/projects';
 import { fetchJobStatus, submitEndpointFrustrationJob } from '../api/jobs';
 
@@ -185,6 +186,7 @@ export default function DeltaEvalPage() {
   const [edgeBlendStrength, setEdgeBlendStrength] = useState(0.75);
   const [residueLimit, setResidueLimit] = useState(60);
   const [edgeLimit, setEdgeLimit] = useState(80);
+  const [deltaEnergyGraphMode, setDeltaEnergyGraphMode] = useState('histogram');
   const [helpOpen, setHelpOpen] = useState(false);
 
   const [analyses, setAnalyses] = useState([]);
@@ -647,6 +649,29 @@ export default function DeltaEvalPage() {
     return sampleLabels[selectedSampleIndex] || selectedSampleId;
   }, [selectedSampleIndex, sampleLabels, selectedSampleId]);
 
+  const deltaEnergySeries = useMemo(() => {
+    const bins = Array.isArray(analysisData?.data?.delta_energy_bins)
+      ? analysisData.data.delta_energy_bins.map(Number)
+      : [];
+    const hist = Array.isArray(analysisData?.data?.delta_energy_hist) ? analysisData.data.delta_energy_hist : [];
+    if (bins.length < 2 || !hist.length) return [];
+    return hist.map((row, idx) => ({
+      label: sampleLabels[idx] || sampleIds[idx] || `sample ${idx + 1}`,
+      kind: sampleTypes[idx] || 'sample',
+      bins,
+      density: Array.isArray(row) ? row.map(Number) : [],
+    }));
+  }, [analysisData, sampleLabels, sampleIds, sampleTypes]);
+
+  const deltaEnergyPlot = useMemo(() => buildEnergyDistributionPlot({
+    series: deltaEnergySeries,
+    mode: deltaEnergyGraphMode,
+    title: 'ΔE distributions over selected trajectories',
+    xTitle: 'ΔE = E_model_A - E_model_B',
+    height: 340,
+    background: 'dark',
+  }), [deltaEnergySeries, deltaEnergyGraphMode]);
+
   const analysisSummary = selectedAnalysisMeta?.summary || {};
 
   if (loadingSystem) return <Loader message="Loading endpoint-local analysis..." />;
@@ -1023,6 +1048,28 @@ export default function DeltaEvalPage() {
                   </div>
                 </div>
               </div>
+
+              {deltaEnergyPlot ? (
+                <div className="bg-gray-800 border border-gray-700 rounded-lg p-3 overflow-hidden">
+                  <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+                    <div>
+                      <h2 className="text-sm font-semibold text-gray-100">Delta energy distributions</h2>
+                      <p className="text-xs text-gray-400">
+                        Global endpoint score per frame: ΔE = E_model_A - E_model_B. Negative values favor model A.
+                      </p>
+                    </div>
+                    <select
+                      value={deltaEnergyGraphMode}
+                      onChange={(e) => setDeltaEnergyGraphMode(e.target.value)}
+                      className="rounded-md border border-gray-700 bg-gray-950 px-2 py-1.5 text-xs text-gray-100"
+                    >
+                      <option value="histogram">histograms + fitted curves</option>
+                      <option value="curves">fitted curves only</option>
+                    </select>
+                  </div>
+                  <EnergyDistributionPlot plot={deltaEnergyPlot} height={340} />
+                </div>
+              ) : null}
 
               <div className="grid grid-cols-1 2xl:grid-cols-2 gap-4">
                 <div className="bg-gray-800 border border-gray-700 rounded-lg p-3 overflow-hidden">

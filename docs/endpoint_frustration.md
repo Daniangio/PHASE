@@ -5,7 +5,7 @@ This analysis compares one or more clustered trajectories against a fixed pair o
 - `model A`
 - `model B`
 
-It stores two families of outputs for every selected sample.
+It stores three families of outputs for every selected sample.
 
 ## Commitment
 
@@ -65,6 +65,20 @@ Interpretation:
 - polarity: direction of the local conflict
 - webserver color convention for polarity: red means **more A-like** (less frustrated under model A), blue means more B-like
 
+## Delta Energy
+
+The analysis also computes a global endpoint score for every frame:
+
+- `ΔE = E_model_A - E_model_B`
+
+Interpretation:
+
+- `ΔE < 0`: the frame is energetically lower under model A
+- `ΔE > 0`: the frame is energetically lower under model B
+- distribution overlap between trajectories suggests that the endpoint pair does not separate those trajectories globally
+
+The web page shows these values as a distribution panel. Histogram bars are kept neutral gray; the fitted/smoothed distribution curves carry the sample colors. A display toggle can show either histograms plus fitted curves or fitted curves only.
+
 ## Saved outputs
 
 Main analysis file:
@@ -83,6 +97,8 @@ Main NPZ contains compact per-sample summaries used by the web UI:
 - `frustration_node_pol_mean`, `frustration_node_pol_std`, `frustration_node_pol_median`
 - `frustration_edge_sym_mean`, `frustration_edge_sym_std`, `frustration_edge_sym_median`
 - `frustration_edge_pol_mean`, `frustration_edge_pol_std`, `frustration_edge_pol_median`
+- `delta_energy_bins`, `delta_energy_hist`
+- `delta_energy_mean`, `delta_energy_std`, `delta_energy_median`, `delta_energy_min`, `delta_energy_max`
 - `D_residue`, `D_edge`
 - `top_edge_indices`
 
@@ -96,6 +112,7 @@ Per-sample NPZ contains framewise arrays:
 - `global_node_pol_framewise`
 - `global_edge_sym_framewise`
 - `global_edge_pol_framewise`
+- `delta_energy_framewise`
 
 ## Parameters
 
@@ -125,6 +142,8 @@ The endpoint page shows four bar plots for the selected sample:
 - edge commitment
 - residue frustration
 - edge frustration
+
+It also shows a delta-energy distribution panel for all samples stored in the selected analysis.
 
 Frustration can be shown either as:
 

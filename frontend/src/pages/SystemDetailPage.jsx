@@ -850,7 +850,14 @@ export default function SystemDetailPage() {
     }
   };
 
-  const handleUploadTrajectory = async (stateId, file, sliceSpec, residueSelection, residShift) => {
+  const handleUploadTrajectory = async (
+    stateId,
+    file,
+    sliceSpec,
+    residueSelection,
+    residShift,
+    rebuildDescriptors = true
+  ) => {
     setUploadingState(stateId);
     setActionError(null);
     try {
@@ -870,6 +877,7 @@ export default function SystemDetailPage() {
       if (!Number.isNaN(parsedShift)) {
         payload.append('resid_shift', String(parsedShift));
       }
+      payload.append('build_descriptors_after_upload', rebuildDescriptors ? 'true' : 'false');
       await uploadStateTrajectory(projectId, systemId, stateId, payload, {
         onUploadProgress: (percent) =>
           setUploadProgress((prev) => ({
@@ -878,7 +886,11 @@ export default function SystemDetailPage() {
           })),
         onProcessing: (processing) => setProcessingState(processing ? stateId : null),
       });
-      setActionMessage(file ? 'Uploaded trajectory; rebuilding descriptors...' : 'Building descriptors from the stored PDB...');
+      setActionMessage(
+        file
+          ? (rebuildDescriptors ? 'Uploaded trajectory; rebuilding descriptors...' : 'Uploaded trajectory into the shared data root.')
+          : 'Building descriptors from the stored PDB...'
+      );
       await refreshSystem();
     } catch (err) {
       setActionError(err.message);

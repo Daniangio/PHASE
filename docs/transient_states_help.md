@@ -149,3 +149,17 @@ Use the 3D view to check whether hits cluster in a meaningful region, occur near
 The 3D viewer has a dedicated frame panel. Choose a reference state PDB for static coloring, or enable trajectory-frame loading to extract one stored frame from that state's trajectory. If the state has no trajectory, upload one from the System page: open the States panel details, choose the trajectory file for the state, and click Upload & Build.
 
 The current implementation loads one frame at a time as a PDB instance. Use it to inspect whether a transient hit corresponds to a plausible structural switch or to broad loop flexibility.
+
+## Raw Mol* Trajectory Test Page
+
+The `Mol* traj test` page loads a topology file plus a raw trajectory file directly into Mol*. It is useful when you want native Mol* frame playback instead of the single-frame PDB extraction used by the transient 3D page.
+
+Supported coordinate inputs depend on Mol* browser support, but XTC, DCD, TRR, and NCTRAJ are exposed in the loader. The topology and trajectory must have matching atom order and atom count.
+
+Current behavior:
+
+- Stored PHASE state: loads the stored state structure and raw stored trajectory from the webserver.
+- Local files: loads a local PDB/mmCIF/GRO topology and local XTC/DCD/TRR trajectory through browser object URLs.
+- Frame selection: Mol* receives the full trajectory and its native frame controls are used for scrolling. Server-side frame-range subsetting is not implemented in this test page.
+
+If a stored state was created from `phase_console` with an absolute trajectory path outside `PHASE_DATA_ROOT`, Docker may not be able to stream that file. In that case the raw trajectory test page will ask you to either re-upload the trajectory from the System page, which stores it under the shared data root, or bind-mount the original host trajectory directory into the backend container.

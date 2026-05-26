@@ -109,12 +109,16 @@ def test_endpoint_frustration_analysis_writes_summary_and_framewise_npz(monkeypa
         assert np.asarray(data["q_edge"]).shape == (2, 1)
         assert np.asarray(data["frustration_node_sym_mean"]).shape == (2, 2)
         assert np.asarray(data["frustration_edge_sym_mean"]).shape == (2, 1)
+        assert np.asarray(data["delta_energy_hist"]).shape[0] == 2
+        assert np.asarray(data["delta_energy_bins"]).ndim == 1
+        assert np.asarray(data["delta_energy_mean"]).shape == (2,)
         assert np.all(np.asarray(data["node_norm_scale_a"]) > 0)
         assert np.all(np.asarray(data["edge_norm_scale_a"]) > 0)
     framewise_dir = Path(out["analysis_dir"]) / "samples"
     with np.load(framewise_dir / "md1.npz", allow_pickle=False) as data:
         assert np.asarray(data["frustration_node_sym_framewise"]).shape == (3, 2)
         assert np.asarray(data["frustration_edge_sym_framewise"]).shape == (3, 1)
+        assert np.asarray(data["delta_energy_framewise"]).shape == (3,)
 
 
 def test_endpoint_frustration_analysis_drops_invalid_frames(monkeypatch, tmp_path):

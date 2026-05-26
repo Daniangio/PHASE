@@ -242,6 +242,13 @@ export default function TransientStates3DPage() {
           <button type="button" onClick={() => navigate(`/projects/${projectId}/systems/${systemId}/sampling/transient_states${selectedClusterId ? `?cluster_id=${encodeURIComponent(selectedClusterId)}` : ''}`)} className="text-xs text-cyan-300 hover:text-cyan-200">← Back to transient table</button>
           <h1 className="text-2xl font-semibold text-white mt-2">Transient-State 3D Viewer</h1>
           <p className="text-sm text-gray-400">Residues are colored by the strongest transient-state score after the cluster-count flexibility filter.</p>
+          <button
+            type="button"
+            onClick={() => navigate(`/projects/${projectId}/systems/${systemId}/debug/molstar_trajectory`)}
+            className="mt-2 text-xs text-cyan-300 hover:text-cyan-200"
+          >
+            Open raw Mol* trajectory test page
+          </button>
         </div>
         <div className="flex gap-2"><button type="button" onClick={() => setHelpOpen(true)} className="inline-flex items-center gap-2 px-3 py-2 rounded-md border border-gray-700 text-sm text-gray-200 hover:bg-gray-800"><CircleHelp className="h-4 w-4" /> Help</button><button type="button" onClick={loadAnalyses} className="inline-flex items-center gap-2 px-3 py-2 rounded-md border border-gray-700 text-sm text-gray-200 hover:bg-gray-800"><RefreshCw className="h-4 w-4" /> Refresh</button></div>
       </div>
@@ -277,7 +284,29 @@ export default function TransientStates3DPage() {
             <p>Gray residues are not selected by the current sample/flexibility filters.</p>
           </div>
         </aside>
-        <section className="rounded-lg border border-gray-800 bg-gray-900/40 overflow-hidden min-h-[720px]"><div ref={containerRef} className="w-full h-[720px] bg-black" />{viewerStatus === 'initializing' && <div className="p-3 text-sm text-gray-400">Initializing viewer...</div>}</section>
+        <main className="space-y-3">
+          <div className="rounded-lg border border-gray-800 bg-gray-900/40 p-3">
+            <div className="flex items-center justify-between">
+              <h2 className="text-sm font-semibold text-gray-200">3D Viewer</h2>
+              <button
+                type="button"
+                onClick={loadStructure}
+                className="text-xs px-3 py-2 rounded-md border border-gray-700 text-gray-200 hover:border-gray-500 inline-flex items-center gap-2"
+              >
+                <RefreshCw className="h-4 w-4" />
+                Reload structure
+              </button>
+            </div>
+            <div className="mt-3 h-[70vh] min-h-[520px] rounded-md border border-gray-800 bg-black/20 overflow-hidden relative">
+              {viewerStatus === 'initializing' && (
+                <div className="absolute inset-0 z-10 flex items-center justify-center bg-black/60">
+                  <Loader message="Initializing viewer..." />
+                </div>
+              )}
+              <div ref={containerRef} className="w-full h-full relative" />
+            </div>
+          </div>
+        </main>
       </div>
       {framePanelOpen && (
         <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4">

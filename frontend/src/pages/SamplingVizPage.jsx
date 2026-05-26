@@ -6,6 +6,7 @@ import Plot from 'react-plotly.js';
 import Loader from '../components/common/Loader';
 import ErrorMessage from '../components/common/ErrorMessage';
 import HelpDrawer from '../components/common/HelpDrawer';
+import EnergyDistributionPlot, { buildEnergyDistributionPlot } from '../components/common/EnergyDistributionPlot';
 import {
   deleteClusterAnalysis,
   deleteSamplingSample,
@@ -16,12 +17,6 @@ import {
   fetchSystem,
 } from '../api/projects';
 import { fetchJobStatus, submitMdSamplesRefreshJob, submitPottsAnalysisJob } from '../api/jobs';
-
-const palette = ['#22d3ee', '#f97316', '#10b981', '#f43f5e', '#60a5fa', '#f59e0b', '#a855f7', '#84cc16'];
-
-function pickColor(idx) {
-  return palette[idx % palette.length];
-}
 
 function buildEdgeMatrix(n, edges, values) {
   const matrix = Array.from({ length: n }, () => Array.from({ length: n }, () => null));
@@ -205,6 +200,7 @@ export default function SamplingVizPage() {
   const [runAnalysisModelId, setRunAnalysisModelId] = useState('');
   const [selectedPoseStateId, setSelectedPoseStateId] = useState('');
   const [energyLoadLimit, setEnergyLoadLimit] = useState(1500);
+  const [energyGraphMode, setEnergyGraphMode] = useState('histogram');
   const [analysisEdgeMode, setAnalysisEdgeMode] = useState('model');
   const [analysisContactCutoff, setAnalysisContactCutoff] = useState('10');
   const [analysisContactAtomMode, setAnalysisContactAtomMode] = useState('CA');
@@ -965,115 +961,19 @@ export default function SamplingVizPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedAnalysisModelId, energyAnalysesForModel, energyLoadLimit, loadAnalysisData]);
 
-  const energyPlot = useMemo(() => {
-    if (!energySeries.length) return null;
+  const energyPlot = useMemo(() => buildEnergyDistributionPlot({
+    series: energySeries.map((s) => ({
+      label: s.label,
+      kind: s.kind,
+      values: s.energies,
+    })),
+    mode: energyGraphMode,
+    title: energyGraphMode === 'curves' ? 'Energy fitted curves' : 'Energy distributions',
+    xTitle: 'Energy',
+    height: 260,
+    background: 'white',
+  }), [energySeries, energyGraphMode]);
 
-    const histogramSeries = energySeries.filter((s) => s.kind !== 'state_pose' && Array.isArray(s.energies) && s.energies.length > 1);
-    const poseSeries = energySeries.filter((s) => s.kind === 'state_pose' && Array.isArray(s.energies) && s.energies.length);
-    const allSeries = [...histogramSeries, ...poseSeries];
-    if (!allSeries.length) return null;
-
-    // Use a shared xbins across traces so histograms align.
-    let globalMin = Infinity;
-    let globalMax = -Infinity;
-    let minBinSize = Infinity;
-    for (const s of allSeries) {
-      const arr = Array.isArray(s.energies) ? s.energies : [];
-      if (!arr.length) continue;
-      let localMin = Infinity;
-      let localMax = -Infinity;
-      for (let i = 0; i < arr.length; i += 1) {
-        const v = arr[i];
-        if (!Number.isFinite(v)) continue;
-        if (v < localMin) localMin = v;
-        if (v > localMax) localMax = v;
-      }
-      if (!Number.isFinite(localMin) || !Number.isFinite(localMax)) continue;
-      if (Number.isFinite(localMin)) globalMin = Math.min(globalMin, localMin);
-      if (Number.isFinite(localMax)) globalMax = Math.max(globalMax, localMax);
-      const range = localMax - localMin;
-      if (Number.isFinite(range) && range > 0) {
-        // "Thinner binning among all distributions": pick the smallest implied bin size.
-        minBinSize = Math.min(minBinSize, range / 40);
-      }
-    }
-    if (!Number.isFinite(globalMin) || !Number.isFinite(globalMax)) return null;
-    const globalRange = globalMax - globalMin;
-    if (!Number.isFinite(minBinSize) || minBinSize <= 0) {
-      minBinSize = globalRange > 0 ? globalRange / 40 : 1.0;
-    }
-    if (globalRange > 0) {
-      const maxBins = 200;
-      const impliedBins = globalRange / minBinSize;
-      if (Number.isFinite(impliedBins) && impliedBins > maxBins) {
-        minBinSize = globalRange / maxBins;
-      }
-    }
-
-    const histogramTraces = histogramSeries.map((s, idx) => ({
-      x: s.energies,
-      type: 'histogram',
-      histnorm: 'probability',
-      name: s.label,
-      opacity: 0.55,
-      marker: { color: pickColor(idx) },
-      autobinx: false,
-      xbins: { start: globalMin, end: globalMax, size: minBinSize },
-      bingroup: 'energies',
-    }));
-
-    const poseShapes = poseSeries.map((s, idx) => {
-      const x = Number(s.energies[0]);
-      return {
-        type: 'line',
-        xref: 'x',
-        yref: 'paper',
-        x0: x,
-        x1: x,
-        y0: 0,
-        y1: 1,
-        line: {
-          color: pickColor(histogramSeries.length + idx),
-          width: 2,
-          dash: 'dot',
-        },
-      };
-    });
-    const poseAnnotations = poseSeries.map((s, idx) => ({
-      x: Number(s.energies[0]),
-      y: 1,
-      xref: 'x',
-      yref: 'paper',
-      xanchor: 'left',
-      yanchor: 'bottom',
-      text: s.label,
-      showarrow: false,
-      font: {
-        size: 10,
-        color: pickColor(histogramSeries.length + idx),
-      },
-      bgcolor: 'rgba(255,255,255,0.75)',
-      bordercolor: pickColor(histogramSeries.length + idx),
-      borderwidth: 1,
-      borderpad: 2,
-    }));
-
-    return {
-      data: histogramTraces,
-      layout: {
-        height: 260,
-        margin: { l: 40, r: 10, t: 10, b: 40 },
-        paper_bgcolor: '#ffffff',
-        plot_bgcolor: '#ffffff',
-        font: { color: '#111827' },
-        barmode: 'overlay',
-        xaxis: { title: 'Energy', color: '#111827' },
-        yaxis: { title: 'Probability', color: '#111827' },
-        shapes: poseShapes,
-        annotations: poseAnnotations,
-      },
-    };
-  }, [energySeries]);
 
   if (loadingSystem) return <Loader message="Loading sampling explorer..." />;
   if (systemError) return <ErrorMessage message={systemError} />;
@@ -1859,22 +1759,28 @@ export default function SamplingVizPage() {
             {energyPlot && (
               <div className="rounded-md border border-gray-800 bg-white p-3">
                 <div className="flex items-center justify-between gap-2 mb-2">
-                  <p className="text-xs font-semibold text-gray-800">Energy histograms</p>
-                  <button
-                    type="button"
-                    className="text-[11px] text-gray-600 hover:text-gray-800"
-                    onClick={() => setOverlayPlot({ ...energyPlot, title: 'Energy histograms (overlay)' })}
-                  >
-                    Maximize
-                  </button>
+                  <p className="text-xs font-semibold text-gray-800">
+                    {energyGraphMode === 'curves' ? 'Energy fitted curves' : 'Energy distributions'}
+                  </p>
+                  <div className="flex items-center gap-2">
+                    <select
+                      value={energyGraphMode}
+                      onChange={(e) => setEnergyGraphMode(e.target.value)}
+                      className="rounded border border-gray-300 bg-white px-2 py-1 text-[11px] text-gray-800"
+                    >
+                      <option value="histogram">histograms + fitted curves</option>
+                      <option value="curves">fitted curves only</option>
+                    </select>
+                    <button
+                      type="button"
+                      className="text-[11px] text-gray-600 hover:text-gray-800"
+                      onClick={() => setOverlayPlot({ ...energyPlot, title: 'Energy distributions (overlay)' })}
+                    >
+                      Maximize
+                    </button>
+                  </div>
                 </div>
-                <Plot
-                  data={energyPlot.data}
-                  layout={energyPlot.layout}
-                  config={{ displayModeBar: false, responsive: true }}
-                  useResizeHandler
-                  style={{ width: '100%', height: '260px' }}
-                />
+                <EnergyDistributionPlot plot={energyPlot} height={260} />
               </div>
             )}
           </section>

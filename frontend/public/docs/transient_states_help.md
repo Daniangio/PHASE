@@ -88,6 +88,9 @@ Positive `Delta PMI` means the joint state is enriched beyond what would be expe
 - `Max dwell`: longest visit in frames.
 - `Score`: enrichment weighted by support, `log2_enrichment * sqrt(count)`.
 
+Column Definitions & Structural Meaning
+Residue: The specific amino acid residue label from your structural topology. It identifies where the transient event is occurring in the protein.Sample: The specific simulation trajectory where this particular state is heavily populated. This is your focal trajectory. In your data, these are distinct states like MD active, MD pas (passive), or MD inactive.Cluster: The structural/conformational cluster identifier (e.g., c0, c1, c2) that the residue is visiting. This represents a specific local state, such as a rotameric position or a backbone dihedral state.Occ. (Occupancy): The percentage of total simulation frames in the focal trajectory where this specific residue was found in this specific cluster. For example, res_174 spends exactly 4.50% of its time in cluster c0 during the MD active simulation.Bg. (Background): The pooled occupancy of this exact same cluster across all other trajectories combined (the leave-one-out background).Crucial Observation: For your top rows (res_174, res_21, res_74, res_51), the background is 0.00%. This means this conformational state never appears in the other simulation conditions, making it completely unique to the focal sample.log2 enrich (Log2 Enrichment): A logarithmic measure of how much more frequent this state is in the focal sample versus the background.When background (Bg.) is absolute 0.00%, this value spikes to a mathematical ceiling (around 23.0 to 25.0 in your data) driven entirely by the regularization constant $\epsilon$.For res_182, the enrichment is 6.07. This means it is $2^{6.07} \approx 67$ times more frequent in MD active ($8.71\%$) than in the background ($0.13\%$).Episodes: The number of discrete, contiguous blocks of frames where the residue entered and remained in this cluster.res_174 enters cluster c0 211 separate times during the simulation, meaning it is a highly recurrent, fluttering switch.res_43 has exactly 1 episode, meaning it transitioned into cluster c1 exactly once, stayed there for a while, and left (or stayed until the simulation ended).Mean dwell: The average duration (measured in simulation frames) that the residue remains inside the cluster during a single episode. For res_174, each of its 211 visits lasted an average of 24.0 frames.Max dwell: The longest single continuous visit (in frames) recorded during the simulation. For res_21, while its average visit was 94.0 frames, its longest single block lasted for an impressive 1,994 frames.Score: The final metric used to rank the relevance of these hits, calculated as $\text{Score} = \text{log2\_enrichment} \times \sqrt{\text{total\_count}}$. It balances high enrichment with physical statistical support (total frames).
+
 ### Edge Table
 
 - `Edge`: residue pair.
@@ -149,3 +152,17 @@ Use the 3D view to check whether hits cluster in a meaningful region, occur near
 The 3D viewer has a dedicated frame panel. Choose a reference state PDB for static coloring, or enable trajectory-frame loading to extract one stored frame from that state's trajectory. If the state has no trajectory, upload one from the System page: open the States panel details, choose the trajectory file for the state, and click Upload & Build.
 
 The current implementation loads one frame at a time as a PDB instance. Use it to inspect whether a transient hit corresponds to a plausible structural switch or to broad loop flexibility.
+
+## Raw Mol* Trajectory Test Page
+
+The `Mol* traj test` page loads a topology file plus a raw trajectory file directly into Mol*. It is useful when you want native Mol* frame playback instead of the single-frame PDB extraction used by the transient 3D page.
+
+Supported coordinate inputs depend on Mol* browser support, but XTC, DCD, TRR, and NCTRAJ are exposed in the loader. The topology and trajectory must have matching atom order and atom count.
+
+Current behavior:
+
+- Stored PHASE state: loads the stored state structure and raw stored trajectory from the webserver.
+- Local files: loads a local PDB/mmCIF/GRO topology and local XTC/DCD/TRR trajectory through browser object URLs.
+- Frame selection: Mol* receives the full trajectory and its native frame controls are used for scrolling. Server-side frame-range subsetting is not implemented in this test page.
+
+If a stored state was created from `phase_console` with an absolute trajectory path outside `PHASE_DATA_ROOT`, Docker may not be able to stream that file. In that case the raw trajectory test page will ask you to either re-upload the trajectory from the System page, which stores it under the shared data root, or bind-mount the original host trajectory directory into the backend container.

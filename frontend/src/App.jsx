@@ -25,6 +25,7 @@ import PottsNearestNeighborPage from './pages/PottsNearestNeighborPage';
 import PottsNearestNeighborGraphPage from './pages/PottsNearestNeighborGraphPage';
 import PottsNearestNeighborComparePage from './pages/PottsNearestNeighborComparePage';
 import MolstarDebugPage from './pages/MolstarDebugPage';
+import MolstarTrajectoryTestPage from './pages/MolstarTrajectoryTestPage';
 import HealthPage from './pages/HealthPage';
 import JobStatusPage from './pages/JobStatusPage';
 
@@ -77,6 +78,10 @@ export default function App() {
             element={<TransientStates3DPage />}
           />
           <Route
+            path="/projects/:projectId/systems/:systemId/debug/molstar_trajectory"
+            element={<MolstarTrajectoryTestPage />}
+          />
+          <Route
             path="/projects/:projectId/systems/:systemId/sampling/lambda_sweep"
             element={<LambdaSweepPage />}
           />
@@ -112,6 +117,7 @@ export default function App() {
           <Route path="/health" element={<HealthPage />} />
           <Route path="/jobs/:jobId" element={<JobStatusPage />} />
           <Route path="/debug/molstar" element={<MolstarDebugPage />} />
+          <Route path="/debug/molstar_trajectory" element={<MolstarTrajectoryTestPage />} />
           <Route path="*" element={<Navigate to="/projects" replace />} />
         </Routes>
       </AppLayout>

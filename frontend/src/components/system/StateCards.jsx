@@ -15,9 +15,16 @@ export function StateCard({
   const [sliceSpec, setSliceSpec] = useState(state?.slice_spec || '');
   const [residueSelection, setResidueSelection] = useState(state?.residue_selection || '');
   const [residShift, setResidShift] = useState(String(state?.resid_shift ?? 0));
+  const [rebuildDescriptors, setRebuildDescriptors] = useState(true);
 
   const descriptorLabel = state?.descriptor_file ? 'Ready' : 'Not built';
   const trajectoryLabel = state?.source_traj || '—';
+  const trajectoryStoredExternally = typeof state?.trajectory_file === 'string' && state.trajectory_file.startsWith('/');
+  const uploadButtonLabel = uploading
+    ? (rebuildDescriptors ? 'Building...' : 'Uploading...')
+    : file
+      ? (rebuildDescriptors ? 'Upload & Build' : 'Upload only')
+      : 'Build';
 
   return (
     <article className="bg-gray-900 rounded-lg p-4 border border-gray-700 space-y-3">
@@ -39,7 +46,10 @@ export function StateCard({
       <dl className="space-y-1 text-sm text-gray-300">
         <div className="flex justify-between">
           <dt>Trajectory</dt>
-          <dd className="truncate text-gray-200">{trajectoryLabel}</dd>
+          <dd className="truncate text-gray-200">
+            {trajectoryLabel}
+            {trajectoryStoredExternally && <span className="ml-1 text-amber-300">(external)</span>}
+          </dd>
         </div>
         <div className="flex justify-between">
           <dt>Frames</dt>
@@ -62,7 +72,7 @@ export function StateCard({
       {(uploading || progress !== undefined || processing) && (
         <div className="space-y-1 text-xs text-gray-300">
           <div className="flex items-center justify-between">
-            <span>{processing ? 'Processing descriptors' : 'Uploading trajectory'}</span>
+            <span>{processing ? 'Processing descriptors' : (rebuildDescriptors ? 'Uploading trajectory' : 'Saving trajectory')}</span>
             <span>{progress !== undefined ? `${progress}%` : ''}</span>
           </div>
           <div className="h-2 bg-gray-800 rounded-full overflow-hidden">
@@ -76,12 +86,20 @@ export function StateCard({
 
       <div className="space-y-2">
         <div>
-          <label className="block text-sm text-gray-300 mb-1">Upload trajectory (optional)</label>
+          <label className="block text-sm text-gray-300 mb-1">Upload/save trajectory file</label>
           <input
             type="file"
             onChange={(e) => setFile(e.target.files?.[0] || null)}
             className="w-full text-sm text-gray-300"
           />
+          <p className="text-[11px] text-gray-500 mt-1">
+            Uploading copies the raw trajectory into the shared PHASE data root so Docker and Mol* can access it.
+          </p>
+          {trajectoryStoredExternally && (
+            <p className="text-[11px] text-amber-300 mt-1">
+              Current trajectory is an external host path; re-upload it here to make it visible to Docker.
+            </p>
+          )}
         </div>
         <div>
           <label className="block text-sm text-gray-300 mb-1">Frame slice (start:stop:step)</label>
@@ -118,12 +136,26 @@ export function StateCard({
             Applied to saved residue keys (e.g. -2 maps <span className="font-mono">res_4</span> to <span className="font-mono">res_2</span>).
           </p>
         </div>
+        <label className="flex items-start gap-2 text-sm text-gray-300">
+          <input
+            type="checkbox"
+            checked={rebuildDescriptors}
+            onChange={(e) => setRebuildDescriptors(e.target.checked)}
+            className="mt-1"
+          />
+          <span>
+            Rebuild descriptors after upload
+            <span className="block text-[11px] text-gray-500">
+              Disable this if you only want to save the raw trajectory for Mol* playback.
+            </span>
+          </span>
+        </label>
         <button
-          onClick={() => onUpload(state.state_id, file, sliceSpec, residueSelection, residShift)}
+          onClick={() => onUpload(state.state_id, file, sliceSpec, residueSelection, residShift, rebuildDescriptors)}
           disabled={uploading || (!file && !state?.pdb_file)}
           className="w-full bg-cyan-600 hover:bg-cyan-500 text-white font-semibold py-2 rounded-md transition-colors disabled:opacity-50"
         >
-          {uploading ? 'Building...' : file ? 'Upload & Build' : 'Build'}
+          {uploadButtonLabel}
         </button>
       </div>
 
