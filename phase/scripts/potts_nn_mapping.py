@@ -20,7 +20,15 @@ def _build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--cluster-id", required=True)
     ap.add_argument("--model-id", default="")
     ap.add_argument("--model-path", default="")
-    ap.add_argument("--sample-id", required=True, help="Sample ensemble to map onto MD nearest neighbors.")
+    ap.add_argument(
+        "--sample-id",
+        action="append",
+        required=True,
+        help=(
+            "Sample ensemble to map onto MD nearest neighbors. "
+            "Repeat this option or pass comma-separated ids to create one analysis per sample."
+        ),
+    )
     ap.add_argument("--md-sample-id", required=True, help="Reference MD sample (must be md_eval).")
     ap.add_argument("--md-label-mode", default="assigned", choices=["assigned", "halo"])
     ap.add_argument("--keep-invalid", action="store_true", help="Keep invalid rows instead of dropping them.")
@@ -56,38 +64,53 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("Provide --model-id or --model-path.")
 
     thresholds = [float(v) for v in (args.distance_threshold or [])] or [0.05, 0.1, 0.2]
+    sample_ids: list[str] = []
+    for raw in args.sample_id or []:
+        for sid in str(raw).split(","):
+            sid = sid.strip()
+            if sid and sid not in sample_ids:
+                sample_ids.append(sid)
+    if not sample_ids:
+        raise SystemExit("Provide at least one --sample-id.")
 
     def progress_cb(message: str, current: int, total: int) -> None:
         if not args.progress:
             return
         print(f"[potts_nn_mapping] {message}: {current}/{total}")
 
-    out = run_potts_nn_mapping_local(
-        project_id=str(args.project_id),
-        system_id=str(args.system_id),
-        cluster_id=str(args.cluster_id),
-        model_id=(str(args.model_id).strip() or None),
-        model_path=(str(args.model_path).strip() or None),
-        sample_id=str(args.sample_id),
-        md_sample_id=str(args.md_sample_id),
-        md_label_mode=str(args.md_label_mode),
-        keep_invalid=bool(args.keep_invalid),
-        use_unique=not bool(args.no_unique),
-        normalize=not bool(args.no_normalize),
-        compute_per_residue=not bool(args.no_per_residue),
-        alpha=float(args.alpha),
-        beta_node=float(args.beta_node),
-        beta_edge=float(args.beta_edge),
-        top_k_candidates=(int(args.top_k_candidates) if int(args.top_k_candidates) > 0 else None),
-        chunk_size=int(args.chunk_size),
-        distance_thresholds=thresholds,
-        n_workers=(int(args.workers) if int(args.workers) > 0 else None),
-        progress_callback=progress_cb,
-    )
-    meta = out.get("metadata") or {}
-    print(f"[potts_nn_mapping] analysis_id={out.get('analysis_id')}")
-    print(f"[potts_nn_mapping] analysis_npz={out.get('analysis_npz')}")
-    print(f"[potts_nn_mapping] sample={meta.get('sample_name') or meta.get('sample_id')} -> md={meta.get('md_sample_name') or meta.get('md_sample_id')}")
+    for idx, sample_id in enumerate(sample_ids, start=1):
+        if len(sample_ids) > 1:
+            print(f"[potts_nn_mapping] running {idx}/{len(sample_ids)} sample_id={sample_id}")
+        out = run_potts_nn_mapping_local(
+            project_id=str(args.project_id),
+            system_id=str(args.system_id),
+            cluster_id=str(args.cluster_id),
+            model_id=(str(args.model_id).strip() or None),
+            model_path=(str(args.model_path).strip() or None),
+            sample_id=str(sample_id),
+            md_sample_id=str(args.md_sample_id),
+            md_label_mode=str(args.md_label_mode),
+            keep_invalid=bool(args.keep_invalid),
+            use_unique=not bool(args.no_unique),
+            normalize=not bool(args.no_normalize),
+            compute_per_residue=not bool(args.no_per_residue),
+            alpha=float(args.alpha),
+            beta_node=float(args.beta_node),
+            beta_edge=float(args.beta_edge),
+            top_k_candidates=(int(args.top_k_candidates) if int(args.top_k_candidates) > 0 else None),
+            chunk_size=int(args.chunk_size),
+            distance_thresholds=thresholds,
+            n_workers=(int(args.workers) if int(args.workers) > 0 else None),
+            progress_callback=progress_cb,
+        )
+        meta = out.get("metadata") or {}
+        print(f"[potts_nn_mapping] analysis_id={out.get('analysis_id')}")
+        print(f"[potts_nn_mapping] analysis_npz={out.get('analysis_npz')}")
+        print(
+            "[potts_nn_mapping] "
+            f"sample={meta.get('sample_name') or meta.get('sample_id')} "
+            f"-> md={meta.get('md_sample_name') or meta.get('md_sample_id')}"
+        )
     return 0
 
 

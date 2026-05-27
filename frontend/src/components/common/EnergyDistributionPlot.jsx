@@ -1,3 +1,4 @@
+import { useEffect, useMemo, useState } from 'react';
 import Plot from 'react-plotly.js';
 
 export function pickEnergyColor(index) {
@@ -78,6 +79,150 @@ function smoothHistogramCurve(bins, density) {
     return 0.25 * prev + 0.5 * v + 0.25 * next;
   });
   return { x: centers, y };
+}
+
+export function energySeriesId(series, index) {
+  return String(series?.id || series?.sample_id || series?.analysis_id || series?.label || series?.name || `series-${index}`);
+}
+
+function isMdEnergySeries(series) {
+  const type = String(series?.type || series?.kind || series?.sample_type || '').toLowerCase();
+  const label = String(series?.label || series?.name || '').toLowerCase();
+  return type === 'md_eval' || type === 'md' || label.startsWith('md ');
+}
+
+export function useEnergySeriesSelection(series) {
+  const allIds = useMemo(() => (Array.isArray(series) ? series.map((s, idx) => energySeriesId(s, idx)) : []), [series]);
+  const allIdsKey = allIds.join('\u0001');
+  const [selectedIds, setSelectedIds] = useState(null);
+
+  useEffect(() => {
+    setSelectedIds((prev) => {
+      if (!allIds.length) return [];
+      if (prev === null) return allIds;
+      const allowed = new Set(allIds);
+      const retained = prev.filter((id) => allowed.has(id));
+      return retained.length ? retained : allIds;
+    });
+  }, [allIdsKey]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const selectedSet = useMemo(() => new Set(selectedIds || []), [selectedIds]);
+  const selectedSeries = useMemo(
+    () => (Array.isArray(series) ? series.filter((s, idx) => selectedSet.has(energySeriesId(s, idx))) : []),
+    [series, selectedSet]
+  );
+
+  return {
+    allIds,
+    selectedIds: selectedIds || [],
+    setSelectedIds,
+    selectedSeries,
+  };
+}
+
+export function EnergySeriesSelectorButton({
+  series,
+  selectedIds,
+  onChange,
+  dark = false,
+  label = 'Select trajectories',
+}) {
+  const [open, setOpen] = useState(false);
+  const entries = useMemo(
+    () =>
+      (Array.isArray(series) ? series : []).map((s, idx) => ({
+        id: energySeriesId(s, idx),
+        label: s?.label || s?.name || `series ${idx + 1}`,
+        type: s?.type || s?.kind || s?.sample_type || 'sample',
+        isMd: isMdEnergySeries(s),
+      })),
+    [series]
+  );
+  const selectedSet = useMemo(() => new Set(selectedIds || []), [selectedIds]);
+  const selectedCount = entries.filter((entry) => selectedSet.has(entry.id)).length;
+
+  const setEntry = (id, checked) => {
+    const next = new Set(selectedIds || []);
+    if (checked) next.add(id);
+    else next.delete(id);
+    onChange(Array.from(next));
+  };
+
+  const buttonClass = dark
+    ? 'rounded-md border border-gray-700 bg-gray-950 px-2 py-1.5 text-xs text-gray-100 hover:bg-gray-900'
+    : 'rounded border border-gray-300 bg-white px-2 py-1 text-[11px] text-gray-800 hover:bg-gray-50';
+
+  return (
+    <>
+      <button type="button" className={buttonClass} onClick={() => setOpen(true)} disabled={!entries.length}>
+        {label} ({selectedCount}/{entries.length})
+      </button>
+      {open ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
+          <div className="w-full max-w-xl rounded-lg border border-gray-700 bg-gray-950 shadow-xl">
+            <div className="flex items-start justify-between gap-3 border-b border-gray-800 px-4 py-3">
+              <div>
+                <h3 className="text-sm font-semibold text-gray-100">Energy trajectories</h3>
+                <p className="mt-1 text-xs text-gray-400">
+                  Hidden trajectories are removed from the graph and from the legend.
+                </p>
+              </div>
+              <button type="button" className="text-gray-400 hover:text-gray-100" onClick={() => setOpen(false)}>
+                Close
+              </button>
+            </div>
+            <div className="flex flex-wrap gap-2 border-b border-gray-800 px-4 py-3">
+              <button
+                type="button"
+                className="rounded border border-gray-700 px-2 py-1 text-xs text-gray-200 hover:bg-gray-900"
+                onClick={() => onChange(entries.map((entry) => entry.id))}
+              >
+                Select all
+              </button>
+              <button
+                type="button"
+                className="rounded border border-gray-700 px-2 py-1 text-xs text-gray-200 hover:bg-gray-900"
+                onClick={() => onChange(entries.filter((entry) => entry.isMd).map((entry) => entry.id))}
+              >
+                MD only
+              </button>
+              <button
+                type="button"
+                className="rounded border border-gray-700 px-2 py-1 text-xs text-gray-200 hover:bg-gray-900"
+                onClick={() => onChange([])}
+              >
+                Clear
+              </button>
+            </div>
+            <div className="max-h-[60vh] overflow-y-auto px-4 py-3">
+              {!entries.length ? (
+                <p className="text-sm text-gray-400">No energy trajectories are available.</p>
+              ) : (
+                <div className="space-y-2">
+                  {entries.map((entry) => (
+                    <label
+                      key={entry.id}
+                      className="flex items-center justify-between gap-3 rounded-md border border-gray-800 bg-gray-900/60 px-3 py-2 text-sm text-gray-100"
+                    >
+                      <span className="min-w-0">
+                        <span className="block truncate">{entry.label}</span>
+                        <span className="text-[11px] uppercase tracking-wide text-gray-500">{entry.type}</span>
+                      </span>
+                      <input
+                        type="checkbox"
+                        checked={selectedSet.has(entry.id)}
+                        onChange={(event) => setEntry(entry.id, event.target.checked)}
+                      />
+                    </label>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      ) : null}
+    </>
+  );
 }
 
 export function buildEnergyDistributionPlot({

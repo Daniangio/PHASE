@@ -6,7 +6,11 @@ import Plot from 'react-plotly.js';
 import Loader from '../components/common/Loader';
 import ErrorMessage from '../components/common/ErrorMessage';
 import HelpDrawer from '../components/common/HelpDrawer';
-import EnergyDistributionPlot, { buildEnergyDistributionPlot } from '../components/common/EnergyDistributionPlot';
+import EnergyDistributionPlot, {
+  EnergySeriesSelectorButton,
+  buildEnergyDistributionPlot,
+  useEnergySeriesSelection,
+} from '../components/common/EnergyDistributionPlot';
 import { fetchClusterAnalyses, fetchClusterAnalysisData, fetchPottsClusterInfo, fetchSystem } from '../api/projects';
 import { fetchJobStatus, submitEndpointFrustrationJob } from '../api/jobs';
 
@@ -656,21 +660,30 @@ export default function DeltaEvalPage() {
     const hist = Array.isArray(analysisData?.data?.delta_energy_hist) ? analysisData.data.delta_energy_hist : [];
     if (bins.length < 2 || !hist.length) return [];
     return hist.map((row, idx) => ({
+      id: sampleIds[idx] || `sample-${idx + 1}`,
+      sample_id: sampleIds[idx] || '',
       label: sampleLabels[idx] || sampleIds[idx] || `sample ${idx + 1}`,
       kind: sampleTypes[idx] || 'sample',
+      type: sampleTypes[idx] || 'sample',
       bins,
       density: Array.isArray(row) ? row.map(Number) : [],
     }));
   }, [analysisData, sampleLabels, sampleIds, sampleTypes]);
 
+  const {
+    selectedIds: selectedDeltaEnergySeriesIds,
+    setSelectedIds: setSelectedDeltaEnergySeriesIds,
+    selectedSeries: visibleDeltaEnergySeries,
+  } = useEnergySeriesSelection(deltaEnergySeries);
+
   const deltaEnergyPlot = useMemo(() => buildEnergyDistributionPlot({
-    series: deltaEnergySeries,
+    series: visibleDeltaEnergySeries,
     mode: deltaEnergyGraphMode,
     title: 'ΔE distributions over selected trajectories',
     xTitle: 'ΔE = E_model_A - E_model_B',
     height: 340,
     background: 'dark',
-  }), [deltaEnergySeries, deltaEnergyGraphMode]);
+  }), [visibleDeltaEnergySeries, deltaEnergyGraphMode]);
 
   const analysisSummary = selectedAnalysisMeta?.summary || {};
 
@@ -1049,7 +1062,7 @@ export default function DeltaEvalPage() {
                 </div>
               </div>
 
-              {deltaEnergyPlot ? (
+              {!!deltaEnergySeries.length ? (
                 <div className="bg-gray-800 border border-gray-700 rounded-lg p-3 overflow-hidden">
                   <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
                     <div>
@@ -1066,8 +1079,18 @@ export default function DeltaEvalPage() {
                       <option value="histogram">histograms + fitted curves</option>
                       <option value="curves">fitted curves only</option>
                     </select>
+                    <EnergySeriesSelectorButton
+                      series={deltaEnergySeries}
+                      selectedIds={selectedDeltaEnergySeriesIds}
+                      onChange={setSelectedDeltaEnergySeriesIds}
+                      dark
+                    />
                   </div>
-                  <EnergyDistributionPlot plot={deltaEnergyPlot} height={340} />
+                  {deltaEnergyPlot ? (
+                    <EnergyDistributionPlot plot={deltaEnergyPlot} height={340} />
+                  ) : (
+                    <p className="py-16 text-center text-sm text-gray-400">No selected trajectories.</p>
+                  )}
                 </div>
               ) : null}
 

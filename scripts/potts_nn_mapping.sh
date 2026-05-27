@@ -102,10 +102,21 @@ if [ -z "$(trim "$SAMPLE_LINES")" ]; then
   exit 1
 fi
 
-SAMPLE_ROW="$(offline_choose_one "Select sample to map onto MD:" "$SAMPLE_LINES")"
-SAMPLE_ID="$(sample_id_from_row "$SAMPLE_ROW" || true)"
-if [ -z "$SAMPLE_ID" ]; then
-  echo "Failed to resolve sample id."
+SAMPLE_ROWS="$(offline_choose_multi "Select sample(s) to map onto MD:" "$SAMPLE_LINES")"
+if [ -z "$(trim "$SAMPLE_ROWS")" ]; then
+  echo "No samples selected."
+  exit 1
+fi
+SAMPLE_IDS=()
+while IFS= read -r row; do
+  [ -z "$(trim "$row")" ] && continue
+  sid="$(sample_id_from_row "$row" || true)"
+  if [ -n "$sid" ]; then
+    SAMPLE_IDS+=("$sid")
+  fi
+done <<< "$SAMPLE_ROWS"
+if [ "${#SAMPLE_IDS[@]}" -eq 0 ]; then
+  echo "Failed to resolve selected sample ids."
   exit 1
 fi
 
@@ -149,7 +160,6 @@ CMD=(
   --system-id "$OFFLINE_SYSTEM_ID"
   --cluster-id "$CLUSTER_ID"
   --model-id "$MODEL_ID"
-  --sample-id "$SAMPLE_ID"
   --md-sample-id "$MD_SAMPLE_ID"
   --md-label-mode "$MD_LABEL_MODE"
   --alpha "$ALPHA"
@@ -157,6 +167,10 @@ CMD=(
   --beta-edge "$BETA_EDGE"
   --chunk-size "$CHUNK_SIZE"
 )
+
+for sid in "${SAMPLE_IDS[@]}"; do
+  CMD+=(--sample-id "$sid")
+done
 
 if [ "$KEEP_INVALID" = "y" ] || [ "$KEEP_INVALID" = "yes" ]; then CMD+=(--keep-invalid); fi
 if [ "$USE_UNIQUE" = "n" ] || [ "$USE_UNIQUE" = "no" ]; then CMD+=(--no-unique); fi

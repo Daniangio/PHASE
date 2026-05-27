@@ -6,7 +6,11 @@ import Plot from 'react-plotly.js';
 import Loader from '../components/common/Loader';
 import ErrorMessage from '../components/common/ErrorMessage';
 import HelpDrawer from '../components/common/HelpDrawer';
-import EnergyDistributionPlot, { buildEnergyDistributionPlot } from '../components/common/EnergyDistributionPlot';
+import EnergyDistributionPlot, {
+  EnergySeriesSelectorButton,
+  buildEnergyDistributionPlot,
+  useEnergySeriesSelection,
+} from '../components/common/EnergyDistributionPlot';
 import {
   deleteClusterAnalysis,
   deleteSamplingSample,
@@ -943,10 +947,13 @@ export default function SamplingVizPage() {
           const energies = payload?.data?.energies || [];
           if (!Array.isArray(energies) || !energies.length) continue;
           const sample = sampleEntries.find((s) => s.sample_id === meta.sample_id);
+          const sampleType = String(meta.sample_type || sample?.type || '').toLowerCase();
           series.push({
+            id: meta.sample_id,
             sample_id: meta.sample_id,
             label: sample?.name || meta.sample_name || meta.sample_id,
-            kind: String(meta.sample_type || '').toLowerCase() === 'state_pose' ? 'state_pose' : 'sample',
+            kind: sampleType === 'state_pose' ? 'state_pose' : sampleType || 'sample',
+            type: sampleType || 'sample',
             energies,
           });
         }
@@ -961,18 +968,38 @@ export default function SamplingVizPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedAnalysisModelId, energyAnalysesForModel, energyLoadLimit, loadAnalysisData]);
 
+  const energyPlotSeries = useMemo(
+    () =>
+      energySeries.map((s) => ({
+        id: s.id || s.sample_id,
+        sample_id: s.sample_id,
+        label: s.label,
+        kind: s.kind,
+        type: s.type,
+        values: s.energies,
+      })),
+    [energySeries]
+  );
+  const {
+    selectedIds: selectedEnergySeriesIds,
+    setSelectedIds: setSelectedEnergySeriesIds,
+    selectedSeries: visibleEnergyPlotSeries,
+  } = useEnergySeriesSelection(energyPlotSeries);
+
   const energyPlot = useMemo(() => buildEnergyDistributionPlot({
-    series: energySeries.map((s) => ({
+    series: visibleEnergyPlotSeries.map((s) => ({
+      id: s.id,
       label: s.label,
       kind: s.kind,
-      values: s.energies,
+      type: s.type,
+      values: s.values,
     })),
     mode: energyGraphMode,
     title: energyGraphMode === 'curves' ? 'Energy fitted curves' : 'Energy distributions',
     xTitle: 'Energy',
     height: 260,
     background: 'white',
-  }), [energySeries, energyGraphMode]);
+  }), [visibleEnergyPlotSeries, energyGraphMode]);
 
 
   if (loadingSystem) return <Loader message="Loading sampling explorer..." />;
@@ -1756,7 +1783,7 @@ export default function SamplingVizPage() {
             {energyError && <ErrorMessage message={energyError} />}
             {energyLoading && <p className="text-sm text-gray-400">Loading…</p>}
 
-            {energyPlot && (
+            {!!energyPlotSeries.length && (
               <div className="rounded-md border border-gray-800 bg-white p-3">
                 <div className="flex items-center justify-between gap-2 mb-2">
                   <p className="text-xs font-semibold text-gray-800">
@@ -1771,16 +1798,26 @@ export default function SamplingVizPage() {
                       <option value="histogram">histograms + fitted curves</option>
                       <option value="curves">fitted curves only</option>
                     </select>
+                    <EnergySeriesSelectorButton
+                      series={energyPlotSeries}
+                      selectedIds={selectedEnergySeriesIds}
+                      onChange={setSelectedEnergySeriesIds}
+                    />
                     <button
                       type="button"
                       className="text-[11px] text-gray-600 hover:text-gray-800"
+                      disabled={!energyPlot}
                       onClick={() => setOverlayPlot({ ...energyPlot, title: 'Energy distributions (overlay)' })}
                     >
                       Maximize
                     </button>
                   </div>
                 </div>
-                <EnergyDistributionPlot plot={energyPlot} height={260} />
+                {energyPlot ? (
+                  <EnergyDistributionPlot plot={energyPlot} height={260} />
+                ) : (
+                  <p className="py-12 text-center text-sm text-gray-500">No selected trajectories.</p>
+                )}
               </div>
             )}
           </section>
