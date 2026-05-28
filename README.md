@@ -112,6 +112,7 @@ This writes:
 PHASE_UID=<your uid>
 PHASE_GID=<your gid>
 PHASE_DOCKER_USER=<your uid>:<your gid>
+PHASE_HOST_DATA_ROOT=<host data root mounted into Docker>
 PHASE_DATA_ROOT=<your exported PHASE_DATA_ROOT>   # if set
 PHASE_FRONTEND_PORT=<optional host frontend port>
 PHASE_BACKEND_PORT=<optional host backend port>
@@ -122,7 +123,8 @@ The compose file uses these values so `backend` and `worker` write files as your
 
 Important:
 
-- `./scripts/compose_env.sh` reads `PHASE_DATA_ROOT` from your shell, then `.phase_defaults`, then `.env`, then falls back to `./data`
+- Docker Compose uses `PHASE_HOST_DATA_ROOT` for the host bind mount; this avoids stale shell `PHASE_DATA_ROOT` values overriding `.env`
+- `./scripts/compose_env.sh` reads root defaults from `PHASE_HOST_DATA_ROOT`, then `.phase_defaults`, then shell `PHASE_DATA_ROOT`, then `.env`, then `./data`
 - if you choose a root through `phase_console`, Docker will use the same root on the next `docker compose up`
 - direct `docker compose up` without `.env` is allowed, but services run as `root`; run `./scripts/compose_env.sh` once to make Docker write as your user
 

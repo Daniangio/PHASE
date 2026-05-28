@@ -8,7 +8,7 @@ services:
     volumes:
       - ./phase:/app/phase
       - ./backend:/app/backend
-      - ${PHASE_DATA_ROOT:-./data}:/data/phase
+      - ${PHASE_HOST_DATA_ROOT:-./data}:/data/phase
 
   frontend:
     build:
@@ -34,4 +34,4 @@ services:
     volumes:
       - ./phase:/app/phase
       - ./backend:/app/backend
-      - ${PHASE_DATA_ROOT:-./data}:/data/phase
+      - ${PHASE_HOST_DATA_ROOT:-./data}:/data/phase

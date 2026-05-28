@@ -69,18 +69,24 @@ This writes:
 PHASE_UID=<your uid>
 PHASE_GID=<your gid>
 PHASE_DOCKER_USER=<your uid>:<your gid>
+PHASE_HOST_DATA_ROOT=<host data root mounted into Docker>
 PHASE_DATA_ROOT=<your exported PHASE_DATA_ROOT>   # if set
 PHASE_FRONTEND_PORT=<optional host frontend port>
 PHASE_BACKEND_PORT=<optional host backend port>
 PHASE_REDIS_PORT=<optional host redis port>
 ```
 
-PHASE also keeps a repo-local `.phase_defaults` file. `phase_console` updates this file whenever you choose a different data root at startup. `./scripts/compose_env.sh` reads roots in this order:
+PHASE also keeps a repo-local `.phase_defaults` file. `phase_console` updates this file whenever you choose a different data root at startup.
 
-1. exported `PHASE_DATA_ROOT`
+Docker Compose uses `PHASE_HOST_DATA_ROOT` for the host bind mount. This is intentional: it prevents a stale shell `PHASE_DATA_ROOT` export from overriding the repo-local `.env`.
+
+`./scripts/compose_env.sh` reads roots in this order:
+
+1. exported `PHASE_HOST_DATA_ROOT`
 2. `.phase_defaults`
-3. `.env`
-4. `./data`
+3. exported `PHASE_DATA_ROOT`
+4. `.env`
+5. `./data`
 
 Docker Compose reads `.env` automatically, so after changing the root in `phase_console`, the webserver uses the same root on the next `docker compose up`.
 

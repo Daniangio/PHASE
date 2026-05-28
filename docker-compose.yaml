@@ -8,7 +8,7 @@ services:
       - "${PHASE_BACKEND_PORT:-18000}:8000"
     volumes:
       # Persist application data only
-      - ${PHASE_DATA_ROOT:-./data}:/data/phase
+      - ${PHASE_HOST_DATA_ROOT:-./data}:/data/phase
     environment:
       - PYTHONUNBUFFERED=1
       - REDIS_URL=redis://redis:6379/0
@@ -47,7 +47,7 @@ services:
     command: rq worker phase-jobs --url redis://redis:6379/0
     volumes:
       # Persist application data only
-      - ${PHASE_DATA_ROOT:-./data}:/data/phase
+      - ${PHASE_HOST_DATA_ROOT:-./data}:/data/phase
     environment:
       - PYTHONUNBUFFERED=1
       - PHASE_DATA_ROOT=/data/phase

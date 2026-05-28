@@ -21,7 +21,10 @@ phase_read_key() {
   if [ ! -f "$file" ]; then
     return 0
   fi
-  grep -E "^${key}=" "$file" | tail -n 1 | sed -E "s/^${key}=//"
+  awk -v key="$key" '
+    index($0, key "=") == 1 { value = substr($0, length(key) + 2) }
+    END { if (value != "") print value }
+  ' "$file"
 }
 
 phase_write_key() {
@@ -44,6 +47,9 @@ phase_default_data_root() {
   local value="${PHASE_DATA_ROOT:-}"
   if [ -z "$value" ]; then
     value="$(phase_read_key "$(phase_defaults_file "$root_dir")" PHASE_DATA_ROOT)"
+  fi
+  if [ -z "$value" ]; then
+    value="$(phase_read_key "$(phase_compose_env_file "$root_dir")" PHASE_HOST_DATA_ROOT)"
   fi
   if [ -z "$value" ]; then
     value="$(phase_read_key "$(phase_compose_env_file "$root_dir")" PHASE_DATA_ROOT)"
@@ -75,6 +81,7 @@ phase_persist_data_root() {
 
   # Docker Compose reads this file automatically from the project directory.
   # Keep UID/GID here too so containers write files as the current host user.
+  phase_write_key "$env_file" PHASE_HOST_DATA_ROOT "$data_root"
   phase_write_key "$env_file" PHASE_DATA_ROOT "$data_root"
   phase_write_key "$env_file" PHASE_UID "$uid_val"
   phase_write_key "$env_file" PHASE_GID "$gid_val"
