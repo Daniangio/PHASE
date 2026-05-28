@@ -2,21 +2,23 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "${ROOT_DIR}/scripts/phase_defaults.sh"
 ENV_FILE="${ROOT_DIR}/.env"
 
 UID_VAL="$(id -u)"
 GID_VAL="$(id -g)"
-DATA_ROOT_VAL="${PHASE_DATA_ROOT:-}"
+DATA_ROOT_VAL="${PHASE_DATA_ROOT:-$(phase_default_data_root "$ROOT_DIR")}"
 BACKEND_PORT_VAL="${PHASE_BACKEND_PORT:-}"
 FRONTEND_PORT_VAL="${PHASE_FRONTEND_PORT:-}"
 REDIS_PORT_VAL="${PHASE_REDIS_PORT:-}"
+DOCKER_USER_VAL="${UID_VAL}:${GID_VAL}"
 
 tmp="$(mktemp)"
 trap 'rm -f "$tmp"' EXIT
 
 if [ -f "$ENV_FILE" ]; then
   # Remove previous values (keep any other compose env vars intact).
-  grep -v -E '^(PHASE_UID|PHASE_GID|PHASE_DATA_ROOT|PHASE_BACKEND_PORT|PHASE_FRONTEND_PORT|PHASE_REDIS_PORT)=' "$ENV_FILE" > "$tmp" || true
+  grep -v -E '^(PHASE_UID|PHASE_GID|PHASE_DOCKER_USER|PHASE_DATA_ROOT|PHASE_BACKEND_PORT|PHASE_FRONTEND_PORT|PHASE_REDIS_PORT)=' "$ENV_FILE" > "$tmp" || true
 else
   : > "$tmp"
 fi
@@ -24,6 +26,7 @@ fi
 {
   echo "PHASE_UID=${UID_VAL}"
   echo "PHASE_GID=${GID_VAL}"
+  echo "PHASE_DOCKER_USER=${DOCKER_USER_VAL}"
   if [ -n "$DATA_ROOT_VAL" ]; then
     echo "PHASE_DATA_ROOT=${DATA_ROOT_VAL}"
   fi
@@ -41,13 +44,19 @@ fi
 mv "$tmp" "$ENV_FILE"
 trap - EXIT
 
+if [ -n "$DATA_ROOT_VAL" ]; then
+  mkdir -p "$DATA_ROOT_VAL"
+  phase_write_key "$(phase_defaults_file "$ROOT_DIR")" PHASE_DATA_ROOT "$DATA_ROOT_VAL"
+fi
+
 echo "Wrote ${ENV_FILE}"
 echo "  PHASE_UID=${UID_VAL}"
 echo "  PHASE_GID=${GID_VAL}"
+echo "  PHASE_DOCKER_USER=${DOCKER_USER_VAL}"
 if [ -n "$DATA_ROOT_VAL" ]; then
   echo "  PHASE_DATA_ROOT=${DATA_ROOT_VAL}"
 else
-  echo "  PHASE_DATA_ROOT not exported; docker-compose will fall back to ./data"
+  echo "  PHASE_DATA_ROOT not set; docker-compose will fall back to ./data"
 fi
 if [ -n "$FRONTEND_PORT_VAL" ]; then
   echo "  PHASE_FRONTEND_PORT=${FRONTEND_PORT_VAL}"

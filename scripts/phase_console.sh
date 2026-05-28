@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "${ROOT_DIR}/scripts/phase_defaults.sh"
 source "${ROOT_DIR}/scripts/offline_select.sh"
 
 CLI_ROOT=""
@@ -27,7 +28,8 @@ else
   DEFAULT_ENV="${ROOT_DIR}/.venv-potts-fit"
 fi
 USE_SLUG_IDS="false"
-DEFAULT_ROOT="${CLI_ROOT:-${OFFLINE_ROOT:-${PHASE_DATA_ROOT:-${ROOT_DIR}/data}}}"
+SAVED_ROOT="$(phase_read_key "$(phase_defaults_file "$ROOT_DIR")" PHASE_DATA_ROOT)"
+DEFAULT_ROOT="${CLI_ROOT:-${OFFLINE_ROOT:-${SAVED_ROOT:-${PHASE_DATA_ROOT:-${ROOT_DIR}/data}}}}"
 
 ensure_env() {
   if [ -n "${VIRTUAL_ENV:-}" ] && [ -x "${VIRTUAL_ENV}/bin/python" ]; then
@@ -531,6 +533,7 @@ state_menu() {
   done
 }
 
-  offline_prompt_root "${DEFAULT_ROOT}"
+offline_prompt_root "${DEFAULT_ROOT}"
+phase_persist_data_root "$ROOT_DIR" "$OFFLINE_ROOT"
 USE_SLUG_IDS="true"
 project_menu

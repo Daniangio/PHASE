@@ -84,25 +84,15 @@ export PHASE_DATA_ROOT=/scratch/$USER/phase-data
 mkdir -p "$PHASE_DATA_ROOT"
 ```
 
-To avoid thinking about this again, make it permanent in your shell startup file.
+Alternatively, run `./scripts/phase_console.sh` and enter the desired data root at the first prompt.
+The console stores that choice in repo-local defaults:
 
-For `bash`:
+- `.phase_defaults`, used by PHASE helper scripts
+- `.env`, read automatically by Docker Compose
 
-```bash
-echo 'export PHASE_DATA_ROOT=/scratch/$USER/phase-data' >> ~/.bashrc
-source ~/.bashrc
-```
+The next `phase_console` run will offer the last selected root as the default.
 
-For `zsh`:
-
-```bash
-echo 'export PHASE_DATA_ROOT=/scratch/$USER/phase-data' >> ~/.zshrc
-source ~/.zshrc
-```
-
-After that, `phase_console` and local CLI scripts will default to the shared root automatically.
-
-You can verify it with:
+You can verify the active shell value with:
 
 ```bash
 echo "$PHASE_DATA_ROOT"
@@ -121,6 +111,7 @@ This writes:
 ```bash
 PHASE_UID=<your uid>
 PHASE_GID=<your gid>
+PHASE_DOCKER_USER=<your uid>:<your gid>
 PHASE_DATA_ROOT=<your exported PHASE_DATA_ROOT>   # if set
 PHASE_FRONTEND_PORT=<optional host frontend port>
 PHASE_BACKEND_PORT=<optional host backend port>
@@ -131,10 +122,9 @@ The compose file uses these values so `backend` and `worker` write files as your
 
 Important:
 
-- export `PHASE_DATA_ROOT` **before** running `./scripts/compose_env.sh`
-- otherwise Compose falls back to `./data`
-- if the repository checkout is owned by another user, `./data` may be unwritable and Docker will fail at runtime with:
-  - `PermissionError: [Errno 13] Permission denied: '/data/phase/projects'`
+- `./scripts/compose_env.sh` reads `PHASE_DATA_ROOT` from your shell, then `.phase_defaults`, then `.env`, then falls back to `./data`
+- if you choose a root through `phase_console`, Docker will use the same root on the next `docker compose up`
+- direct `docker compose up` without `.env` is allowed, but services run as `root`; run `./scripts/compose_env.sh` once to make Docker write as your user
 
 ### 3. Start the web stack
 

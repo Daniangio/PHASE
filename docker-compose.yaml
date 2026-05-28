@@ -3,7 +3,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    user: "${PHASE_UID:-1000}:${PHASE_GID:-1000}"
+    user: "${PHASE_DOCKER_USER:-root}"
     ports:
       - "${PHASE_BACKEND_PORT:-18000}:8000"
     volumes:
@@ -43,7 +43,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    user: "${PHASE_UID:-1000}:${PHASE_GID:-1000}"
+    user: "${PHASE_DOCKER_USER:-root}"
     command: rq worker phase-jobs --url redis://redis:6379/0
     volumes:
       # Persist application data only

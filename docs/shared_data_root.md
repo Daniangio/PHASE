@@ -68,15 +68,25 @@ This writes:
 ```bash
 PHASE_UID=<your uid>
 PHASE_GID=<your gid>
+PHASE_DOCKER_USER=<your uid>:<your gid>
 PHASE_DATA_ROOT=<your exported PHASE_DATA_ROOT>   # if set
 PHASE_FRONTEND_PORT=<optional host frontend port>
 PHASE_BACKEND_PORT=<optional host backend port>
 PHASE_REDIS_PORT=<optional host redis port>
 ```
 
-If `PHASE_DATA_ROOT` is not exported when you run `./scripts/compose_env.sh`, the compose file falls back to `./data`.
-That fallback is only safe if the repository checkout itself is writable by the current user.
-On shared machines this is often false, and the backend will fail on startup with:
+PHASE also keeps a repo-local `.phase_defaults` file. `phase_console` updates this file whenever you choose a different data root at startup. `./scripts/compose_env.sh` reads roots in this order:
+
+1. exported `PHASE_DATA_ROOT`
+2. `.phase_defaults`
+3. `.env`
+4. `./data`
+
+Docker Compose reads `.env` automatically, so after changing the root in `phase_console`, the webserver uses the same root on the next `docker compose up`.
+
+If `.env` is missing, direct `docker compose up` falls back to running backend/worker as `root` to avoid startup permission errors. This is only a safety fallback. Run `./scripts/compose_env.sh` once so Docker writes as your host user.
+
+When Docker is configured with a host data root that is not writable by the configured container user, the backend can fail on startup with:
 
 ```text
 PermissionError: [Errno 13] Permission denied: '/data/phase/projects'
@@ -98,7 +108,7 @@ docker compose up --build
 ```
 
 With the current compose file, `backend` and `worker` run as
-`PHASE_UID:PHASE_GID`, so files created inside Docker are owned by your host
+`PHASE_DOCKER_USER`, so files created inside Docker are owned by your host
 user and remain writable from `phase_console`.
 
 4. Run local CLI tools against the same data root:
