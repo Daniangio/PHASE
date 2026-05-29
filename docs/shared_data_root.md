@@ -114,7 +114,7 @@ docker compose up --build
 ```
 
 With the current compose file, `backend` and `worker` run as
-`PHASE_DOCKER_USER`, so files created inside Docker are owned by your host
+`PHASE_UID:PHASE_GID`, so files created inside Docker are owned by your host
 user and remain writable from `phase_console`.
 
 4. Run local CLI tools against the same data root:

@@ -60,6 +60,19 @@ phase_default_data_root() {
   printf "%s" "$value"
 }
 
+phase_ensure_writable_data_root() {
+  local data_root="${1:?data root required}"
+  mkdir -p "$data_root"
+  local probe="${data_root}/.phase-write-test-$$"
+  if ! ( : > "$probe" ) 2>/dev/null; then
+    echo "PHASE data root is not writable by the current user: $data_root" >&2
+    echo "Choose a directory owned by this user, fix permissions, or run:" >&2
+    echo "  sudo chown -R $(id -u):$(id -g) '$data_root'" >&2
+    return 1
+  fi
+  rm -f "$probe"
+}
+
 phase_persist_data_root() {
   local root_dir="${1:?root dir required}"
   local data_root="${2:?data root required}"
@@ -69,7 +82,7 @@ phase_persist_data_root() {
     return 1
   fi
 
-  mkdir -p "$data_root"
+  phase_ensure_writable_data_root "$data_root"
 
   local defaults_file env_file uid_val gid_val
   defaults_file="$(phase_defaults_file "$root_dir")"

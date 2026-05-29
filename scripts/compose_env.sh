@@ -16,6 +16,10 @@ FRONTEND_PORT_VAL="${PHASE_FRONTEND_PORT:-}"
 REDIS_PORT_VAL="${PHASE_REDIS_PORT:-}"
 DOCKER_USER_VAL="${UID_VAL}:${GID_VAL}"
 
+if [ -n "$DATA_ROOT_VAL" ]; then
+  phase_ensure_writable_data_root "$DATA_ROOT_VAL"
+fi
+
 tmp="$(mktemp)"
 trap 'rm -f "$tmp"' EXIT
 
@@ -49,7 +53,6 @@ mv "$tmp" "$ENV_FILE"
 trap - EXIT
 
 if [ -n "$DATA_ROOT_VAL" ]; then
-  mkdir -p "$DATA_ROOT_VAL"
   phase_write_key "$(phase_defaults_file "$ROOT_DIR")" PHASE_DATA_ROOT "$DATA_ROOT_VAL"
 fi
 
