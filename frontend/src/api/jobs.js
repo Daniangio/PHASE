@@ -70,6 +70,13 @@ export function submitEndpointFrustrationJob(payload) {
   });
 }
 
+export function submitDeltaEnergyJob(payload) {
+  return requestJSON('/submit/delta_energy', {
+    method: 'POST',
+    body: payload,
+  });
+}
+
 export function submitDeltaJsJob(payload) {
   return requestJSON('/submit/delta_js', {
     method: 'POST',

@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import uuid
+import zlib
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -3254,6 +3255,304 @@ def upsert_endpoint_frustration_analysis(
                 {"residue_index": int(idx), "score": float(np.nanmean(frustration_node_sym_mean[:, int(idx)]))}
                 for idx in frustration_rank
             ],
+        },
+    }
+    meta_path.write_text(json.dumps(_convert_nan_to_none(meta), indent=2), encoding="utf-8")
+    return {"metadata": _convert_nan_to_none(meta), "analysis_npz": str(npz_path), "analysis_dir": str(analysis_dir)}
+
+
+def _delta_energy_sample_worker(payload: dict[str, Any]) -> dict[str, Any]:
+    model_a_path = Path(str(payload["model_a_path"]))
+    model_b_path = Path(str(payload["model_b_path"]))
+    sample_id = str(payload["sample_id"])
+    sample_label = str(payload.get("sample_label") or sample_id)
+    sample_type = str(payload.get("sample_type") or "sample")
+    sample_path = Path(str(payload["sample_path"]))
+    md_label_mode = str(payload.get("md_label_mode") or "assigned").strip().lower()
+    drop_invalid = bool(payload.get("drop_invalid", True))
+    frame_limit = int(payload.get("frame_limit") or 0)
+    seed = int(payload.get("seed") or 0)
+
+    model_a = zero_sum_gauge_model(load_potts_model(str(model_a_path)))
+    model_b = zero_sum_gauge_model(load_potts_model(str(model_b_path)))
+    if len(model_a.h) != len(model_b.h):
+        raise ValueError("Model sizes do not match.")
+    n_residues = int(len(model_a.h))
+
+    labels, invalid_count = _endpoint_load_labels(
+        sample_path=sample_path,
+        md_label_mode=md_label_mode,
+        drop_invalid=drop_invalid,
+    )
+    if labels.ndim != 2 or labels.size == 0:
+        raise ValueError(f"Sample labels are empty: {sample_id}")
+    if int(labels.shape[1]) != n_residues:
+        raise ValueError(
+            f"Sample labels do not match model size for {sample_id}: got N={labels.shape[1]}, expected {n_residues}"
+        )
+    if np.min(labels) < 0:
+        raise ValueError(f"Sample contains negative labels for {sample_id}; use assigned labels or drop invalid frames.")
+
+    available_frames = int(labels.shape[0])
+    selected_indices = np.arange(available_frames, dtype=np.int32)
+    if frame_limit > 0 and frame_limit < available_frames:
+        rng = np.random.default_rng(seed + int(zlib.adler32(sample_id.encode("utf-8"))))
+        selected_indices = np.sort(rng.choice(available_frames, size=frame_limit, replace=False)).astype(np.int32)
+        labels = labels[selected_indices]
+
+    delta_energy = np.asarray(model_a.energy_batch(labels) - model_b.energy_batch(labels), dtype=np.float32)
+    return {
+        "sample_id": sample_id,
+        "sample_label": sample_label,
+        "sample_type": sample_type,
+        "available_frame_count": available_frames,
+        "used_frame_count": int(labels.shape[0]),
+        "invalid_count": int(invalid_count),
+        "frame_limit": int(frame_limit),
+        "selected_frame_indices": np.asarray(selected_indices, dtype=np.int32),
+        "delta_energy": delta_energy,
+    }
+
+
+def _run_delta_energy_batch(
+    payloads: Sequence[dict[str, Any]],
+    *,
+    max_workers: int = 1,
+    progress_callback: Callable[[str, int, int], None] | None = None,
+    progress_label: str = "Computing delta energies",
+) -> list[dict[str, Any]]:
+    n_payloads = int(len(payloads))
+    if n_payloads <= 0:
+        return []
+    workers = max(1, int(max_workers))
+    out_rows: list[dict[str, Any] | None] = [None] * n_payloads
+    if progress_callback:
+        progress_callback(progress_label, 0, n_payloads)
+    if workers <= 1:
+        for row, payload in enumerate(payloads):
+            out_rows[row] = _delta_energy_sample_worker(payload)
+            if progress_callback:
+                progress_callback(progress_label, row + 1, n_payloads)
+    else:
+        workers = min(workers, n_payloads)
+        with ProcessPoolExecutor(max_workers=workers) as executor:
+            futures = {executor.submit(_delta_energy_sample_worker, payloads[row]): row for row in range(n_payloads)}
+            done = 0
+            for future in as_completed(futures):
+                row = futures[future]
+                out_rows[row] = future.result()
+                done += 1
+                if progress_callback:
+                    progress_callback(progress_label, done, n_payloads)
+    if any(v is None for v in out_rows):
+        raise RuntimeError("Missing worker output while computing delta-energy batch.")
+    return [row for row in out_rows if row is not None]
+
+
+def upsert_delta_energy_analysis(
+    *,
+    project_id: str,
+    system_id: str,
+    cluster_id: str,
+    model_a_ref: str,
+    model_b_ref: str,
+    sample_ids: Sequence[str],
+    md_label_mode: str = "assigned",
+    drop_invalid: bool = True,
+    frame_limits: dict[str, int] | None = None,
+    seed: int = 0,
+    energy_bins: int = 80,
+    n_workers: int | None = None,
+    progress_callback: Callable[[str, int, int], None] | None = None,
+) -> dict[str, Any]:
+    md_label_mode = (md_label_mode or "assigned").strip().lower()
+    if md_label_mode not in {"assigned", "halo"}:
+        raise ValueError("md_label_mode must be 'assigned' or 'halo'.")
+    energy_bins = int(energy_bins)
+    if energy_bins < 5:
+        raise ValueError("energy_bins must be >= 5.")
+
+    requested = [str(s).strip() for s in sample_ids if str(s).strip()]
+    seen: set[str] = set()
+    requested = [sid for sid in requested if not (sid in seen or seen.add(sid))]
+    if not requested:
+        raise ValueError("No samples selected.")
+
+    frame_limits = {str(k): max(0, int(v or 0)) for k, v in (frame_limits or {}).items()}
+    seed = int(seed or 0)
+
+    data_root = Path(os.getenv("PHASE_DATA_ROOT", "/app/data"))
+    store = ProjectStore(base_dir=data_root / "projects")
+    cluster_dirs = store.ensure_cluster_directories(project_id, system_id, cluster_id)
+    system_dir = cluster_dirs["system_dir"]
+    cluster_dir = cluster_dirs["cluster_dir"]
+
+    model_a, model_a_id, model_a_name, model_a_path_abs, model_a_path = _endpoint_resolve_model(
+        store=store,
+        project_id=project_id,
+        system_id=system_id,
+        cluster_id=cluster_id,
+        system_dir=system_dir,
+        ref=model_a_ref,
+    )
+    model_b, model_b_id, model_b_name, model_b_path_abs, model_b_path = _endpoint_resolve_model(
+        store=store,
+        project_id=project_id,
+        system_id=system_id,
+        cluster_id=cluster_id,
+        system_dir=system_dir,
+        ref=model_b_ref,
+    )
+    if model_a_id and model_b_id and model_a_id == model_b_id:
+        raise ValueError("Select two different models.")
+    if len(model_a.h) != len(model_b.h):
+        raise ValueError("Model sizes do not match.")
+
+    key = json.dumps(
+        {
+            "analysis_type": "delta_energy",
+            "model_a_id": model_a_id or model_a_path,
+            "model_b_id": model_b_id or model_b_path,
+            "sample_ids": requested,
+            "frame_limits": {sid: int(frame_limits.get(sid, 0)) for sid in requested},
+            "seed": int(seed),
+            "md_label_mode": md_label_mode,
+            "drop_invalid": bool(drop_invalid),
+            "energy_bins": int(energy_bins),
+        },
+        sort_keys=True,
+    )
+    analysis_id = str(uuid.uuid5(uuid.NAMESPACE_URL, key))
+    analyses_root = _ensure_analysis_dir(cluster_dir, "delta_energy")
+    analysis_dir = analyses_root / analysis_id
+    analysis_dir.mkdir(parents=True, exist_ok=True)
+    npz_path = analysis_dir / "analysis.npz"
+    meta_path = analysis_dir / ANALYSIS_METADATA_FILENAME
+
+    samples = store.list_samples(project_id, system_id, cluster_id)
+    sample_by_id: dict[str, dict[str, Any]] = {str(s.get("sample_id")): s for s in samples if s.get("sample_id")}
+    payloads: list[dict[str, Any]] = []
+    for sid in requested:
+        entry = sample_by_id.get(sid)
+        if not entry:
+            raise FileNotFoundError(f"Sample not found on this cluster: {sid}")
+        payloads.append(
+            {
+                "model_a_path": str(model_a_path_abs),
+                "model_b_path": str(model_b_path_abs),
+                "sample_id": sid,
+                "sample_label": str(entry.get("name") or sid),
+                "sample_type": str(entry.get("type") or "sample"),
+                "sample_path": str(
+                    _endpoint_resolve_sample_path(
+                        store=store,
+                        project_id=project_id,
+                        system_id=system_id,
+                        cluster_dir=cluster_dir,
+                        entry=entry,
+                    )
+                ),
+                "md_label_mode": md_label_mode,
+                "drop_invalid": bool(drop_invalid),
+                "frame_limit": int(frame_limits.get(sid, 0)),
+                "seed": int(seed),
+            }
+        )
+
+    workers_used = max(1, min(int(n_workers or os.cpu_count() or 1), len(payloads)))
+    out_rows = _run_delta_energy_batch(
+        payloads,
+        max_workers=workers_used,
+        progress_callback=progress_callback,
+        progress_label="Computing delta energies",
+    )
+
+    sample_labels = [str(row["sample_label"]) for row in out_rows]
+    sample_types = [str(row["sample_type"]) for row in out_rows]
+    available_counts = np.asarray([int(row["available_frame_count"]) for row in out_rows], dtype=np.int32)
+    used_counts = np.asarray([int(row["used_frame_count"]) for row in out_rows], dtype=np.int32)
+    invalid_counts = np.asarray([int(row["invalid_count"]) for row in out_rows], dtype=np.int32)
+    limits = np.asarray([int(row["frame_limit"]) for row in out_rows], dtype=np.int32)
+    delta_energy_all = [np.asarray(row["delta_energy"], dtype=np.float32) for row in out_rows]
+
+    de_concat = np.concatenate(delta_energy_all, axis=0) if delta_energy_all else np.zeros((0,), dtype=np.float32)
+    if de_concat.size:
+        lo = float(np.nanmin(de_concat))
+        hi = float(np.nanmax(de_concat))
+        if not np.isfinite(lo) or not np.isfinite(hi):
+            lo, hi = -1.0, 1.0
+        if hi <= lo:
+            hi = lo + 1.0
+        pad = 1e-6 * (hi - lo)
+        bins = np.linspace(lo - pad, hi + pad, energy_bins + 1, dtype=np.float32)
+    else:
+        bins = np.linspace(-1.0, 1.0, energy_bins + 1, dtype=np.float32)
+
+    hist = np.zeros((len(out_rows), energy_bins), dtype=np.float32)
+    means = np.zeros((len(out_rows),), dtype=np.float32)
+    stds = np.zeros((len(out_rows),), dtype=np.float32)
+    medians = np.zeros((len(out_rows),), dtype=np.float32)
+    mins = np.zeros((len(out_rows),), dtype=np.float32)
+    maxs = np.zeros((len(out_rows),), dtype=np.float32)
+    for row, de in enumerate(delta_energy_all):
+        if de.size:
+            h, _ = np.histogram(np.asarray(de, dtype=float), bins=np.asarray(bins, dtype=float), density=True)
+            hist[row] = np.asarray(h, dtype=np.float32)
+            means[row] = float(np.mean(de))
+            stds[row] = float(np.std(de))
+            medians[row] = float(np.median(de))
+            mins[row] = float(np.min(de))
+            maxs[row] = float(np.max(de))
+        else:
+            means[row] = stds[row] = medians[row] = mins[row] = maxs[row] = np.nan
+
+    np.savez_compressed(
+        npz_path,
+        analysis_format_version=np.asarray([1], dtype=np.int32),
+        sample_ids=np.asarray(requested, dtype=str),
+        sample_labels=np.asarray(sample_labels, dtype=str),
+        sample_types=np.asarray(sample_types, dtype=str),
+        sample_frame_counts=used_counts,
+        sample_available_frame_counts=available_counts,
+        sample_invalid_counts=invalid_counts,
+        sample_frame_limits=limits,
+        delta_energy_bins=np.asarray(bins, dtype=np.float32),
+        delta_energy_hist=np.asarray(hist, dtype=np.float32),
+        delta_energy_mean=means,
+        delta_energy_std=stds,
+        delta_energy_median=medians,
+        delta_energy_min=mins,
+        delta_energy_max=maxs,
+    )
+
+    now = _utc_now()
+    meta = {
+        "analysis_id": analysis_id,
+        "analysis_type": "delta_energy",
+        "analysis_format_version": 1,
+        "created_at": now,
+        "updated_at": now,
+        "project_id": project_id,
+        "system_id": system_id,
+        "cluster_id": cluster_id,
+        "model_a_id": model_a_id,
+        "model_a_name": model_a_name,
+        "model_a_path": model_a_path,
+        "model_b_id": model_b_id,
+        "model_b_name": model_b_name,
+        "model_b_path": model_b_path,
+        "md_label_mode": md_label_mode,
+        "drop_invalid": bool(drop_invalid),
+        "seed": int(seed),
+        "energy_bins": int(energy_bins),
+        "frame_limits": {sid: int(frame_limits.get(sid, 0)) for sid in requested},
+        "paths": {"analysis_npz": str(npz_path.relative_to(system_dir))},
+        "summary": {
+            "n_samples": int(len(requested)),
+            "sample_ids": requested,
+            "sample_frame_counts": used_counts.tolist(),
+            "sample_available_frame_counts": available_counts.tolist(),
+            "workers_used": int(workers_used),
         },
     }
     meta_path.write_text(json.dumps(_convert_nan_to_none(meta), indent=2), encoding="utf-8")

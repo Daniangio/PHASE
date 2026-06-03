@@ -5,7 +5,7 @@ This analysis compares one or more clustered trajectories against a fixed pair o
 - `model A`
 - `model B`
 
-It stores three families of outputs for every selected sample.
+It stores commitment and local frustration outputs for every selected sample. Delta-energy distributions can be run as a separate analysis from the same web page or from `phase_console`.
 
 ## Commitment
 
@@ -67,7 +67,7 @@ Interpretation:
 
 ## Delta Energy
 
-The analysis also computes a global endpoint score for every frame:
+Delta energy is available as an independent analysis. It computes a global endpoint score for every selected frame:
 
 - `ΔE = E_model_A - E_model_B`
 
@@ -77,7 +77,7 @@ Interpretation:
 - `ΔE > 0`: the frame is energetically lower under model B
 - distribution overlap between trajectories suggests that the endpoint pair does not separate those trajectories globally
 
-The web page shows these values as a distribution panel. Histogram bars are kept neutral gray; the fitted/smoothed distribution curves carry the sample colors. A display toggle can show either histograms plus fitted curves or fitted curves only.
+The web page shows these values on the `Delta energy distributions` tab. Histogram bars are kept neutral gray; the fitted/smoothed distribution curves carry the sample colors. A display toggle can show either histograms plus fitted curves or fitted curves only. When launching this analysis, each selected trajectory can use all frames or a random subset with a per-trajectory frame limit.
 
 ## Saved outputs
 
@@ -97,8 +97,6 @@ Main NPZ contains compact per-sample summaries used by the web UI:
 - `frustration_node_pol_mean`, `frustration_node_pol_std`, `frustration_node_pol_median`
 - `frustration_edge_sym_mean`, `frustration_edge_sym_std`, `frustration_edge_sym_median`
 - `frustration_edge_pol_mean`, `frustration_edge_pol_std`, `frustration_edge_pol_median`
-- `delta_energy_bins`, `delta_energy_hist`
-- `delta_energy_mean`, `delta_energy_std`, `delta_energy_median`, `delta_energy_min`, `delta_energy_max`
 - `D_residue`, `D_edge`
 - `top_edge_indices`
 
@@ -112,7 +110,6 @@ Per-sample NPZ contains framewise arrays:
 - `global_node_pol_framewise`
 - `global_edge_sym_framewise`
 - `global_edge_pol_framewise`
-- `delta_energy_framewise`
 
 ## Parameters
 
@@ -172,3 +169,18 @@ The 3D viewer can color residues by:
 - frustration (symmetric or polarity)
 
 It uses the same edge-weighted residue blending toggle as the 2D page.
+
+## Independent Delta-Energy Outputs
+
+Standalone delta-energy analyses are stored under:
+
+- `clusters/<cluster_id>/analyses/delta_energy/<analysis_id>/analysis.npz`
+
+The NPZ contains:
+
+- `sample_ids`, `sample_labels`, `sample_types`
+- `sample_available_frame_counts`, `sample_frame_counts`, `sample_frame_limits`
+- `delta_energy_bins`, `delta_energy_hist`
+- `delta_energy_mean`, `delta_energy_std`, `delta_energy_median`, `delta_energy_min`, `delta_energy_max`
+
+`sample_frame_limits` is `0` when all available frames were used; otherwise it records the requested random subset size.

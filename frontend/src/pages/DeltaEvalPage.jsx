@@ -12,7 +12,7 @@ import EnergyDistributionPlot, {
   useEnergySeriesSelection,
 } from '../components/common/EnergyDistributionPlot';
 import { fetchClusterAnalyses, fetchClusterAnalysisData, fetchPottsClusterInfo, fetchSystem } from '../api/projects';
-import { fetchJobStatus, submitEndpointFrustrationJob } from '../api/jobs';
+import { fetchJobStatus, submitDeltaEnergyJob, submitEndpointFrustrationJob } from '../api/jobs';
 
 function clamp01(x) {
   if (!Number.isFinite(x)) return 0;
@@ -191,6 +191,12 @@ export default function DeltaEvalPage() {
   const [residueLimit, setResidueLimit] = useState(60);
   const [edgeLimit, setEdgeLimit] = useState(80);
   const [deltaEnergyGraphMode, setDeltaEnergyGraphMode] = useState('histogram');
+  const [activeTab, setActiveTab] = useState('delta_energy');
+  const [runPanelOpen, setRunPanelOpen] = useState(false);
+  const [deltaEnergySeed, setDeltaEnergySeed] = useState(0);
+  const [deltaEnergyBins, setDeltaEnergyBins] = useState(80);
+  const [sampleFrameModes, setSampleFrameModes] = useState({});
+  const [sampleFrameLimits, setSampleFrameLimits] = useState({});
   const [helpOpen, setHelpOpen] = useState(false);
 
   const [analyses, setAnalyses] = useState([]);
@@ -228,6 +234,22 @@ export default function DeltaEvalPage() {
     [clusterOptions, selectedClusterId]
   );
   const sampleEntries = useMemo(() => selectedCluster?.samples || [], [selectedCluster]);
+  const sampleFrameCounts = useMemo(() => {
+    const out = {};
+    sampleEntries.forEach((sample) => {
+      const sid = String(sample?.sample_id || '');
+      if (!sid) return;
+      const count =
+        Number(sample?.n_frames) ||
+        Number(sample?.frame_count) ||
+        Number(sample?.frames) ||
+        Number(sample?.metadata?.n_frames) ||
+        Number(sample?.summary?.n_frames) ||
+        0;
+      out[sid] = Number.isFinite(count) && count > 0 ? Math.round(count) : 0;
+    });
+    return out;
+  }, [sampleEntries]);
   const pottsModels = useMemo(() => selectedCluster?.potts_models || [], [selectedCluster]);
   const deltaModels = useMemo(
     () =>
@@ -291,7 +313,7 @@ export default function DeltaEvalPage() {
     if (!selectedClusterId) return;
     setAnalysesError(null);
     try {
-      const res = await fetchClusterAnalyses(projectId, systemId, selectedClusterId, { analysisType: 'endpoint_frustration' });
+      const res = await fetchClusterAnalyses(projectId, systemId, selectedClusterId);
       setAnalyses(Array.isArray(res?.analyses) ? res.analyses : []);
     } catch (err) {
       setAnalysesError(err.message || 'Failed to load analyses.');
@@ -309,18 +331,17 @@ export default function DeltaEvalPage() {
     loadAnalyses();
   }, [selectedClusterId, loadClusterInfo, loadAnalyses]);
 
+  const activeAnalysisType = activeTab === 'delta_energy' ? 'delta_energy' : 'endpoint_frustration';
+
   const matchingAnalyses = useMemo(() => {
     return analyses
-      .filter((a) => String(a?.model_a_id || '') === String(modelAId || ''))
-      .filter((a) => String(a?.model_b_id || '') === String(modelBId || ''))
-      .filter((a) => String(a?.md_label_mode || 'assigned').toLowerCase() === String(mdLabelMode || 'assigned'))
-      .filter((a) => Boolean(a?.drop_invalid) === Boolean(!keepInvalid))
+      .filter((a) => String(a?.analysis_type || '') === activeAnalysisType)
       .sort((x, y) => {
         const tx = Date.parse(String(x?.updated_at || x?.created_at || ''));
         const ty = Date.parse(String(y?.updated_at || y?.created_at || ''));
         return (Number.isFinite(ty) ? ty : 0) - (Number.isFinite(tx) ? tx : 0);
       });
-  }, [analyses, modelAId, modelBId, mdLabelMode, keepInvalid]);
+  }, [analyses, activeAnalysisType]);
 
   useEffect(() => {
     if (!matchingAnalyses.length) {
@@ -340,15 +361,15 @@ export default function DeltaEvalPage() {
   const loadAnalysisData = useCallback(
     async (analysisId) => {
       if (!analysisId) return null;
-      const cacheKey = `endpoint_frustration:${analysisId}`;
+      const cacheKey = `${activeAnalysisType}:${analysisId}`;
       if (Object.prototype.hasOwnProperty.call(analysisDataCacheRef.current, cacheKey)) {
         return analysisDataCacheRef.current[cacheKey];
       }
-      const payload = await fetchClusterAnalysisData(projectId, systemId, selectedClusterId, 'endpoint_frustration', analysisId);
+      const payload = await fetchClusterAnalysisData(projectId, systemId, selectedClusterId, activeAnalysisType, analysisId);
       analysisDataCacheRef.current = { ...analysisDataCacheRef.current, [cacheKey]: payload };
       return payload;
     },
-    [projectId, systemId, selectedClusterId]
+    [projectId, systemId, selectedClusterId, activeAnalysisType]
   );
 
   useEffect(() => {
@@ -395,7 +416,7 @@ export default function DeltaEvalPage() {
   const handleRun = useCallback(async () => {
     setJobError(null);
     try {
-      const res = await submitEndpointFrustrationJob({
+      const basePayload = {
         project_id: projectId,
         system_id: systemId,
         cluster_id: selectedClusterId,
@@ -404,15 +425,48 @@ export default function DeltaEvalPage() {
         sample_ids: selectedSampleIds,
         md_label_mode: mdLabelMode,
         keep_invalid: keepInvalid,
+      };
+      const frameLimits = {};
+      selectedSampleIds.forEach((sid) => {
+        if (sampleFrameModes[sid] === 'random') {
+          const limit = Math.max(0, Number(sampleFrameLimits[sid]) || 0);
+          if (limit > 0) frameLimits[sid] = limit;
+        }
+      });
+      const res = activeTab === 'delta_energy' ? await submitDeltaEnergyJob({
+        ...basePayload,
+        frame_limits: frameLimits,
+        seed: Math.max(0, Number(deltaEnergySeed) || 0),
+        energy_bins: Math.max(5, Number(deltaEnergyBins) || 80),
+        workers: Math.max(0, Number(workers) || 0),
+      }) : await submitEndpointFrustrationJob({
+        ...basePayload,
         top_k_edges: Number(topKEdges),
         workers: Math.max(0, Number(workers) || 0),
       });
       setJob(res);
       setJobStatus(null);
+      setRunPanelOpen(false);
     } catch (err) {
-      setJobError(err.message || 'Failed to submit endpoint frustration job.');
+      setJobError(err.message || 'Failed to submit analysis job.');
     }
-  }, [projectId, systemId, selectedClusterId, modelAId, modelBId, selectedSampleIds, mdLabelMode, keepInvalid, topKEdges, workers]);
+  }, [
+    activeTab,
+    projectId,
+    systemId,
+    selectedClusterId,
+    modelAId,
+    modelBId,
+    selectedSampleIds,
+    mdLabelMode,
+    keepInvalid,
+    sampleFrameModes,
+    sampleFrameLimits,
+    deltaEnergySeed,
+    deltaEnergyBins,
+    topKEdges,
+    workers,
+  ]);
 
   const jobProgress = Number(jobStatus?.meta?.progress ?? jobStatus?.progress ?? 0);
   const jobStatusLabel = String(jobStatus?.meta?.status || jobStatus?.status || 'queued');
@@ -687,7 +741,7 @@ export default function DeltaEvalPage() {
 
   const analysisSummary = selectedAnalysisMeta?.summary || {};
 
-  if (loadingSystem) return <Loader message="Loading endpoint-local analysis..." />;
+  if (loadingSystem) return <Loader message="Loading model-pair analysis..." />;
   if (systemError) return <ErrorMessage message={systemError} />;
 
   return (
@@ -695,18 +749,125 @@ export default function DeltaEvalPage() {
       <HelpDrawer
         open={helpOpen}
         onClose={() => setHelpOpen(false)}
-        title="Endpoint frustration help"
+        title="Model-pair analysis help"
         docPath="/docs/endpoint_frustration.md"
       />
 
+      {runPanelOpen ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
+          <div className="max-h-[90vh] w-full max-w-3xl overflow-y-auto rounded-lg border border-gray-700 bg-gray-900 p-4 shadow-xl">
+            <div className="flex items-start justify-between gap-3 border-b border-gray-800 pb-3">
+              <div>
+                <h2 className="text-lg font-semibold text-white">Run {activeTab === 'delta_energy' ? 'delta-energy' : 'commitment/frustration'} analysis</h2>
+                <p className="text-xs text-gray-400 mt-1">Select the model pair and trajectories for the active tab.</p>
+              </div>
+              <button type="button" onClick={() => setRunPanelOpen(false)} className="text-sm text-gray-400 hover:text-gray-100">
+                Close
+              </button>
+            </div>
+            <div className="grid grid-cols-1 gap-3 pt-4">
+              <div>
+                <label className="block text-xs text-gray-400 mb-1">Cluster</label>
+                <select value={selectedClusterId} onChange={(e) => setSelectedClusterId(e.target.value)} className="w-full bg-gray-950 border border-gray-800 rounded-md px-2 py-2 text-sm text-gray-100">
+                  {clusterOptions.map((cluster) => (
+                    <option key={cluster.cluster_id} value={cluster.cluster_id}>{cluster.name || cluster.cluster_id}</option>
+                  ))}
+                </select>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                <div>
+                  <label className="block text-xs text-gray-400 mb-1">Model A</label>
+                  <select value={modelAId} onChange={(e) => setModelAId(e.target.value)} className="w-full bg-gray-950 border border-gray-800 rounded-md px-2 py-2 text-sm text-gray-100">
+                    {deltaModels.map((model) => <option key={`modal-a:${model.model_id}`} value={model.model_id}>{model.name || model.model_id}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs text-gray-400 mb-1">Model B</label>
+                  <select value={modelBId} onChange={(e) => setModelBId(e.target.value)} className="w-full bg-gray-950 border border-gray-800 rounded-md px-2 py-2 text-sm text-gray-100">
+                    {deltaModels.map((model) => <option key={`modal-b:${model.model_id}`} value={model.model_id}>{model.name || model.model_id}</option>)}
+                  </select>
+                </div>
+              </div>
+              <div>
+                <label className="block text-xs text-gray-400 mb-1">Samples to analyze</label>
+                <select multiple value={selectedSampleIds} onChange={(e) => setSelectedSampleIds(Array.from(e.target.selectedOptions).map((o) => String(o.value)))} className="w-full bg-gray-950 border border-gray-800 rounded-md px-2 py-2 text-sm text-gray-100 h-40">
+                  {sampleEntries.map((sample) => (
+                    <option key={`modal-s:${sample.sample_id}`} value={sample.sample_id}>
+                      {sample.name || sample.sample_id}{sample.type ? ` (${sample.type})` : ''}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              {activeTab === 'delta_energy' ? (
+                <div className="rounded-md border border-gray-700 bg-gray-950/50 p-3 space-y-2">
+                  <h3 className="text-sm font-semibold text-gray-100">Frame selection</h3>
+                  {selectedSampleIds.map((sid) => {
+                    const sample = sampleEntries.find((s) => String(s.sample_id) === String(sid));
+                    const total = Number(sampleFrameCounts[sid] || 0);
+                    const mode = sampleFrameModes[sid] || 'all';
+                    return (
+                      <div key={`frame:${sid}`} className="grid grid-cols-1 md:grid-cols-[minmax(0,1fr)_120px_140px] gap-2 items-end">
+                        <div className="text-xs text-gray-300 truncate">{sample?.name || sid}<span className="text-gray-500"> · {total || '?'} frames</span></div>
+                        <select value={mode} onChange={(e) => setSampleFrameModes((prev) => ({ ...prev, [sid]: e.target.value }))} className="bg-gray-950 border border-gray-800 rounded-md px-2 py-1.5 text-xs text-gray-100">
+                          <option value="all">all frames</option>
+                          <option value="random">random subset</option>
+                        </select>
+                        <input type="number" min={1} max={total || undefined} disabled={mode !== 'random'} value={sampleFrameLimits[sid] || ''} placeholder={total ? `< ${total}` : 'frames'} onChange={(e) => setSampleFrameLimits((prev) => ({ ...prev, [sid]: Number(e.target.value) }))} className="bg-gray-950 border border-gray-800 rounded-md px-2 py-1.5 text-xs text-gray-100 disabled:opacity-50" />
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : null}
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+                <div>
+                  <label className="block text-xs text-gray-400 mb-1">MD labels</label>
+                  <select value={mdLabelMode} onChange={(e) => setMdLabelMode(e.target.value)} className="w-full bg-gray-950 border border-gray-800 rounded-md px-2 py-2 text-sm text-gray-100">
+                    <option value="assigned">assigned</option>
+                    <option value="halo">halo</option>
+                  </select>
+                </div>
+                {activeTab !== 'delta_energy' ? (
+                  <div>
+                    <label className="block text-xs text-gray-400 mb-1">Top edges stored</label>
+                    <input type="number" min={1} step={1} value={topKEdges} onChange={(e) => setTopKEdges(Number(e.target.value))} className="w-full bg-gray-950 border border-gray-800 rounded-md px-2 py-2 text-sm text-gray-100" />
+                  </div>
+                ) : (
+                  <div>
+                    <label className="block text-xs text-gray-400 mb-1">Energy bins</label>
+                    <input type="number" min={5} step={1} value={deltaEnergyBins} onChange={(e) => setDeltaEnergyBins(Number(e.target.value))} className="w-full bg-gray-950 border border-gray-800 rounded-md px-2 py-2 text-sm text-gray-100" />
+                  </div>
+                )}
+                <div>
+                  <label className="block text-xs text-gray-400 mb-1">Workers</label>
+                  <input type="number" min={0} step={1} value={workers} onChange={(e) => setWorkers(Number(e.target.value))} className="w-full bg-gray-950 border border-gray-800 rounded-md px-2 py-2 text-sm text-gray-100" />
+                </div>
+              </div>
+              {activeTab === 'delta_energy' ? (
+                <div>
+                  <label className="block text-xs text-gray-400 mb-1">Random seed</label>
+                  <input type="number" min={0} step={1} value={deltaEnergySeed} onChange={(e) => setDeltaEnergySeed(Number(e.target.value))} className="w-full bg-gray-950 border border-gray-800 rounded-md px-2 py-2 text-sm text-gray-100" />
+                </div>
+              ) : null}
+              <label className="flex items-center gap-2 text-sm text-gray-200">
+                <input type="checkbox" checked={keepInvalid} onChange={(e) => setKeepInvalid(e.target.checked)} className="h-4 w-4 text-cyan-500 rounded border-gray-700 bg-gray-950" />
+                Keep invalid frames
+              </label>
+              <button type="button" onClick={handleRun} disabled={!selectedClusterId || !modelAId || !modelBId || !selectedSampleIds.length} className="inline-flex items-center justify-center gap-2 px-3 py-2 rounded-md bg-cyan-500 text-black font-semibold disabled:opacity-50">
+                <Play className="h-4 w-4" />
+                Run analysis
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <p className="text-xs uppercase tracking-[0.2em] text-gray-500">Potts endpoint analysis</p>
-          <h1 className="text-2xl font-semibold text-white mt-2">Commitment and frustration</h1>
+          <p className="text-xs uppercase tracking-[0.2em] text-gray-500">Pairwise Potts model analyses</p>
+          <h1 className="text-2xl font-semibold text-white mt-2">Model-pair analysis</h1>
           <p className="text-sm text-gray-400 mt-2 max-w-4xl">
-            For a fixed pair of endpoint Potts models, compute residue and edge commitment together with
-            trajectory-normalized local frustration summaries. Residue colors can optionally absorb incident-edge
-            signal with the same weighted blending used elsewhere in PHASE.
+            For a fixed pair of Potts models, inspect delta-energy distributions, local commitment,
+            and trajectory-normalized frustration summaries.
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -738,7 +899,17 @@ export default function DeltaEvalPage() {
       <div className="grid grid-cols-1 xl:grid-cols-[360px_minmax(0,1fr)] gap-6">
         <section className="bg-gray-800 border border-gray-700 rounded-lg p-4 space-y-4">
           <div className="flex items-center justify-between">
-            <h2 className="text-sm font-semibold text-white">Run analysis</h2>
+            <h2 className="text-sm font-semibold text-white">Analysis browser</h2>
+            <button
+              type="button"
+              onClick={() => setRunPanelOpen(true)}
+              className="inline-flex items-center gap-2 px-2 py-1 rounded-md bg-cyan-500 text-xs font-semibold text-black"
+            >
+              <Play className="h-3.5 w-3.5" />
+              Run analysis
+            </button>
+          </div>
+          <div className="flex items-center justify-end">
             <button
               type="button"
               onClick={loadAnalyses}
@@ -749,7 +920,7 @@ export default function DeltaEvalPage() {
             </button>
           </div>
 
-          <div className="grid grid-cols-1 gap-3">
+          <div className="hidden">
             <div>
               <label className="block text-xs text-gray-400 mb-1">Cluster</label>
               <select
@@ -863,7 +1034,7 @@ export default function DeltaEvalPage() {
               className="inline-flex items-center justify-center gap-2 px-3 py-2 rounded-md bg-cyan-500 text-black font-semibold disabled:opacity-50"
             >
               <Play className="h-4 w-4" />
-              Run endpoint analysis
+              Run analysis
             </button>
           </div>
 
@@ -898,27 +1069,47 @@ export default function DeltaEvalPage() {
                 >
                   <div className="text-sm text-gray-100">{analysis.model_a_name || analysis.model_a_id} vs {analysis.model_b_name || analysis.model_b_id}</div>
                   <div className="text-xs text-gray-400 mt-1">
-                    samples: {analysis?.summary?.n_samples ?? 0} · edges: {analysis?.summary?.n_selected_edges ?? analysis?.top_k_edges ?? 0}
+                    {analysis.analysis_type || activeAnalysisType} · samples: {analysis?.summary?.n_samples ?? 0}
+                    {analysis?.summary?.n_selected_edges || analysis?.top_k_edges ? ` · edges: ${analysis?.summary?.n_selected_edges ?? analysis?.top_k_edges}` : ''}
                   </div>
                 </button>
               ))}
-              {!matchingAnalyses.length ? <p className="text-xs text-gray-500">No matching endpoint analyses yet.</p> : null}
+              {!matchingAnalyses.length ? <p className="text-xs text-gray-500">No {activeAnalysisType.replace('_', ' ')} analyses yet.</p> : null}
             </div>
           </div>
         </section>
 
         <section className="space-y-4">
+          <div className="flex flex-wrap gap-2 rounded-lg border border-gray-700 bg-gray-800 p-2">
+            {[
+              ['delta_energy', 'Delta energy distributions'],
+              ['commitment', 'Commitment'],
+              ['frustration', 'Frustration'],
+            ].map(([tab, label]) => (
+              <button
+                key={tab}
+                type="button"
+                onClick={() => setActiveTab(tab)}
+                className={`rounded-md px-3 py-2 text-sm ${
+                  activeTab === tab ? 'bg-cyan-500 text-black font-semibold' : 'bg-gray-900 text-gray-200 hover:bg-gray-700'
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
           {clusterInfoError ? <ErrorMessage message={clusterInfoError} /> : null}
           {analysisDataError ? <ErrorMessage message={analysisDataError} /> : null}
-          {analysisDataLoading ? <Loader message="Loading endpoint analysis..." /> : null}
+          {analysisDataLoading ? <Loader message="Loading model-pair analysis..." /> : null}
           {!analysisDataLoading && !selectedAnalysisMeta ? (
             <div className="bg-gray-800 border border-gray-700 rounded-lg p-6 text-sm text-gray-300">
-              Run the endpoint analysis first for the selected model pair and sample set.
+              Select an existing analysis from the list, or run a new analysis for this tab.
             </div>
           ) : null}
           {!analysisDataLoading && analysisData ? (
             <>
-              <div className="bg-gray-800 border border-gray-700 rounded-lg p-4 space-y-3">
+              {activeTab !== 'delta_energy' ? (
+                <div className="bg-gray-800 border border-gray-700 rounded-lg p-4 space-y-3">
                 <div className="flex flex-wrap items-center gap-4">
                   <div>
                     <label className="block text-xs text-gray-400 mb-1">Displayed sample</label>
@@ -1060,9 +1251,10 @@ export default function DeltaEvalPage() {
                     <div className="text-xs text-gray-400 mt-1">label mode: {selectedAnalysisMeta?.md_label_mode || mdLabelMode}</div>
                   </div>
                 </div>
-              </div>
+                </div>
+              ) : null}
 
-              {!!deltaEnergySeries.length ? (
+              {activeTab === 'delta_energy' && !!deltaEnergySeries.length ? (
                 <div className="bg-gray-800 border border-gray-700 rounded-lg p-3 overflow-hidden">
                   <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
                     <div>
@@ -1094,20 +1286,26 @@ export default function DeltaEvalPage() {
                 </div>
               ) : null}
 
-              <div className="grid grid-cols-1 2xl:grid-cols-2 gap-4">
-                <div className="bg-gray-800 border border-gray-700 rounded-lg p-3 overflow-hidden">
-                  <Plot data={residueCommitmentPlot.data} layout={residueCommitmentPlot.layout} config={residueCommitmentPlot.config} style={{ width: '100%' }} />
+              {activeTab === 'commitment' ? (
+                <div className="grid grid-cols-1 2xl:grid-cols-2 gap-4">
+                  <div className="bg-gray-800 border border-gray-700 rounded-lg p-3 overflow-hidden">
+                    <Plot data={residueCommitmentPlot.data} layout={residueCommitmentPlot.layout} config={residueCommitmentPlot.config} style={{ width: '100%' }} />
+                  </div>
+                  <div className="bg-gray-800 border border-gray-700 rounded-lg p-3 overflow-hidden">
+                    <Plot data={edgeCommitmentPlot.data} layout={edgeCommitmentPlot.layout} config={edgeCommitmentPlot.config} style={{ width: '100%' }} />
+                  </div>
                 </div>
-                <div className="bg-gray-800 border border-gray-700 rounded-lg p-3 overflow-hidden">
-                  <Plot data={edgeCommitmentPlot.data} layout={edgeCommitmentPlot.layout} config={edgeCommitmentPlot.config} style={{ width: '100%' }} />
+              ) : null}
+              {activeTab === 'frustration' ? (
+                <div className="grid grid-cols-1 2xl:grid-cols-2 gap-4">
+                  <div className="bg-gray-800 border border-gray-700 rounded-lg p-3 overflow-hidden">
+                    <Plot data={residueFrustrationPlot.data} layout={residueFrustrationPlot.layout} config={residueFrustrationPlot.config} style={{ width: '100%' }} />
+                  </div>
+                  <div className="bg-gray-800 border border-gray-700 rounded-lg p-3 overflow-hidden">
+                    <Plot data={edgeFrustrationPlot.data} layout={edgeFrustrationPlot.layout} config={edgeFrustrationPlot.config} style={{ width: '100%' }} />
+                  </div>
                 </div>
-                <div className="bg-gray-800 border border-gray-700 rounded-lg p-3 overflow-hidden">
-                  <Plot data={residueFrustrationPlot.data} layout={residueFrustrationPlot.layout} config={residueFrustrationPlot.config} style={{ width: '100%' }} />
-                </div>
-                <div className="bg-gray-800 border border-gray-700 rounded-lg p-3 overflow-hidden">
-                  <Plot data={edgeFrustrationPlot.data} layout={edgeFrustrationPlot.layout} config={edgeFrustrationPlot.config} style={{ width: '100%' }} />
-                </div>
-              </div>
+              ) : null}
             </>
           ) : null}
         </section>

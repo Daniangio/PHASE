@@ -238,7 +238,7 @@ cluster_menu() {
     echo "System: ${OFFLINE_SYSTEM_NAME:-$OFFLINE_SYSTEM_ID} (${OFFLINE_SYSTEM_ID})"
     echo "Cluster: ${OFFLINE_CLUSTER_NAME:-$OFFLINE_CLUSTER_ID} (${OFFLINE_CLUSTER_ID})"
     echo ""
-    ACTION_LINES=$'list-models|List Potts models\nlist-samples|List sampling runs\nfit|Fit Potts model\nfit-delta|Fit delta Potts model\nlambda-model|Create lambda model\nsample|Run sampling\nsampling-analysis|Sampling Explorer analysis\nendpoint-frustration|Endpoint frustration analysis\ntransient-states|Transient-state analysis\nlambda-sweep|Lambda sweep sampling\ngibbs-relax|Gibbs relaxation analysis\nligand-completion|Ligand completion analysis\ndelta-js|Delta JS analysis\npotts-nn|Potts NN mapping analysis\nbackmapping-dataset|Build backmapping dataset\npatch-cluster|Patch cluster residues\nassign-md|Assign macro states to cluster (md_eval)\nback|Back to systems'
+    ACTION_LINES=$'list-models|List Potts models\nlist-samples|List sampling runs\nfit|Fit Potts model\nfit-delta|Fit delta Potts model\nlambda-model|Create lambda model\nsample|Run sampling\nsampling-analysis|Sampling Explorer analysis\nendpoint-frustration|Endpoint commitment/frustration analysis\ndelta-energy|Delta energy distribution analysis\ntransient-states|Transient-state analysis\nlambda-sweep|Lambda sweep sampling\ngibbs-relax|Gibbs relaxation analysis\nligand-completion|Ligand completion analysis\ndelta-js|Delta JS analysis\npotts-nn|Potts NN mapping analysis\nbackmapping-dataset|Build backmapping dataset\npatch-cluster|Patch cluster residues\nassign-md|Assign macro states to cluster (md_eval)\nback|Back to systems'
     ACTION_ROW="$(offline_choose_one "Cluster actions:" "$ACTION_LINES")"
     ACTION="$(printf "%s" "$ACTION_ROW" | awk -F'|' '{print $1}')"
     case "$ACTION" in
@@ -305,6 +305,15 @@ cluster_menu() {
       endpoint-frustration)
         ensure_env || return 0
         "${ROOT_DIR}/scripts/potts_endpoint_frustration.sh" \
+          --root "$OFFLINE_ROOT" \
+          --project-id "$OFFLINE_PROJECT_ID" \
+          --system-id "$OFFLINE_SYSTEM_ID" \
+          --cluster-id "$OFFLINE_CLUSTER_ID"
+        pause
+        ;;
+      delta-energy)
+        ensure_env || return 0
+        "${ROOT_DIR}/scripts/potts_delta_energy.sh" \
           --root "$OFFLINE_ROOT" \
           --project-id "$OFFLINE_PROJECT_ID" \
           --system-id "$OFFLINE_SYSTEM_ID" \

@@ -24,6 +24,7 @@ from phase.potts.sampling_run import run_sampling
 from phase.potts.analysis_run import (
     append_state_pose_energies,
     compute_delta_transition_analysis,
+    upsert_delta_energy_analysis,
     upsert_endpoint_frustration_analysis,
     upsert_delta_commitment_analysis,
     upsert_delta_js_analysis,
@@ -2662,6 +2663,141 @@ def run_endpoint_frustration_job(
         write_result_to_disk(sanitized_payload)
 
     save_progress("Endpoint frustration analysis completed", 100)
+    return sanitized_payload
+
+
+def run_delta_energy_job(
+    job_uuid: str,
+    dataset_ref: Dict[str, str],
+    params: Dict[str, Any],
+):
+    """
+    Delta-energy distribution analysis for a fixed (A,B) model pair.
+
+    Results are written under clusters/<cluster_id>/analyses/delta_energy/<analysis_id>/.
+    """
+    job = get_current_job()
+    start_time = datetime.utcnow()
+    rq_job_id = job.id if job else f"delta-energy-{job_uuid}"
+
+    project_id = dataset_ref.get("project_id")
+    system_id = dataset_ref.get("system_id")
+    cluster_id = dataset_ref.get("cluster_id")
+    if not project_id or not system_id or not cluster_id:
+        raise ValueError("delta_energy requires project_id/system_id/cluster_id.")
+
+    results_dirs = project_store.ensure_results_directories(project_id, system_id)
+    result_filepath = results_dirs["jobs_dir"] / f"{job_uuid}.json"
+
+    result_payload: Dict[str, Any] = {
+        "job_id": job_uuid,
+        "rq_job_id": rq_job_id,
+        "analysis_type": "delta_energy",
+        "status": "started",
+        "created_at": start_time.isoformat(),
+        "params": params,
+        "results": None,
+        "system_reference": {
+            "project_id": project_id,
+            "system_id": system_id,
+            "cluster_id": cluster_id,
+        },
+        "error": None,
+        "completed_at": None,
+    }
+
+    def save_progress(status_msg: str, progress: int):
+        if job:
+            job.meta["status"] = status_msg
+            job.meta["progress"] = progress
+            job.save_meta()
+        print(f"[DeltaEnergy {job_uuid}] {status_msg}")
+
+    def write_result_to_disk(payload: Dict[str, Any]):
+        try:
+            with open(result_filepath, "w") as f:
+                json.dump(payload, f, indent=2)
+        except Exception as e:
+            print(f"CRITICAL: Failed to save result file {result_filepath}: {e}")
+            payload["status"] = "failed"
+            payload["error"] = f"Failed to save result file: {e}"
+
+    try:
+        save_progress("Initializing...", 0)
+        write_result_to_disk(result_payload)
+
+        model_a_id = str(params.get("model_a_id") or "").strip()
+        model_b_id = str(params.get("model_b_id") or "").strip()
+        if not model_a_id or not model_b_id:
+            raise ValueError("delta_energy requires model_a_id and model_b_id.")
+        if model_a_id == model_b_id:
+            raise ValueError("Select two different models.")
+
+        sample_ids = params.get("sample_ids")
+        if isinstance(sample_ids, str):
+            sample_ids = [s.strip() for s in sample_ids.split(",") if s.strip()]
+        if not isinstance(sample_ids, list) or not sample_ids:
+            raise ValueError("delta_energy requires non-empty sample_ids.")
+
+        md_label_mode = (params.get("md_label_mode") or "assigned").lower()
+        keep_invalid = bool(params.get("keep_invalid", False))
+        frame_limits = params.get("frame_limits") if isinstance(params.get("frame_limits"), dict) else {}
+        seed = int(params.get("seed") or 0)
+        energy_bins = int(params.get("energy_bins") or 80)
+        requested_workers = int(params.get("workers") or 0)
+
+        def progress_cb(message: str, current: int, total: int):
+            if total <= 0:
+                return
+            ratio = max(0.0, min(1.0, float(current) / float(total)))
+            save_progress(message, 20 + int(70 * ratio))
+
+        save_progress("Computing delta-energy distributions...", 20)
+        out = upsert_delta_energy_analysis(
+            project_id=project_id,
+            system_id=system_id,
+            cluster_id=cluster_id,
+            model_a_ref=model_a_id,
+            model_b_ref=model_b_id,
+            sample_ids=sample_ids,
+            md_label_mode=md_label_mode,
+            drop_invalid=not keep_invalid,
+            frame_limits={str(k): int(v) for k, v in (frame_limits or {}).items()},
+            seed=seed,
+            energy_bins=energy_bins,
+            n_workers=(requested_workers if requested_workers > 0 else None),
+            progress_callback=progress_cb,
+        )
+
+        meta = out.get("metadata") or {}
+        analysis_id = str(meta.get("analysis_id") or "")
+        analysis_dir = Path(str(out.get("analysis_dir") or "")).resolve()
+        npz_path = Path(str(out.get("analysis_npz") or "")).resolve()
+        if not analysis_id or not analysis_dir.exists() or not npz_path.exists():
+            raise RuntimeError("delta_energy did not write analysis artifacts as expected.")
+
+        result_payload["status"] = "finished"
+        result_payload["results"] = {
+            "analysis_type": "delta_energy",
+            "analysis_id": analysis_id,
+            "analysis_dir": _relativize_path(analysis_dir),
+            "analysis_npz": _relativize_path(npz_path),
+        }
+
+    except Exception as e:
+        print(f"[DeltaEnergy {job_uuid}] FAILED: {e}")
+        traceback.print_exc()
+        result_payload["status"] = "failed"
+        result_payload["error"] = str(e)
+        raise e
+
+    finally:
+        save_progress("Saving final result", 95)
+        result_payload["completed_at"] = datetime.utcnow().isoformat()
+        sanitized_payload = _convert_nan_to_none(result_payload)
+        write_result_to_disk(sanitized_payload)
+
+    save_progress("Delta-energy analysis completed", 100)
     return sanitized_payload
 
 

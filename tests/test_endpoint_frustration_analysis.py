@@ -6,7 +6,7 @@ import numpy as np
 
 os.environ.setdefault("PHASE_DATA_ROOT", "/tmp/phase-test-data")
 
-from phase.potts.analysis_run import load_endpoint_framewise_payload, upsert_endpoint_frustration_analysis
+from phase.potts.analysis_run import load_endpoint_framewise_payload, upsert_delta_energy_analysis, upsert_endpoint_frustration_analysis
 from phase.potts.potts_model import PottsModel, save_potts_model
 from phase.potts.sample_io import save_sample_npz
 from phase.services.project_store import ProjectStore
@@ -119,6 +119,69 @@ def test_endpoint_frustration_analysis_writes_summary_and_framewise_npz(monkeypa
         assert np.asarray(data["frustration_node_sym_framewise"]).shape == (3, 2)
         assert np.asarray(data["frustration_edge_sym_framewise"]).shape == (3, 1)
         assert np.asarray(data["delta_energy_framewise"]).shape == (3,)
+
+
+def test_delta_energy_analysis_supports_random_frame_limits(monkeypatch, tmp_path):
+    data_root = tmp_path / "data"
+    monkeypatch.setenv("PHASE_DATA_ROOT", str(data_root))
+
+    store = ProjectStore(base_dir=data_root / "projects")
+    store.create_project("Project", project_id="proj")
+    system = store.create_system("proj", name="System", system_id="sys")
+    store.save_system(system)
+
+    cluster_id = "cluster1"
+    cluster_dirs = store.ensure_cluster_directories("proj", "sys", cluster_id)
+    system_dir = data_root / "projects" / "proj" / "systems" / "sys"
+    np.savez_compressed(
+        cluster_dirs["cluster_dir"] / "cluster.npz",
+        residue_keys=np.asarray(["res_10", "res_20"], dtype=str),
+        cluster_counts=np.asarray([2, 2], dtype=np.int32),
+    )
+    edges = [(0, 1)]
+    _write_model(
+        cluster_dirs["potts_models_dir"],
+        system_dir,
+        "model-a",
+        "A",
+        h=[np.asarray([0.0, 1.0]), np.asarray([0.4, -0.1])],
+        J={(0, 1): np.asarray([[0.2, -0.4], [0.1, 0.3]])},
+        edges=edges,
+    )
+    _write_model(
+        cluster_dirs["potts_models_dir"],
+        system_dir,
+        "model-b",
+        "B",
+        h=[np.asarray([0.5, -0.2]), np.asarray([0.0, 0.2])],
+        J={(0, 1): np.asarray([[-0.1, 0.2], [0.0, -0.3]])},
+        edges=edges,
+    )
+    _write_sample(
+        system_dir,
+        cluster_id,
+        "md1",
+        {"name": "MD 1", "type": "md_eval", "method": "md_eval"},
+        labels=np.asarray([[0, 0], [1, 0], [1, 1], [0, 1], [0, 0]], dtype=np.int32),
+    )
+
+    out = upsert_delta_energy_analysis(
+        project_id="proj",
+        system_id="sys",
+        cluster_id=cluster_id,
+        model_a_ref="model-a",
+        model_b_ref="model-b",
+        sample_ids=["md1"],
+        frame_limits={"md1": 3},
+        seed=7,
+        energy_bins=12,
+    )
+    assert out["metadata"]["analysis_type"] == "delta_energy"
+    with np.load(out["analysis_npz"], allow_pickle=False) as data:
+        assert np.asarray(data["delta_energy_hist"]).shape == (1, 12)
+        assert np.asarray(data["sample_available_frame_counts"]).tolist() == [5]
+        assert np.asarray(data["sample_frame_counts"]).tolist() == [3]
+        assert np.asarray(data["sample_frame_limits"]).tolist() == [3]
 
 
 def test_endpoint_frustration_analysis_drops_invalid_frames(monkeypatch, tmp_path):
