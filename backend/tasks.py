@@ -34,7 +34,11 @@ from phase.potts.analysis_run import (
     _single_frame_ligand_completion_worker,
 )
 from phase.potts.transient_analysis import run_transient_state_analysis
-from phase.potts.spectral_analysis import upsert_hamiltonian_spectral_batch, upsert_spectral_intersection_analysis
+from phase.potts.spectral_analysis import (
+    upsert_hamiltonian_spectral_batch,
+    upsert_piston_ligand_projection_analysis,
+    upsert_spectral_intersection_analysis,
+)
 from phase.potts.orchestration import (
     aggregate_gibbs_relaxation_batch,
     aggregate_ligand_completion_batch,
@@ -2989,6 +2993,97 @@ def run_spectral_intersection_job(
         write_result_to_disk(sanitized_payload)
 
     save_progress("Spectral intersection analysis completed", 100)
+    return sanitized_payload
+
+
+def run_piston_ligand_projection_job(
+    job_uuid: str,
+    dataset_ref: Dict[str, str],
+    params: Dict[str, Any],
+):
+    """Masked ligand/short-MD projection onto allosteric piston vectors."""
+    job = get_current_job()
+    start_time = datetime.utcnow()
+    rq_job_id = job.id if job else f"piston-ligand-projection-{job_uuid}"
+
+    project_id = dataset_ref.get("project_id")
+    system_id = dataset_ref.get("system_id")
+    cluster_id = dataset_ref.get("cluster_id")
+    if not project_id or not system_id or not cluster_id:
+        raise ValueError("piston_ligand_projection requires project_id/system_id/cluster_id.")
+
+    results_dirs = project_store.ensure_results_directories(project_id, system_id)
+    result_filepath = results_dirs["jobs_dir"] / f"{job_uuid}.json"
+    result_payload: Dict[str, Any] = {
+        "job_id": job_uuid,
+        "rq_job_id": rq_job_id,
+        "analysis_type": "piston_ligand_projection",
+        "status": "started",
+        "created_at": start_time.isoformat(),
+        "params": params,
+        "results": None,
+        "system_reference": {
+            "project_id": project_id,
+            "system_id": system_id,
+            "cluster_id": cluster_id,
+        },
+        "error": None,
+        "completed_at": None,
+    }
+
+    def save_progress(status_msg: str, progress: int):
+        if job:
+            job.meta["status"] = status_msg
+            job.meta["progress"] = progress
+            job.save_meta()
+        print(f"[PistonLigandProjection {job_uuid}] {status_msg}")
+
+    def write_result_to_disk(payload: Dict[str, Any]):
+        try:
+            with open(result_filepath, "w") as f:
+                json.dump(payload, f, indent=2)
+        except Exception as e:
+            print(f"CRITICAL: Failed to save result file {result_filepath}: {e}")
+            payload["status"] = "failed"
+            payload["error"] = f"Failed to save result file: {e}"
+
+    try:
+        save_progress("Initializing...", 0)
+        write_result_to_disk(result_payload)
+        intersection_analysis_id = str(params.get("intersection_analysis_id") or "").strip()
+        sample_ids = params.get("sample_ids") or []
+        if isinstance(sample_ids, str):
+            sample_ids = [s.strip() for s in sample_ids.split(",") if s.strip()]
+        if not intersection_analysis_id or not isinstance(sample_ids, list) or not sample_ids:
+            raise ValueError("piston_ligand_projection requires intersection_analysis_id and non-empty sample_ids.")
+        save_progress("Computing masked piston projections...", 35)
+        out = upsert_piston_ligand_projection_analysis(
+            project_id=project_id,
+            system_id=system_id,
+            cluster_id=cluster_id,
+            intersection_analysis_id=intersection_analysis_id,
+            sample_ids=sample_ids,
+            label_mode=str(params.get("label_mode") or "assigned"),
+            drop_invalid=bool(params.get("drop_invalid", True)),
+            overwrite=bool(params.get("overwrite", False)),
+        )
+        result_payload["status"] = "finished"
+        result_payload["results"] = out
+
+    except Exception as e:
+        print(f"[PistonLigandProjection {job_uuid}] FAILED: {e}")
+        traceback.print_exc()
+        result_payload["status"] = "failed"
+        result_payload["error"] = str(e)
+        raise e
+
+    finally:
+        save_progress("Saving final result", 95)
+        result_payload["completed_at"] = datetime.utcnow().isoformat()
+        sanitized_payload = _convert_nan_to_none(result_payload)
+        write_result_to_disk(sanitized_payload)
+
+    save_progress("Piston ligand projection completed", 100)
     return sanitized_payload
 
 def run_delta_js_job(

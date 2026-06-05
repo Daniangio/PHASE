@@ -222,6 +222,18 @@ def list_sampling(root: Path, project_id: str, system_id: str) -> None:
     _print_rows(rows)
 
 
+def list_cluster_samples(root: Path, project_id: str, system_id: str, cluster_id: str) -> None:
+    store = ProjectStore(base_dir=root)
+    rows = []
+    for sample in store.list_samples(project_id, system_id, cluster_id):
+        sample_id = str(sample.get("sample_id") or "")
+        name = str(sample.get("name") or sample_id)
+        typ = str(sample.get("type") or "")
+        path = sample.get("path") or ""
+        rows.append([sample_id, name, typ, str(path)])
+    _print_rows(rows)
+
+
 def list_analyses(root: Path, project_id: str, system_id: str, cluster_id: str, analysis_type: str) -> None:
     store = ProjectStore(base_dir=root)
     dirs = store.ensure_cluster_directories(project_id, system_id, cluster_id)
@@ -302,6 +314,11 @@ def main(argv: list[str] | None = None) -> int:
     sp.add_argument("--project-id", required=True)
     sp.add_argument("--system-id", required=True)
 
+    sp = sub.add_parser("list-cluster-samples")
+    sp.add_argument("--project-id", required=True)
+    sp.add_argument("--system-id", required=True)
+    sp.add_argument("--cluster-id", required=True)
+
     sp = sub.add_parser("list-analyses")
     sp.add_argument("--project-id", required=True)
     sp.add_argument("--system-id", required=True)
@@ -333,6 +350,8 @@ def main(argv: list[str] | None = None) -> int:
         list_trajectories(root, args.project_id, args.system_id)
     elif args.cmd == "list-sampling":
         list_sampling(root, args.project_id, args.system_id)
+    elif args.cmd == "list-cluster-samples":
+        list_cluster_samples(root, args.project_id, args.system_id, args.cluster_id)
     elif args.cmd == "list-analyses":
         list_analyses(root, args.project_id, args.system_id, args.cluster_id, args.analysis_type)
     return 0

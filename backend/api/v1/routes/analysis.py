@@ -12,6 +12,7 @@ from backend.api.v1.schemas import (
     DeltaEnergyJobRequest,
     HamiltonianSpectralJobRequest,
     SpectralIntersectionJobRequest,
+    PistonLigandProjectionJobRequest,
     EndpointFrustrationJobRequest,
     DeltaJsJobRequest,
     TransientStatesJobRequest,
@@ -33,6 +34,7 @@ from backend.tasks import (
     run_delta_energy_job,
     run_hamiltonian_spectral_job,
     run_spectral_intersection_job,
+    run_piston_ligand_projection_job,
     run_endpoint_frustration_job,
     run_delta_js_job,
     run_transient_states_job,
@@ -1188,6 +1190,52 @@ async def submit_spectral_intersection_job(
             job_timeout="30m",
             result_ttl=86400,
             job_id=f"spectral-intersection-{job_uuid}",
+        )
+        return {"status": "queued", "job_id": job.id, "analysis_uuid": job_uuid}
+    except Exception as exc:  # pragma: no cover
+        raise HTTPException(status_code=500, detail=f"Job submission failed: {exc}") from exc
+
+
+@router.post(
+    "/submit/piston_ligand_projection",
+    summary="Submit masked ligand/short-MD projection onto allosteric piston vectors.",
+)
+async def submit_piston_ligand_projection_job(
+    payload: PistonLigandProjectionJobRequest,
+    task_queue: Any = Depends(get_queue),
+):
+    try:
+        system_meta = project_store.get_system(payload.project_id, payload.system_id)
+    except FileNotFoundError:
+        raise HTTPException(
+            status_code=404,
+            detail=f"System '{payload.system_id}' not found in project '{payload.project_id}'.",
+        )
+
+    get_cluster_entry(system_meta, payload.cluster_id)
+    if not str(payload.intersection_analysis_id or "").strip():
+        raise HTTPException(status_code=400, detail="intersection_analysis_id is required.")
+    if not payload.sample_ids or not isinstance(payload.sample_ids, list):
+        raise HTTPException(status_code=400, detail="sample_ids must be a non-empty list.")
+    label_mode = str(payload.label_mode or "assigned").strip().lower()
+    if label_mode not in {"assigned", "labels", "halo", "labels_halo"}:
+        raise HTTPException(status_code=400, detail="label_mode must be assigned or halo.")
+
+    params = payload.dict(exclude_none=True, exclude={"project_id", "system_id", "cluster_id"})
+    dataset_ref = {
+        "project_id": payload.project_id,
+        "system_id": payload.system_id,
+        "cluster_id": payload.cluster_id,
+    }
+
+    try:
+        job_uuid = str(uuid.uuid4())
+        job = task_queue.enqueue(
+            run_piston_ligand_projection_job,
+            args=(job_uuid, dataset_ref, params),
+            job_timeout="2h",
+            result_ttl=86400,
+            job_id=f"piston-ligand-projection-{job_uuid}",
         )
         return {"status": "queued", "job_id": job.id, "analysis_uuid": job_uuid}
     except Exception as exc:  # pragma: no cover

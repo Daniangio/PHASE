@@ -91,6 +91,13 @@ export function submitSpectralIntersectionJob(payload) {
   });
 }
 
+export function submitPistonLigandProjectionJob(payload) {
+  return requestJSON('/submit/piston_ligand_projection', {
+    method: 'POST',
+    body: payload,
+  });
+}
+
 export function submitDeltaJsJob(payload) {
   return requestJSON('/submit/delta_js', {
     method: 'POST',

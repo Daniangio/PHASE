@@ -11,12 +11,14 @@ from typing import Any, Callable, Sequence
 import numpy as np
 
 from phase.potts.potts_model import load_potts_model, zero_sum_gauge_model
+from phase.potts.sample_io import load_sample_npz
 from phase.services.project_store import ProjectStore
 
 ANALYSIS_METADATA_FILENAME = "analysis_metadata.json"
 SINGLE_KIND = "hamiltonian_spectral_single"
 PAIR_KIND = "hamiltonian_spectral_pair"
 INTERSECTION_KIND = "hamiltonian_spectral_intersection"
+PISTON_LIGAND_KIND = "piston_ligand_projection"
 
 
 def _utc_now() -> str:
@@ -321,11 +323,13 @@ def spectral_embedding_from_laplacian(
 def _fallback_communities(embedding: np.ndarray) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
     n = int(np.asarray(embedding).shape[0])
     labels = np.ones(n, dtype=np.int32)
-    return labels, labels.copy(), {
+    # No reliable density saddle estimate exists in fallback mode, so mark all
+    # points as halo/unassigned for core-strict piston intersections.
+    return labels, np.zeros(n, dtype=np.int32), {
         "method": "fallback_single_community",
         "distance_metric": "cosine",
         "n_communities": 1 if n else 0,
-        "warning": "DADApy clustering was unavailable or failed; assigned one community.",
+        "warning": "DADApy clustering was unavailable or failed; assigned one display community but no core points.",
     }
 
 
@@ -354,14 +358,19 @@ def dadapy_density_peak_communities(
         dp_data.compute_density_kNN(k=dk)
         assigned, halo = dp_data.compute_clustering_ADP(Z=1.65)
         labels = np.asarray(assigned, dtype=np.int32) + 1
+        # DADApy uses -1 for halo points. Convert to 0 so labels remain
+        # non-negative in NPZ/JSON; >0 means topological core.
         halo_labels = np.asarray(halo, dtype=np.int32) + 1
         n_communities = int(len(set(labels.tolist())))
+        n_core = int(np.count_nonzero(halo_labels > 0))
         return labels, halo_labels, {
             "method": "dadapy_density_peak_adp",
             "distance_metric": "cosine",
             "maxk": int(kmax),
             "density_k": int(dk),
             "n_communities": n_communities,
+            "n_core_points": n_core,
+            "n_halo_points": int(n - n_core),
             "cluster_centers": [int(x) for x in getattr(dp_data, "cluster_centers", [])],
         }
     except Exception as exc:
@@ -377,6 +386,14 @@ def _community_sizes(labels: np.ndarray) -> np.ndarray:
     unique, counts = np.unique(arr, return_counts=True)
     order = np.argsort(unique)
     return np.column_stack([unique[order], counts[order]]).astype(np.int32)
+
+
+def _community_core_sizes(labels: np.ndarray, core_mask: np.ndarray) -> np.ndarray:
+    arr = np.asarray(labels, dtype=np.int32)
+    core = np.asarray(core_mask, dtype=bool)
+    if arr.size == 0:
+        return np.zeros((0, 2), dtype=np.int32)
+    return _community_sizes(arr[core])
 
 
 def _community_order(labels: np.ndarray) -> np.ndarray:
@@ -412,6 +429,7 @@ def _laplacian_community_bundle(source_matrix: np.ndarray, *, top_k: int = 20) -
     values, vectors, top_values, top_vectors, top_indices = laplacian_spectral_decomposition(laplacian, top_k=top_k)
     embedding, embedding_indices = spectral_embedding_from_laplacian(values, vectors, top_k=top_k)
     community_ids, community_halo_ids, diagnostics = dadapy_density_peak_communities(embedding)
+    core_mask = np.asarray(community_halo_ids, dtype=np.int32) > 0
     order = _community_order(community_ids)
     return {
         "laplacian_matrix": laplacian,
@@ -424,7 +442,9 @@ def _laplacian_community_bundle(source_matrix: np.ndarray, *, top_k: int = 20) -
         "laplacian_embedding_indices": embedding_indices,
         "community_ids": community_ids,
         "community_halo_ids": community_halo_ids,
+        "community_core_mask": core_mask,
         "community_sizes": _community_sizes(community_ids),
+        "community_core_sizes": _community_core_sizes(community_ids, core_mask),
         "community_matrix_order": order,
         "community_interaction_matrix": _community_interaction_matrix(source_matrix, community_ids),
         "community_diagnostics": diagnostics,
@@ -489,7 +509,10 @@ def _single_npz_has_v3_fields(npz_path: Path) -> bool:
             "laplacian_embedding",
             "laplacian_embedding_indices",
             "community_ids",
+            "community_halo_ids",
+            "community_core_mask",
             "community_sizes",
+            "community_core_sizes",
             "community_matrix_order",
             "community_interaction_matrix",
         },
@@ -529,7 +552,7 @@ def compute_single_spectral_analysis(
     community_diagnostics = community["community_diagnostics"]
     np.savez_compressed(
         npz_path,
-        analysis_format_version=np.asarray([3], dtype=np.int32),
+        analysis_format_version=np.asarray([5], dtype=np.int32),
         mode=np.asarray(["single"], dtype=str),
         state_id=np.asarray([state_id], dtype=str),
         state_name=np.asarray([state_names.get(state_id, state_id)], dtype=str),
@@ -552,7 +575,9 @@ def compute_single_spectral_analysis(
         laplacian_embedding_indices=np.asarray(community["laplacian_embedding_indices"], dtype=np.int32),
         community_ids=np.asarray(community["community_ids"], dtype=np.int32),
         community_halo_ids=np.asarray(community["community_halo_ids"], dtype=np.int32),
+        community_core_mask=np.asarray(community["community_core_mask"], dtype=bool),
         community_sizes=np.asarray(community["community_sizes"], dtype=np.int32),
+        community_core_sizes=np.asarray(community["community_core_sizes"], dtype=np.int32),
         community_matrix_order=np.asarray(community["community_matrix_order"], dtype=np.int32),
         community_interaction_matrix=np.asarray(community["community_interaction_matrix"], dtype=np.float32),
         community_diagnostics_json=np.asarray([json.dumps(_convert_nan_to_none(community_diagnostics))], dtype=str),
@@ -580,6 +605,8 @@ def compute_single_spectral_analysis(
             "laplacian_top_k": int(np.asarray(community["laplacian_top_eigenvectors"]).shape[1]),
             "laplacian_embedding_k": int(np.asarray(community["laplacian_embedding"]).shape[1]),
             "n_communities": int(np.asarray(community["community_sizes"]).shape[0]),
+            "n_core_residues": int(np.count_nonzero(np.asarray(community["community_core_mask"], dtype=bool))),
+            "n_halo_residues": int(F.shape[0] - np.count_nonzero(np.asarray(community["community_core_mask"], dtype=bool))),
             "community_method": str(community_diagnostics.get("method") if isinstance(community_diagnostics, dict) else ""),
         },
     }
@@ -601,7 +628,10 @@ def _pair_npz_has_v3_fields(npz_path: Path) -> bool:
             "laplacian_embedding",
             "laplacian_embedding_indices",
             "community_ids",
+            "community_halo_ids",
+            "community_core_mask",
             "community_sizes",
+            "community_core_sizes",
             "community_matrix_order",
             "community_interaction_matrix",
         },
@@ -655,7 +685,7 @@ def compute_spectral_intersection_analysis(
 
     single, single_meta = _load_analysis_npz_and_meta(cluster_dir, SINGLE_KIND, single_analysis_id)
     pair, pair_meta = _load_analysis_npz_and_meta(cluster_dir, PAIR_KIND, pair_analysis_id)
-    required = ("residue_keys", "community_ids")
+    required = ("residue_keys", "community_ids", "community_core_mask")
     for key in required:
         if key not in single:
             raise ValueError(f"Single analysis {single_analysis_id} lacks required field {key}; rerun spectral analysis.")
@@ -671,15 +701,26 @@ def compute_spectral_intersection_analysis(
 
     struct = np.asarray(single["community_ids"], dtype=np.int32)
     func = np.asarray(pair["community_ids"], dtype=np.int32)
+    struct_core = np.asarray(single["community_core_mask"], dtype=bool)
+    func_core = np.asarray(pair["community_core_mask"], dtype=bool)
     n_res = int(residue_keys.shape[0])
     if struct.shape[0] != n_res or func.shape[0] != n_res:
         raise ValueError("Community label arrays do not match residue count.")
+    if struct_core.shape[0] != n_res or func_core.shape[0] != n_res:
+        raise ValueError("Community core masks do not match residue count.")
 
     groups: dict[tuple[int, int], list[int]] = {}
     for idx, key in enumerate(zip(struct.tolist(), func.tolist(), strict=False)):
         groups.setdefault((int(key[0]), int(key[1])), []).append(int(idx))
 
-    piston_groups = [(key, members) for key, members in groups.items() if len(members) >= min_group_size]
+    core_groups: dict[tuple[int, int], list[int]] = {}
+    for idx in range(n_res):
+        if not (bool(struct_core[idx]) and bool(func_core[idx])):
+            continue
+        key = (int(struct[idx]), int(func[idx]))
+        core_groups.setdefault(key, []).append(int(idx))
+
+    piston_groups = [(key, members) for key, members in core_groups.items() if len(members) >= min_group_size]
     piston_groups.sort(key=lambda row: (-len(row[1]), row[0][0], row[0][1]))
     piston_ids = np.zeros(n_res, dtype=np.int32)
     piston_group_ids: list[int] = []
@@ -702,44 +743,49 @@ def compute_spectral_intersection_analysis(
                 "size": int(len(members)),
                 "residue_indices": [int(i) for i in members],
                 "residue_keys": _residue_label_list(residue_keys, members),
-                "tooltip": "A cohesive structural unit that rewires its correlations collectively. These residues form a solid mechanical gear that shifts during activation.",
+                "tooltip": "A highly cohesive structural unit that rewires its correlations collectively. True mechanical gears.",
             }
         )
 
     struct_sizes = _community_size_map(struct)
     func_sizes = _community_size_map(func)
     class_codes = np.zeros(n_res, dtype=np.int32)
-    # 3=piston, 1=scaffold, 2=transient switch, 0=other
+    # 0=thermodynamic bulk, 1=scaffold, 2=transient switch,
+    # 3=allosteric piston, 4=subthreshold core-core overlap.
     class_codes[piston_ids > 0] = 3
     for idx in range(n_res):
         if class_codes[idx] == 3:
             continue
-        s = int(struct[idx])
-        f = int(func[idx])
-        s_size = int(struct_sizes.get(s, 0))
-        f_size = int(func_sizes.get(f, 0))
-        if s > 0 and s_size >= min_group_size and (f <= 0 or len(groups.get((s, f), [])) < min_group_size):
+        if bool(struct_core[idx]) and bool(func_core[idx]):
+            class_codes[idx] = 4
+        elif bool(struct_core[idx]) and not bool(func_core[idx]):
             class_codes[idx] = 1
-        elif (s <= 0 or s_size < min_group_size) and f > 0 and f_size >= min_group_size:
+        elif not bool(struct_core[idx]) and bool(func_core[idx]):
             class_codes[idx] = 2
 
-    class_names = np.asarray(["other", "structural_scaffold", "transient_switch", "allosteric_piston"], dtype=str)
+    class_names = np.asarray(
+        ["thermodynamic_bulk", "structural_scaffold", "transient_switch", "allosteric_piston", "subthreshold_core_overlap"],
+        dtype=str,
+    )
     class_counts = np.asarray(
-        [[code, int(np.count_nonzero(class_codes == code))] for code in range(4)],
+        [[code, int(np.count_nonzero(class_codes == code))] for code in range(5)],
         dtype=np.int32,
     )
-    combo_struct = np.asarray([int(key[0]) for key, _ in sorted(groups.items())], dtype=np.int32)
-    combo_func = np.asarray([int(key[1]) for key, _ in sorted(groups.items())], dtype=np.int32)
-    combo_sizes = np.asarray([len(members) for _, members in sorted(groups.items())], dtype=np.int32)
+    sorted_core_groups = sorted(core_groups.items())
+    combo_struct = np.asarray([int(key[0]) for key, _ in sorted_core_groups], dtype=np.int32)
+    combo_func = np.asarray([int(key[1]) for key, _ in sorted_core_groups], dtype=np.int32)
+    combo_sizes = np.asarray([len(members) for _, members in sorted_core_groups], dtype=np.int32)
 
     analysis_dir.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(
         npz_path,
-        analysis_format_version=np.asarray([1], dtype=np.int32),
+        analysis_format_version=np.asarray([5], dtype=np.int32),
         mode=np.asarray(["intersection"], dtype=str),
         residue_keys=residue_keys,
         structural_community_ids=struct,
         functional_community_ids=func,
+        structural_core_mask=struct_core,
+        functional_core_mask=func_core,
         piston_ids=piston_ids,
         residue_class_codes=class_codes,
         residue_class_names=class_names,
@@ -776,11 +822,15 @@ def compute_spectral_intersection_analysis(
             "n_residues": n_res,
             "n_structural_communities": int(len(struct_sizes)),
             "n_functional_communities": int(len(func_sizes)),
-            "n_composite_groups": int(len(groups)),
+            "n_core_composite_groups": int(len(core_groups)),
             "n_pistons": int(len(piston_groups)),
             "piston_residues": int(np.count_nonzero(piston_ids > 0)),
             "structural_scaffold_residues": int(np.count_nonzero(class_codes == 1)),
             "transient_switch_residues": int(np.count_nonzero(class_codes == 2)),
+            "thermodynamic_bulk_residues": int(np.count_nonzero(class_codes == 0)),
+            "subthreshold_core_overlap_residues": int(np.count_nonzero(class_codes == 4)),
+            "structural_core_residues": int(np.count_nonzero(struct_core)),
+            "functional_core_residues": int(np.count_nonzero(func_core)),
         },
     }
     _write_json(meta_path, meta)
@@ -811,6 +861,258 @@ def upsert_spectral_intersection_analysis(
     )
     return {
         "analysis_type": INTERSECTION_KIND,
+        "project_id": project_id,
+        "system_id": system_id,
+        "cluster_id": cluster_id,
+        "analysis": out["metadata"],
+        "analysis_npz": out["analysis_npz"],
+        "created": bool(out.get("created")),
+    }
+
+
+def _resolve_sample_npz_path(
+    store: ProjectStore,
+    project_id: str,
+    system_id: str,
+    cluster_dir: Path,
+    entry: dict[str, Any],
+) -> Path:
+    paths = entry.get("paths") if isinstance(entry.get("paths"), dict) else {}
+    rel = (
+        paths.get("summary_npz")
+        or paths.get("sample_npz")
+        or paths.get("path")
+        or entry.get("path")
+    )
+    if not rel:
+        raise FileNotFoundError(f"Sample {entry.get('sample_id')} has no NPZ path.")
+    p = Path(str(rel))
+    if p.is_absolute():
+        return p
+    resolved = store.resolve_path(project_id, system_id, str(rel))
+    if resolved.exists():
+        return resolved
+    alt = cluster_dir / str(rel)
+    return alt if alt.exists() else resolved
+
+
+def _sample_labels_for_projection(path: Path, *, label_mode: str = "assigned", drop_invalid: bool = True) -> np.ndarray:
+    sample = load_sample_npz(path)
+    X = sample.labels
+    mode = str(label_mode or "assigned").strip().lower()
+    if mode in {"halo", "labels_halo"} and sample.labels_halo is not None:
+        X = sample.labels_halo
+    X = np.asarray(X, dtype=np.int32)
+    if X.ndim != 2:
+        raise ValueError(f"Sample labels must be 2D: {path}")
+    if drop_invalid and sample.invalid_mask is not None and sample.invalid_mask.shape[0] == X.shape[0]:
+        X = X[~np.asarray(sample.invalid_mask, dtype=bool)]
+    return X
+
+
+def _mutual_information_submatrix(labels: np.ndarray, residues: np.ndarray) -> np.ndarray:
+    X = np.asarray(labels, dtype=np.int32)
+    residues = np.asarray(residues, dtype=np.int32)
+    if residues.size == 0:
+        return np.zeros((0, 0), dtype=np.float64)
+    sub = X[:, residues]
+    keep = np.all(sub >= 0, axis=1)
+    sub = sub[keep]
+    n_frames = int(sub.shape[0])
+    n = int(residues.size)
+    M = np.zeros((n, n), dtype=np.float64)
+    if n_frames <= 1:
+        return M
+    for a in range(n):
+        xa = sub[:, a]
+        vals_a, inv_a = np.unique(xa, return_inverse=True)
+        pa = np.bincount(inv_a, minlength=vals_a.size).astype(np.float64) / float(n_frames)
+        for b in range(a, n):
+            xb = sub[:, b]
+            vals_b, inv_b = np.unique(xb, return_inverse=True)
+            pb = np.bincount(inv_b, minlength=vals_b.size).astype(np.float64) / float(n_frames)
+            joint = np.zeros((vals_a.size, vals_b.size), dtype=np.float64)
+            np.add.at(joint, (inv_a, inv_b), 1.0)
+            joint /= float(n_frames)
+            denom = pa[:, None] * pb[None, :]
+            mask = joint > 0
+            mi = float(np.sum(joint[mask] * np.log(joint[mask] / np.maximum(denom[mask], 1e-300))))
+            M[a, b] = mi
+            M[b, a] = mi
+    return M
+
+
+def _ligand_projection_id(intersection_analysis_id: str, sample_ids: Sequence[str], label_mode: str) -> str:
+    joined = "_".join(_safe_id(str(s)) for s in sample_ids)
+    if len(joined) > 120:
+        import hashlib
+
+        joined = hashlib.sha1(",".join(str(s) for s in sample_ids).encode("utf-8")).hexdigest()[:16]
+    return f"ligand_projection_{_safe_id(intersection_analysis_id)}__{_safe_id(label_mode)}__{joined}"
+
+
+def compute_piston_ligand_projection_analysis(
+    *,
+    store: ProjectStore,
+    project_id: str,
+    system_id: str,
+    cluster_id: str,
+    intersection_analysis_id: str,
+    sample_ids: Sequence[str],
+    label_mode: str = "assigned",
+    drop_invalid: bool = True,
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """Project sample empirical MI onto piston-masked functional Fiedler modes."""
+    selected_ids = [str(s).strip() for s in sample_ids if str(s).strip()]
+    if not selected_ids:
+        raise ValueError("Select at least one ligand/MD sample.")
+    label_mode = str(label_mode or "assigned").strip().lower()
+    if label_mode not in {"assigned", "labels", "halo", "labels_halo"}:
+        raise ValueError("label_mode must be assigned or halo.")
+
+    dirs = store.ensure_cluster_directories(project_id, system_id, cluster_id)
+    cluster_dir = dirs["cluster_dir"]
+    analysis_id = _ligand_projection_id(intersection_analysis_id, selected_ids, label_mode)
+    analysis_dir = cluster_dir / "analyses" / PISTON_LIGAND_KIND / analysis_id
+    meta_path = analysis_dir / ANALYSIS_METADATA_FILENAME
+    npz_path = analysis_dir / "analysis.npz"
+    if not overwrite and meta_path.exists() and npz_path.exists():
+        return {"metadata": _read_json(meta_path), "analysis_npz": str(npz_path), "created": False}
+
+    intersection, intersection_meta = _load_analysis_npz_and_meta(cluster_dir, INTERSECTION_KIND, intersection_analysis_id)
+    pair_analysis_id = str(intersection_meta.get("pair_analysis_id") or "")
+    if not pair_analysis_id:
+        raise ValueError("Intersection metadata does not record pair_analysis_id.")
+    pair, _pair_meta = _load_analysis_npz_and_meta(cluster_dir, PAIR_KIND, pair_analysis_id)
+    if "laplacian_top_eigenvectors" not in pair:
+        raise ValueError("Pair analysis lacks laplacian_top_eigenvectors; rerun spectral analysis.")
+    top_vectors = np.asarray(pair["laplacian_top_eigenvectors"], dtype=np.float64)
+    if top_vectors.ndim != 2:
+        raise ValueError("pair laplacian_top_eigenvectors must have shape (K,N).")
+
+    residue_keys = np.asarray(intersection["residue_keys"], dtype=str)
+    piston_ids = np.asarray(intersection["piston_group_ids"], dtype=np.int32)
+    piston_sizes = np.asarray(intersection["piston_sizes"], dtype=np.int32)
+    piston_struct = np.asarray(intersection["piston_structural_community_ids"], dtype=np.int32)
+    piston_func = np.asarray(intersection["piston_functional_community_ids"], dtype=np.int32)
+    residue_piston_ids = np.asarray(intersection["piston_ids"], dtype=np.int32)
+    n_res = int(residue_keys.shape[0])
+    if top_vectors.shape[1] != n_res:
+        raise ValueError("Pair eigenvectors and intersection residue count differ.")
+    n_pistons = int(piston_ids.shape[0])
+    if n_pistons == 0:
+        raise ValueError("Selected intersection contains no allosteric pistons.")
+
+    piston_members: list[np.ndarray] = []
+    vector_indices: list[int] = []
+    vector_norms: list[float] = []
+    for pid in piston_ids.tolist():
+        members = np.flatnonzero(residue_piston_ids == int(pid)).astype(np.int32)
+        piston_members.append(members)
+        energies = np.sum(top_vectors[:, members] ** 2, axis=1) if members.size else np.zeros((top_vectors.shape[0],))
+        vidx = int(np.argmax(energies)) if energies.size else 0
+        vector_indices.append(vidx)
+        vector_norms.append(float(np.sqrt(max(0.0, float(energies[vidx])))) if energies.size else 0.0)
+
+    samples_meta = store.list_samples(project_id, system_id, cluster_id)
+    sample_by_id = {str(s.get("sample_id")): s for s in samples_meta if isinstance(s, dict) and s.get("sample_id")}
+    scores = np.zeros((len(selected_ids), n_pistons), dtype=np.float64)
+    frames_used = np.zeros((len(selected_ids),), dtype=np.int32)
+    sample_names: list[str] = []
+    sample_types: list[str] = []
+    for sidx, sid in enumerate(selected_ids):
+        entry = sample_by_id.get(sid)
+        if not entry:
+            raise FileNotFoundError(f"Sample not found on this cluster: {sid}")
+        sample_names.append(str(entry.get("name") or sid))
+        sample_types.append(str(entry.get("type") or "sample"))
+        X = _sample_labels_for_projection(
+            _resolve_sample_npz_path(store, project_id, system_id, cluster_dir, entry),
+            label_mode=label_mode,
+            drop_invalid=drop_invalid,
+        )
+        if X.shape[1] != n_res:
+            raise ValueError(f"Sample {sid} has N={X.shape[1]} residues, expected {n_res}.")
+        frames_used[sidx] = int(X.shape[0])
+        for pidx, members in enumerate(piston_members):
+            M = _mutual_information_submatrix(X, members)
+            v = top_vectors[int(vector_indices[pidx]), members]
+            scores[sidx, pidx] = float(v @ M @ v) if M.size else 0.0
+
+    analysis_dir.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(
+        npz_path,
+        analysis_format_version=np.asarray([1], dtype=np.int32),
+        mode=np.asarray(["piston_ligand_projection"], dtype=str),
+        residue_keys=residue_keys,
+        intersection_analysis_id=np.asarray([intersection_analysis_id], dtype=str),
+        pair_analysis_id=np.asarray([pair_analysis_id], dtype=str),
+        sample_ids=np.asarray(selected_ids, dtype=str),
+        sample_names=np.asarray(sample_names, dtype=str),
+        sample_types=np.asarray(sample_types, dtype=str),
+        frames_used=frames_used,
+        piston_group_ids=piston_ids,
+        piston_sizes=piston_sizes,
+        piston_structural_community_ids=piston_struct,
+        piston_functional_community_ids=piston_func,
+        piston_vector_indices=np.asarray(vector_indices, dtype=np.int32),
+        piston_vector_norms=np.asarray(vector_norms, dtype=np.float32),
+        piston_scores=np.asarray(scores, dtype=np.float32),
+    )
+    now = _utc_now()
+    meta = {
+        "analysis_id": analysis_id,
+        "analysis_type": PISTON_LIGAND_KIND,
+        "mode": "piston_ligand_projection",
+        "created_at": now,
+        "updated_at": now,
+        "project_id": project_id,
+        "system_id": system_id,
+        "cluster_id": cluster_id,
+        "intersection_analysis_id": intersection_analysis_id,
+        "pair_analysis_id": pair_analysis_id,
+        "sample_ids": selected_ids,
+        "sample_names": sample_names,
+        "label_mode": label_mode,
+        "drop_invalid": bool(drop_invalid),
+        "summary": {
+            "n_samples": int(len(selected_ids)),
+            "n_pistons": int(n_pistons),
+            "max_score": float(np.max(scores)) if scores.size else None,
+            "min_score": float(np.min(scores)) if scores.size else None,
+        },
+    }
+    _write_json(meta_path, meta)
+    return {"metadata": meta, "analysis_npz": str(npz_path), "created": True}
+
+
+def upsert_piston_ligand_projection_analysis(
+    *,
+    project_id: str,
+    system_id: str,
+    cluster_id: str,
+    intersection_analysis_id: str,
+    sample_ids: Sequence[str],
+    label_mode: str = "assigned",
+    drop_invalid: bool = True,
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    data_root = Path(os.getenv("PHASE_DATA_ROOT", "/app/data"))
+    store = ProjectStore(base_dir=data_root / "projects")
+    out = compute_piston_ligand_projection_analysis(
+        store=store,
+        project_id=project_id,
+        system_id=system_id,
+        cluster_id=cluster_id,
+        intersection_analysis_id=intersection_analysis_id,
+        sample_ids=sample_ids,
+        label_mode=label_mode,
+        drop_invalid=drop_invalid,
+        overwrite=overwrite,
+    )
+    return {
+        "analysis_type": PISTON_LIGAND_KIND,
         "project_id": project_id,
         "system_id": system_id,
         "cluster_id": cluster_id,
@@ -859,7 +1161,7 @@ def compute_pair_spectral_analysis(
     community_diagnostics = community["community_diagnostics"]
     np.savez_compressed(
         npz_path,
-        analysis_format_version=np.asarray([3], dtype=np.int32),
+        analysis_format_version=np.asarray([5], dtype=np.int32),
         mode=np.asarray(["pair"], dtype=str),
         state_a_id=np.asarray([state_a_id], dtype=str),
         state_b_id=np.asarray([state_b_id], dtype=str),
@@ -882,7 +1184,9 @@ def compute_pair_spectral_analysis(
         laplacian_embedding_indices=np.asarray(community["laplacian_embedding_indices"], dtype=np.int32),
         community_ids=np.asarray(community["community_ids"], dtype=np.int32),
         community_halo_ids=np.asarray(community["community_halo_ids"], dtype=np.int32),
+        community_core_mask=np.asarray(community["community_core_mask"], dtype=bool),
         community_sizes=np.asarray(community["community_sizes"], dtype=np.int32),
+        community_core_sizes=np.asarray(community["community_core_sizes"], dtype=np.int32),
         community_matrix_order=np.asarray(community["community_matrix_order"], dtype=np.int32),
         community_interaction_matrix=np.asarray(community["community_interaction_matrix"], dtype=np.float32),
         community_diagnostics_json=np.asarray([json.dumps(_convert_nan_to_none(community_diagnostics))], dtype=str),
@@ -911,6 +1215,8 @@ def compute_pair_spectral_analysis(
             "laplacian_first_nonzero_eigenvalue": float(np.asarray(community["laplacian_top_eigenvalues"])[0]) if np.asarray(community["laplacian_top_eigenvalues"]).size else None,
             "laplacian_zero_degree_residues": int(np.count_nonzero(np.asarray(community["laplacian_degree"]) <= 0)),
             "n_communities": int(np.asarray(community["community_sizes"]).shape[0]),
+            "n_core_residues": int(np.count_nonzero(np.asarray(community["community_core_mask"], dtype=bool))),
+            "n_halo_residues": int(dF.shape[0] - np.count_nonzero(np.asarray(community["community_core_mask"], dtype=bool))),
             "community_method": str(community_diagnostics.get("method") if isinstance(community_diagnostics, dict) else ""),
         },
     }

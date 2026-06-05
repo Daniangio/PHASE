@@ -144,7 +144,7 @@ export default function SpectralIntersection3DPage() {
     const roots = plugin.managers.structure.hierarchy.current.structures;
     if (roots?.length) await plugin.managers.structure.component.clear(roots);
     const base = await plugin.builders.structure.tryCreateComponentFromExpression(structureCell, MS.struct.generator.all(), 'piston-base');
-    await plugin.builders.structure.representation.addRepresentation(base, { type: 'cartoon', color: 'uniform', colorParams: { value: hexToInt('#6b7280') } });
+    await plugin.builders.structure.representation.addRepresentation(base, { type: 'cartoon', color: 'uniform', colorParams: { value: hexToInt('#6b7280') }, typeParams: { alpha: 0.22 } });
     baseComponentRef.current = base.ref;
   }, [projectId, systemId, selectedStateId]);
 
@@ -201,7 +201,7 @@ export default function SpectralIntersection3DPage() {
           <div>
             <button type="button" onClick={() => navigate(`/projects/${projectId}/systems/${systemId}/sampling/spectral_intersection${selectedClusterId ? `?cluster_id=${encodeURIComponent(selectedClusterId)}` : ''}`)} className="text-xs text-cyan-300 hover:text-cyan-200">Back to intersection plots</button>
             <h1 className="mt-2 text-2xl font-semibold text-white">Allosteric Pistons 3D</h1>
-            <p className="max-w-3xl text-sm text-gray-400">Base protein is monochrome; allosteric piston residues are highlighted with categorical colors by `(Cstruct, Cfunc)` group.</p>
+            <p className="max-w-3xl text-sm text-gray-400">Base protein is a quiet transparent trace; only core-core allosteric piston residues are highlighted with categorical colors by `(Cstruct, Cfunc)` group.</p>
           </div>
           <div className="flex gap-2"><button type="button" onClick={() => setHelpOpen(true)} className="inline-flex items-center gap-2 rounded-md border border-gray-700 px-3 py-2 text-sm text-gray-200 hover:bg-gray-800"><CircleHelp className="h-4 w-4" /> Help</button><button type="button" onClick={loadAnalyses} className="inline-flex items-center gap-2 rounded-md border border-gray-700 px-3 py-2 text-sm text-gray-200 hover:bg-gray-800"><RefreshCw className="h-4 w-4" /> Refresh</button></div>
         </div>

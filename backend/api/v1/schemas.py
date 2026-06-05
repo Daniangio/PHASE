@@ -262,6 +262,17 @@ class SpectralIntersectionJobRequest(BaseModel):
     overwrite: Optional[bool] = None
 
 
+class PistonLigandProjectionJobRequest(BaseModel):
+    project_id: str
+    system_id: str
+    cluster_id: str
+    intersection_analysis_id: str
+    sample_ids: List[str]
+    label_mode: Optional[str] = None
+    drop_invalid: Optional[bool] = None
+    overwrite: Optional[bool] = None
+
+
 class DeltaJsJobRequest(BaseModel):
     """
     Incremental delta-JS A/B/Other analysis for a fixed (model A, model B) pair.

@@ -7,12 +7,13 @@ import Loader from '../components/common/Loader';
 import ErrorMessage from '../components/common/ErrorMessage';
 import HelpDrawer from '../components/common/HelpDrawer';
 import { fetchClusterAnalyses, fetchClusterAnalysisData, fetchSystem } from '../api/projects';
-import { fetchJobStatus, submitSpectralIntersectionJob } from '../api/jobs';
+import { fetchJobStatus, submitPistonLigandProjectionJob, submitSpectralIntersectionJob } from '../api/jobs';
 
 const INTERSECTION_TYPE = 'hamiltonian_spectral_intersection';
+const LIGAND_PROJECTION_TYPE = 'piston_ligand_projection';
 const SINGLE_TYPE = 'hamiltonian_spectral_single';
 const PAIR_TYPE = 'hamiltonian_spectral_pair';
-const CLASS_NAMES = ['Other', 'Structural scaffold', 'Transient switches', 'Allosteric piston'];
+const CLASS_NAMES = ['Thermodynamic bulk', 'Structural scaffold', 'Transient switches', 'Allosteric piston', 'Subthreshold core overlap'];
 
 function safeArray(x) { return Array.isArray(x) ? x : []; }
 
@@ -63,14 +64,21 @@ export default function SpectralIntersectionPage() {
   const [singleAnalyses, setSingleAnalyses] = useState([]);
   const [pairAnalyses, setPairAnalyses] = useState([]);
   const [intersections, setIntersections] = useState([]);
+  const [projectionAnalyses, setProjectionAnalyses] = useState([]);
   const [selectedSingleId, setSelectedSingleId] = useState('');
   const [selectedPairId, setSelectedPairId] = useState('');
   const [selectedAnalysisId, setSelectedAnalysisId] = useState('');
+  const [selectedProjectionId, setSelectedProjectionId] = useState('');
   const [analysisData, setAnalysisData] = useState(null);
+  const [projectionData, setProjectionData] = useState(null);
   const [loadingData, setLoadingData] = useState(false);
   const [runOpen, setRunOpen] = useState(false);
+  const [projectionOpen, setProjectionOpen] = useState(false);
   const [minGroupSize, setMinGroupSize] = useState(3);
   const [overwrite, setOverwrite] = useState(false);
+  const [projectionOverwrite, setProjectionOverwrite] = useState(false);
+  const [selectedSampleIds, setSelectedSampleIds] = useState([]);
+  const [projectionLabelMode, setProjectionLabelMode] = useState('assigned');
   const [job, setJob] = useState(null);
   const [jobStatus, setJobStatus] = useState(null);
   const [helpOpen, setHelpOpen] = useState(false);
@@ -93,6 +101,8 @@ export default function SpectralIntersectionPage() {
   }, [projectId, systemId]);
 
   const clusters = useMemo(() => safeArray(system?.metastable_clusters).filter((c) => c.cluster_id), [system]);
+  const selectedCluster = useMemo(() => clusters.find((c) => c.cluster_id === selectedClusterId) || null, [clusters, selectedClusterId]);
+  const sampleOptions = useMemo(() => safeArray(selectedCluster?.samples).filter((s) => s?.sample_id), [selectedCluster]);
 
   useEffect(() => {
     if (!clusters.length) return;
@@ -106,20 +116,24 @@ export default function SpectralIntersectionPage() {
     if (!selectedClusterId) return;
     setError(null);
     try {
-      const [singlePayload, pairPayload, intersectionPayload] = await Promise.all([
+      const [singlePayload, pairPayload, intersectionPayload, projectionPayload] = await Promise.all([
         fetchClusterAnalyses(projectId, systemId, selectedClusterId, { analysisType: SINGLE_TYPE }),
         fetchClusterAnalyses(projectId, systemId, selectedClusterId, { analysisType: PAIR_TYPE }),
         fetchClusterAnalyses(projectId, systemId, selectedClusterId, { analysisType: INTERSECTION_TYPE }),
+        fetchClusterAnalyses(projectId, systemId, selectedClusterId, { analysisType: LIGAND_PROJECTION_TYPE }),
       ]);
       const singles = safeArray(singlePayload?.analyses);
       const pairs = safeArray(pairPayload?.analyses);
       const rows = safeArray(intersectionPayload?.analyses);
+      const projections = safeArray(projectionPayload?.analyses);
       setSingleAnalyses(singles);
       setPairAnalyses(pairs);
       setIntersections(rows);
+      setProjectionAnalyses(projections);
       setSelectedSingleId((prev) => (prev && singles.some((a) => String(a.analysis_id) === prev) ? prev : String(singles[0]?.analysis_id || '')));
       setSelectedPairId((prev) => (prev && pairs.some((a) => String(a.analysis_id) === prev) ? prev : String(pairs[0]?.analysis_id || '')));
       setSelectedAnalysisId((prev) => (prev && rows.some((a) => String(a.analysis_id) === prev) ? prev : String(rows[0]?.analysis_id || '')));
+      setSelectedProjectionId((prev) => (prev && projections.some((a) => String(a.analysis_id) === prev) ? prev : String(projections[0]?.analysis_id || '')));
     } catch (err) {
       setError(err.message || 'Failed to load spectral analyses.');
     }
@@ -144,6 +158,21 @@ export default function SpectralIntersectionPage() {
     load();
     return () => { cancelled = true; };
   }, [projectId, systemId, selectedClusterId, selectedAnalysisId]);
+
+  useEffect(() => {
+    if (!selectedClusterId || !selectedProjectionId) { setProjectionData(null); return; }
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const payload = await fetchClusterAnalysisData(projectId, systemId, selectedClusterId, LIGAND_PROJECTION_TYPE, selectedProjectionId);
+        if (!cancelled) setProjectionData(payload);
+      } catch (err) {
+        if (!cancelled) setError(err.message || 'Failed to load ligand projection data.');
+      }
+    };
+    load();
+    return () => { cancelled = true; };
+  }, [projectId, systemId, selectedClusterId, selectedProjectionId]);
 
   useEffect(() => {
     if (!job?.job_id) return undefined;
@@ -184,6 +213,27 @@ export default function SpectralIntersectionPage() {
     }
   }, [projectId, systemId, selectedClusterId, selectedSingleId, selectedPairId, minGroupSize, overwrite]);
 
+  const submitProjection = useCallback(async () => {
+    setError(null);
+    try {
+      const res = await submitPistonLigandProjectionJob({
+        project_id: projectId,
+        system_id: systemId,
+        cluster_id: selectedClusterId,
+        intersection_analysis_id: selectedAnalysisId,
+        sample_ids: selectedSampleIds,
+        label_mode: projectionLabelMode,
+        drop_invalid: true,
+        overwrite: projectionOverwrite,
+      });
+      setJob(res);
+      setJobStatus(null);
+      setProjectionOpen(false);
+    } catch (err) {
+      setError(err.message || 'Failed to submit piston ligand projection.');
+    }
+  }, [projectId, systemId, selectedClusterId, selectedAnalysisId, selectedSampleIds, projectionLabelMode, projectionOverwrite]);
+
   const data = useMemo(() => analysisData?.data || {}, [analysisData]);
   const meta = analysisData?.metadata || null;
   const pistonMembers = useMemo(() => parsePistonMembers(data.piston_members_json), [data.piston_members_json]);
@@ -195,7 +245,7 @@ export default function SpectralIntersectionPage() {
       x: classCounts.map((row) => CLASS_NAMES[row[0]] || `class ${row[0]}`),
       y: classCounts.map((row) => row[1]),
       type: 'bar',
-      marker: { color: classCounts.map((row) => ['#6b7280', '#22c55e', '#f59e0b', '#ef4444'][row[0]] || '#9ca3af') },
+      marker: { color: classCounts.map((row) => ['#6b7280', '#22c55e', '#f59e0b', '#ef4444', '#a855f7'][row[0]] || '#9ca3af') },
     }],
     layout: { title: 'Residue roles', paper_bgcolor: '#111827', plot_bgcolor: '#111827', font: { color: '#e5e7eb' }, height: 280, margin: { l: 55, r: 20, t: 45, b: 70 }, yaxis: { title: 'residues' } },
     config: { responsive: true, displayModeBar: false },
@@ -206,6 +256,25 @@ export default function SpectralIntersectionPage() {
     layout: { title: 'Composite groups Cstruct x Cfunc', paper_bgcolor: '#111827', plot_bgcolor: '#111827', font: { color: '#e5e7eb' }, height: 360, margin: { l: 70, r: 20, t: 45, b: 70 }, xaxis: { title: 'structural community' }, yaxis: { title: 'functional community' } },
     config: { responsive: true, displayModeBar: true },
   }), [heatmap]);
+
+  const projection = useMemo(() => projectionData?.data || {}, [projectionData]);
+  const projectionPlot = useMemo(() => {
+    const scores = safeArray(projection.piston_scores);
+    const sampleNames = safeArray(projection.sample_names).map(String);
+    const pistonIds = safeArray(projection.piston_group_ids).map(Number);
+    const traces = scores.map((row, idx) => ({
+      x: pistonIds.map((pid) => `P${pid}`),
+      y: safeArray(row).map(Number),
+      type: 'bar',
+      name: sampleNames[idx] || `sample ${idx + 1}`,
+      hovertemplate: '%{x}<br>score=%{y:.5f}<extra>%{fullData.name}</extra>',
+    }));
+    return {
+      data: traces,
+      layout: { title: 'Masked ligand/MD piston commitment scores', barmode: 'group', paper_bgcolor: '#111827', plot_bgcolor: '#111827', font: { color: '#e5e7eb' }, height: 360, margin: { l: 65, r: 20, t: 45, b: 70 }, xaxis: { title: 'allosteric piston' }, yaxis: { title: 'v_mask^T M_short v_mask' } },
+      config: { responsive: true, displayModeBar: true },
+    };
+  }, [projection]);
 
   if (loadingSystem) return <Loader message="Loading spectral intersections..." />;
 
@@ -229,17 +298,35 @@ export default function SpectralIntersectionPage() {
           </div>
         </div>
       ) : null}
+      {projectionOpen ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
+          <div className="w-full max-w-2xl rounded-lg border border-gray-700 bg-gray-900 p-4 shadow-xl">
+            <div className="flex items-start justify-between border-b border-gray-800 pb-3">
+              <div><h2 className="text-lg font-semibold text-white">Run masked ligand projection</h2><p className="mt-1 text-xs text-gray-400">Select ligand/short-MD samples already assigned to this cluster. Scores are computed per allosteric piston.</p></div>
+              <button type="button" onClick={() => setProjectionOpen(false)} className="text-sm text-gray-400 hover:text-gray-100">Close</button>
+            </div>
+            <div className="space-y-3 pt-4">
+              <label className="block text-xs text-gray-400">Intersection analysis<select value={selectedAnalysisId} onChange={(e) => setSelectedAnalysisId(e.target.value)} className="mt-1 w-full rounded border border-gray-800 bg-gray-950 px-2 py-2 text-sm text-gray-100">{intersections.map((a) => <option key={a.analysis_id} value={a.analysis_id}>{analysisTitle(a)}</option>)}</select></label>
+              <label className="block text-xs text-gray-400">Ligand/MD samples<select multiple value={selectedSampleIds} onChange={(e) => setSelectedSampleIds(Array.from(e.target.selectedOptions).map((o) => String(o.value)))} className="mt-1 h-48 w-full rounded border border-gray-800 bg-gray-950 px-2 py-2 text-sm text-gray-100">{sampleOptions.map((s) => <option key={s.sample_id} value={s.sample_id}>{s.name || s.sample_id} ({s.type || 'sample'})</option>)}</select></label>
+              <label className="block text-xs text-gray-400">Label mode<select value={projectionLabelMode} onChange={(e) => setProjectionLabelMode(e.target.value)} className="mt-1 w-full rounded border border-gray-800 bg-gray-950 px-2 py-2 text-sm text-gray-100"><option value="assigned">Assigned labels</option><option value="halo">Halo labels</option></select></label>
+              <label className="flex items-center gap-2 text-sm text-gray-200"><input type="checkbox" checked={projectionOverwrite} onChange={(e) => setProjectionOverwrite(e.target.checked)} />Overwrite existing matching projection</label>
+              <button type="button" onClick={submitProjection} disabled={!selectedAnalysisId || !selectedSampleIds.length} className="w-full rounded-md bg-cyan-500 px-3 py-2 text-sm font-semibold text-black hover:bg-cyan-400 disabled:opacity-50">Run ligand projection</button>
+            </div>
+          </div>
+        </div>
+      ) : null}
       <div className="mx-auto max-w-7xl space-y-4 pb-16">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
             <div className="text-xs uppercase tracking-[0.2em] text-cyan-400">PHASE pistons</div>
             <h1 className="mt-2 text-2xl font-semibold text-white">Spectral set-intersection</h1>
-            <p className="mt-1 max-w-3xl text-sm text-gray-400">Intersects structural communities from a single-state Laplacian with functional communities from a pair ΔF Laplacian to identify allosteric pistons.</p>
+            <p className="mt-1 max-w-3xl text-sm text-gray-400">Intersects only DADApy core residues from single-state and pair Laplacian communities. Halo points are excluded from pistons and classified as scaffold, switch, or thermodynamic bulk.</p>
           </div>
           <div className="flex flex-wrap gap-2">
             <button type="button" onClick={() => setHelpOpen(true)} className="inline-flex items-center gap-2 rounded-md border border-gray-700 px-3 py-2 text-sm text-gray-200 hover:bg-gray-800"><CircleHelp className="h-4 w-4" /> Help</button>
             <button type="button" onClick={loadAnalyses} className="inline-flex items-center gap-2 rounded-md border border-gray-700 px-3 py-2 text-sm text-gray-200 hover:bg-gray-800"><RefreshCw className="h-4 w-4" /> Refresh</button>
             <button type="button" onClick={() => navigate(`/projects/${projectId}/systems/${systemId}/sampling/spectral_intersection_3d${selectedClusterId ? `?cluster_id=${encodeURIComponent(selectedClusterId)}` : ''}`)} className="rounded-md border border-gray-700 px-3 py-2 text-sm text-gray-200 hover:bg-gray-800">3D view</button>
+            <button type="button" onClick={() => setProjectionOpen(true)} className="rounded-md border border-gray-700 px-3 py-2 text-sm text-gray-200 hover:bg-gray-800">Ligand projection</button>
             <button type="button" onClick={() => setRunOpen(true)} className="rounded-md bg-cyan-500 px-3 py-2 text-sm font-semibold text-black hover:bg-cyan-400">Run analysis</button>
           </div>
         </div>
@@ -253,6 +340,11 @@ export default function SpectralIntersectionPage() {
               {intersections.map((a) => <button key={a.analysis_id} type="button" onClick={() => setSelectedAnalysisId(String(a.analysis_id))} className={`w-full rounded-md border px-3 py-2 text-left ${String(selectedAnalysisId) === String(a.analysis_id) ? 'border-cyan-500 bg-cyan-500/10' : 'border-gray-700 bg-gray-950/50 hover:bg-gray-800'}`}><div className="text-sm text-gray-100">{analysisTitle(a)}</div><div className="mt-1 text-xs text-gray-400">pistons {a?.summary?.n_pistons ?? 'n/a'} · min {a?.min_group_size ?? 'n/a'}</div></button>)}
               {!intersections.length ? <p className="text-xs text-gray-500">No intersections yet. Run one after creating v3 spectral communities.</p> : null}
             </div>
+            <div className="pt-3 text-xs uppercase tracking-[0.15em] text-gray-500">Ligand projections</div>
+            <div className="space-y-2">
+              {projectionAnalyses.map((a) => <button key={a.analysis_id} type="button" onClick={() => setSelectedProjectionId(String(a.analysis_id))} className={`w-full rounded-md border px-3 py-2 text-left ${String(selectedProjectionId) === String(a.analysis_id) ? 'border-amber-400 bg-amber-500/10' : 'border-gray-700 bg-gray-950/50 hover:bg-gray-800'}`}><div className="text-sm text-gray-100">{safeArray(a.sample_names).slice(0, 2).join(', ') || a.analysis_id}</div><div className="mt-1 text-xs text-gray-400">samples {a?.summary?.n_samples ?? 'n/a'} · pistons {a?.summary?.n_pistons ?? 'n/a'}</div></button>)}
+              {!projectionAnalyses.length ? <p className="text-xs text-gray-500">No ligand projections yet.</p> : null}
+            </div>
           </aside>
           <section className="min-w-0 space-y-4">
             {loadingData ? <Loader message="Loading intersection analysis..." /> : null}
@@ -262,7 +354,7 @@ export default function SpectralIntersectionPage() {
                 <div className="rounded-lg border border-gray-800 bg-gray-900 p-4">
                   <div className="text-xs uppercase tracking-[0.15em] text-gray-500">Selected analysis</div>
                   <h2 className="mt-2 text-lg font-semibold text-white">{analysisTitle(meta)}</h2>
-                  <p className="mt-1 text-sm text-gray-400">Allosteric pistons are composite groups `(Cstruct, Cfunc)` with at least {meta?.min_group_size ?? 3} residues. Scaffold and switch labels are heuristic role tags for non-piston residues.</p>
+                  <p className="mt-1 text-sm text-gray-400">Allosteric pistons are core-core composite groups `(Cstruct, Cfunc)` with at least {meta?.min_group_size ?? 3} residues. Halo residues are not allowed to seed pistons.</p>
                 </div>
                 <div className="grid grid-cols-1 gap-4 2xl:grid-cols-2">
                   <div className="overflow-hidden rounded-lg border border-gray-800 bg-gray-900 p-3"><Plot data={classPlot.data} layout={classPlot.layout} config={classPlot.config} style={{ width: '100%' }} /></div>
@@ -278,6 +370,15 @@ export default function SpectralIntersectionPage() {
                     </tbody>
                   </table>
                 </div>
+                {projectionData ? (
+                  <div className="rounded-lg border border-gray-800 bg-gray-900 p-3 overflow-hidden space-y-2">
+                    <div>
+                      <h3 className="text-sm font-semibold text-gray-100">Ligand/short-MD piston profile</h3>
+                      <p className="text-xs text-gray-400">Each bar is a masked projection score: only residues belonging to the piston contribute to the empirical MI projection.</p>
+                    </div>
+                    <Plot data={projectionPlot.data} layout={projectionPlot.layout} config={projectionPlot.config} style={{ width: '100%' }} />
+                  </div>
+                ) : null}
               </>
             ) : null}
           </section>

@@ -91,7 +91,7 @@ distance(i,j) = 1 - dot(Y_i, Y_j)
 
 DADApy density peak clustering is then applied to those distances. Cosine distance is used because the embedding lives on a sphere; treating rows as ordinary Euclidean coordinates can distort angular sectors.
 
-Stored community IDs are integer labels. They are categorical, not ordered continuous values.
+Stored community IDs are integer labels. They are categorical, not ordered continuous values. Starting from v5, PHASE also stores DADApy core-halo information: `community_core_mask` is true only for topological core residues, while halo residues remain assigned for display but are excluded from strict piston intersections.
 
 ## Web Interpretation
 
@@ -167,9 +167,11 @@ Important NPZ arrays:
 - `laplacian_top_indices`: indices of selected modes in the full ascending spectrum.
 - `laplacian_embedding`: row-normalized spectral embedding used for clustering.
 - `laplacian_embedding_indices`: eigenvector indices used in that embedding.
-- `community_ids`: DADApy community ID for each residue.
-- `community_halo_ids`: DADApy halo assignment for each residue.
-- `community_sizes`: two-column array `(community_id, n_residues)`.
+- `community_ids`: DADApy assigned community ID for each residue, including halo points.
+- `community_halo_ids`: DADApy core assignment for each residue; `0` means halo/unassigned, positive values mean core community.
+- `community_core_mask`: boolean DADApy core flag used by piston intersections.
+- `community_sizes`: two-column array `(community_id, n_residues)` using assigned labels.
+- `community_core_sizes`: two-column array `(community_id, n_core_residues)` using core labels only.
 - `community_matrix_order`: residue order that groups the matrix by community.
 - `community_interaction_matrix`: coarse-grained inter-community coupling sums.
 - `community_diagnostics_json`: clustering method, distance metric, DADApy parameters, and fallback warnings if any.
