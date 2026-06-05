@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+import json
 from typing import List
 
 from phase.services.project_store import ProjectStore
@@ -221,6 +222,39 @@ def list_sampling(root: Path, project_id: str, system_id: str) -> None:
     _print_rows(rows)
 
 
+def list_analyses(root: Path, project_id: str, system_id: str, cluster_id: str, analysis_type: str) -> None:
+    store = ProjectStore(base_dir=root)
+    dirs = store.ensure_cluster_directories(project_id, system_id, cluster_id)
+    kind_root = dirs["cluster_dir"] / "analyses" / analysis_type
+    rows = []
+    if not kind_root.exists():
+        _print_rows(rows)
+        return
+    for analysis_dir in sorted((p for p in kind_root.iterdir() if p.is_dir()), key=lambda p: p.name):
+        meta_path = analysis_dir / "analysis_metadata.json"
+        if not meta_path.exists():
+            continue
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        mode = str(meta.get("mode") or analysis_type)
+        if mode == "single":
+            label = str(meta.get("state_name") or meta.get("state_id") or analysis_dir.name)
+        elif mode == "pair":
+            label = f"{meta.get('state_a_name') or meta.get('state_a_id')} -> {meta.get('state_b_name') or meta.get('state_b_id')}"
+        elif mode == "intersection":
+            label = (
+                f"{meta.get('single_state_name') or meta.get('single_analysis_id')} x "
+                f"{meta.get('pair_state_a_name') or meta.get('pair_state_a_id')} -> {meta.get('pair_state_b_name') or meta.get('pair_state_b_id')}"
+            )
+        else:
+            label = str(meta.get("name") or analysis_dir.name)
+        updated = str(meta.get("updated_at") or meta.get("created_at") or "")
+        rows.append([analysis_dir.name, label, analysis_type, updated])
+    _print_rows(rows)
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", required=True, help="Offline data root (contains projects/)")
@@ -268,6 +302,12 @@ def main(argv: list[str] | None = None) -> int:
     sp.add_argument("--project-id", required=True)
     sp.add_argument("--system-id", required=True)
 
+    sp = sub.add_parser("list-analyses")
+    sp.add_argument("--project-id", required=True)
+    sp.add_argument("--system-id", required=True)
+    sp.add_argument("--cluster-id", required=True)
+    sp.add_argument("--analysis-type", required=True)
+
     args = ap.parse_args(argv)
     root = Path(args.root).expanduser().resolve() / "projects"
 
@@ -293,6 +333,8 @@ def main(argv: list[str] | None = None) -> int:
         list_trajectories(root, args.project_id, args.system_id)
     elif args.cmd == "list-sampling":
         list_sampling(root, args.project_id, args.system_id)
+    elif args.cmd == "list-analyses":
+        list_analyses(root, args.project_id, args.system_id, args.cluster_id, args.analysis_type)
     return 0
 
 

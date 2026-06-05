@@ -86,6 +86,14 @@ export default function SystemDetailSidebar({
         <Eye className="h-4 w-4" />
         Spectra 3D
       </button>
+      <button
+        type="button"
+        onClick={() => navigate(`/projects/${projectId}/systems/${systemId}/sampling/spectral_intersection${buildSamplingSuffix()}`)}
+        className="w-full text-xs px-3 py-2 rounded-md border border-gray-600 text-gray-200 hover:bg-gray-700/40 inline-flex items-center justify-center gap-2"
+      >
+        <Eye className="h-4 w-4" />
+        Spectral pistons
+      </button>
       <div className="grid grid-cols-2 gap-2">
         <button
           type="button"
@@ -123,6 +131,13 @@ export default function SystemDetailSidebar({
           className="text-xs px-2 py-2 rounded-md border border-gray-700 text-gray-200 hover:bg-gray-700/40"
         >
           Transient states
+        </button>
+        <button
+          type="button"
+          onClick={() => navigate(`/projects/${projectId}/systems/${systemId}/sampling/spectral_intersection_3d${buildSamplingSuffix()}`)}
+          className="text-xs px-2 py-2 rounded-md border border-gray-700 text-gray-200 hover:bg-gray-700/40"
+        >
+          Pistons 3D
         </button>
         <button
           type="button"

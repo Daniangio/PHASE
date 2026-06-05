@@ -84,6 +84,13 @@ export function submitHamiltonianSpectralJob(payload) {
   });
 }
 
+export function submitSpectralIntersectionJob(payload) {
+  return requestJSON('/submit/spectral_intersection', {
+    method: 'POST',
+    body: payload,
+  });
+}
+
 export function submitDeltaJsJob(payload) {
   return requestJSON('/submit/delta_js', {
     method: 'POST',

@@ -296,6 +296,7 @@ export default function HamiltonianSpectral3DPage() {
           <div className="flex gap-2">
             <button type="button" onClick={() => setHelpOpen(true)} className="inline-flex items-center gap-2 px-3 py-2 rounded-md border border-gray-700 text-sm text-gray-200 hover:bg-gray-800"><CircleHelp className="h-4 w-4" /> Help</button>
             <button type="button" onClick={loadAnalyses} className="inline-flex items-center gap-2 px-3 py-2 rounded-md border border-gray-700 text-sm text-gray-200 hover:bg-gray-800"><RefreshCw className="h-4 w-4" /> Refresh</button>
+            <button type="button" onClick={() => navigate(`/projects/${projectId}/systems/${systemId}/sampling/spectral_intersection_3d${selectedClusterId ? `?cluster_id=${encodeURIComponent(selectedClusterId)}` : ''}`)} className="px-3 py-2 rounded-md border border-gray-700 text-sm text-gray-200 hover:bg-gray-800">Pistons 3D</button>
           </div>
         </div>
         {error ? <ErrorMessage message={error} /> : null}

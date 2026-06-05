@@ -16,6 +16,7 @@ from phase.services.project_store import ProjectStore
 ANALYSIS_METADATA_FILENAME = "analysis_metadata.json"
 SINGLE_KIND = "hamiltonian_spectral_single"
 PAIR_KIND = "hamiltonian_spectral_pair"
+INTERSECTION_KIND = "hamiltonian_spectral_intersection"
 
 
 def _utc_now() -> str:
@@ -452,6 +453,10 @@ def _pair_id(state_a_id: str, state_b_id: str) -> str:
     return f"pair_{_safe_id(state_a_id)}__{_safe_id(state_b_id)}"
 
 
+def _intersection_id(single_analysis_id: str, pair_analysis_id: str, min_group_size: int) -> str:
+    return f"intersection_{_safe_id(single_analysis_id)}__{_safe_id(pair_analysis_id)}__min{int(min_group_size)}"
+
+
 def _read_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
@@ -601,6 +606,218 @@ def _pair_npz_has_v3_fields(npz_path: Path) -> bool:
             "community_interaction_matrix",
         },
     )
+
+
+def _load_analysis_npz_and_meta(cluster_dir: Path, kind: str, analysis_id: str) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
+    analysis_dir = cluster_dir / "analyses" / kind / analysis_id
+    meta_path = analysis_dir / ANALYSIS_METADATA_FILENAME
+    npz_path = analysis_dir / "analysis.npz"
+    if not meta_path.exists() or not npz_path.exists():
+        raise FileNotFoundError(f"Analysis {kind}/{analysis_id} not found.")
+    meta = _read_json(meta_path)
+    with np.load(npz_path, allow_pickle=False) as data:
+        payload = {key: np.asarray(data[key]) for key in data.files}
+    return payload, meta
+
+
+def _community_size_map(labels: np.ndarray) -> dict[int, int]:
+    arr = np.asarray(labels, dtype=np.int32)
+    unique, counts = np.unique(arr, return_counts=True)
+    return {int(k): int(v) for k, v in zip(unique, counts, strict=False)}
+
+
+def _residue_label_list(residue_keys: np.ndarray, indices: list[int]) -> list[str]:
+    keys = np.asarray(residue_keys, dtype=str)
+    return [str(keys[i]) if 0 <= i < keys.shape[0] else f"res_{i + 1}" for i in indices]
+
+
+def compute_spectral_intersection_analysis(
+    *,
+    store: ProjectStore,
+    project_id: str,
+    system_id: str,
+    cluster_id: str,
+    single_analysis_id: str,
+    pair_analysis_id: str,
+    min_group_size: int = 3,
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """Intersect structural and functional DADApy community labels in O(N)."""
+    dirs = store.ensure_cluster_directories(project_id, system_id, cluster_id)
+    cluster_dir = dirs["cluster_dir"]
+    min_group_size = max(1, int(min_group_size))
+    analysis_id = _intersection_id(single_analysis_id, pair_analysis_id, min_group_size)
+    analysis_dir = cluster_dir / "analyses" / INTERSECTION_KIND / analysis_id
+    meta_path = analysis_dir / ANALYSIS_METADATA_FILENAME
+    npz_path = analysis_dir / "analysis.npz"
+    if not overwrite and meta_path.exists() and npz_path.exists():
+        return {"metadata": _read_json(meta_path), "analysis_npz": str(npz_path), "created": False}
+
+    single, single_meta = _load_analysis_npz_and_meta(cluster_dir, SINGLE_KIND, single_analysis_id)
+    pair, pair_meta = _load_analysis_npz_and_meta(cluster_dir, PAIR_KIND, pair_analysis_id)
+    required = ("residue_keys", "community_ids")
+    for key in required:
+        if key not in single:
+            raise ValueError(f"Single analysis {single_analysis_id} lacks required field {key}; rerun spectral analysis.")
+        if key not in pair:
+            raise ValueError(f"Pair analysis {pair_analysis_id} lacks required field {key}; rerun spectral analysis.")
+
+    residue_keys = np.asarray(single["residue_keys"], dtype=str)
+    pair_keys = np.asarray(pair["residue_keys"], dtype=str)
+    if residue_keys.shape[0] != pair_keys.shape[0]:
+        raise ValueError("Single and pair analyses have different residue counts.")
+    if not np.array_equal(residue_keys.astype(str), pair_keys.astype(str)):
+        raise ValueError("Single and pair analyses use different residue key orderings.")
+
+    struct = np.asarray(single["community_ids"], dtype=np.int32)
+    func = np.asarray(pair["community_ids"], dtype=np.int32)
+    n_res = int(residue_keys.shape[0])
+    if struct.shape[0] != n_res or func.shape[0] != n_res:
+        raise ValueError("Community label arrays do not match residue count.")
+
+    groups: dict[tuple[int, int], list[int]] = {}
+    for idx, key in enumerate(zip(struct.tolist(), func.tolist(), strict=False)):
+        groups.setdefault((int(key[0]), int(key[1])), []).append(int(idx))
+
+    piston_groups = [(key, members) for key, members in groups.items() if len(members) >= min_group_size]
+    piston_groups.sort(key=lambda row: (-len(row[1]), row[0][0], row[0][1]))
+    piston_ids = np.zeros(n_res, dtype=np.int32)
+    piston_group_ids: list[int] = []
+    piston_struct_ids: list[int] = []
+    piston_func_ids: list[int] = []
+    piston_sizes: list[int] = []
+    piston_members: list[dict[str, Any]] = []
+    for gid, (key, members) in enumerate(piston_groups, start=1):
+        for idx in members:
+            piston_ids[idx] = gid
+        piston_group_ids.append(gid)
+        piston_struct_ids.append(int(key[0]))
+        piston_func_ids.append(int(key[1]))
+        piston_sizes.append(int(len(members)))
+        piston_members.append(
+            {
+                "piston_id": gid,
+                "structural_community_id": int(key[0]),
+                "functional_community_id": int(key[1]),
+                "size": int(len(members)),
+                "residue_indices": [int(i) for i in members],
+                "residue_keys": _residue_label_list(residue_keys, members),
+                "tooltip": "A cohesive structural unit that rewires its correlations collectively. These residues form a solid mechanical gear that shifts during activation.",
+            }
+        )
+
+    struct_sizes = _community_size_map(struct)
+    func_sizes = _community_size_map(func)
+    class_codes = np.zeros(n_res, dtype=np.int32)
+    # 3=piston, 1=scaffold, 2=transient switch, 0=other
+    class_codes[piston_ids > 0] = 3
+    for idx in range(n_res):
+        if class_codes[idx] == 3:
+            continue
+        s = int(struct[idx])
+        f = int(func[idx])
+        s_size = int(struct_sizes.get(s, 0))
+        f_size = int(func_sizes.get(f, 0))
+        if s > 0 and s_size >= min_group_size and (f <= 0 or len(groups.get((s, f), [])) < min_group_size):
+            class_codes[idx] = 1
+        elif (s <= 0 or s_size < min_group_size) and f > 0 and f_size >= min_group_size:
+            class_codes[idx] = 2
+
+    class_names = np.asarray(["other", "structural_scaffold", "transient_switch", "allosteric_piston"], dtype=str)
+    class_counts = np.asarray(
+        [[code, int(np.count_nonzero(class_codes == code))] for code in range(4)],
+        dtype=np.int32,
+    )
+    combo_struct = np.asarray([int(key[0]) for key, _ in sorted(groups.items())], dtype=np.int32)
+    combo_func = np.asarray([int(key[1]) for key, _ in sorted(groups.items())], dtype=np.int32)
+    combo_sizes = np.asarray([len(members) for _, members in sorted(groups.items())], dtype=np.int32)
+
+    analysis_dir.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(
+        npz_path,
+        analysis_format_version=np.asarray([1], dtype=np.int32),
+        mode=np.asarray(["intersection"], dtype=str),
+        residue_keys=residue_keys,
+        structural_community_ids=struct,
+        functional_community_ids=func,
+        piston_ids=piston_ids,
+        residue_class_codes=class_codes,
+        residue_class_names=class_names,
+        class_counts=class_counts,
+        piston_group_ids=np.asarray(piston_group_ids, dtype=np.int32),
+        piston_structural_community_ids=np.asarray(piston_struct_ids, dtype=np.int32),
+        piston_functional_community_ids=np.asarray(piston_func_ids, dtype=np.int32),
+        piston_sizes=np.asarray(piston_sizes, dtype=np.int32),
+        composite_structural_community_ids=combo_struct,
+        composite_functional_community_ids=combo_func,
+        composite_group_sizes=combo_sizes,
+        piston_members_json=np.asarray([json.dumps(_convert_nan_to_none(piston_members))], dtype=str),
+    )
+    now = _utc_now()
+    meta = {
+        "analysis_id": analysis_id,
+        "analysis_type": INTERSECTION_KIND,
+        "mode": "intersection",
+        "created_at": now,
+        "updated_at": now,
+        "project_id": project_id,
+        "system_id": system_id,
+        "cluster_id": cluster_id,
+        "single_analysis_id": single_analysis_id,
+        "pair_analysis_id": pair_analysis_id,
+        "single_state_id": single_meta.get("state_id"),
+        "single_state_name": single_meta.get("state_name"),
+        "pair_state_a_id": pair_meta.get("state_a_id"),
+        "pair_state_b_id": pair_meta.get("state_b_id"),
+        "pair_state_a_name": pair_meta.get("state_a_name"),
+        "pair_state_b_name": pair_meta.get("state_b_name"),
+        "min_group_size": int(min_group_size),
+        "summary": {
+            "n_residues": n_res,
+            "n_structural_communities": int(len(struct_sizes)),
+            "n_functional_communities": int(len(func_sizes)),
+            "n_composite_groups": int(len(groups)),
+            "n_pistons": int(len(piston_groups)),
+            "piston_residues": int(np.count_nonzero(piston_ids > 0)),
+            "structural_scaffold_residues": int(np.count_nonzero(class_codes == 1)),
+            "transient_switch_residues": int(np.count_nonzero(class_codes == 2)),
+        },
+    }
+    _write_json(meta_path, meta)
+    return {"metadata": meta, "analysis_npz": str(npz_path), "created": True}
+
+
+def upsert_spectral_intersection_analysis(
+    *,
+    project_id: str,
+    system_id: str,
+    cluster_id: str,
+    single_analysis_id: str,
+    pair_analysis_id: str,
+    min_group_size: int = 3,
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    data_root = Path(os.getenv("PHASE_DATA_ROOT", "/app/data"))
+    store = ProjectStore(base_dir=data_root / "projects")
+    out = compute_spectral_intersection_analysis(
+        store=store,
+        project_id=project_id,
+        system_id=system_id,
+        cluster_id=cluster_id,
+        single_analysis_id=single_analysis_id,
+        pair_analysis_id=pair_analysis_id,
+        min_group_size=min_group_size,
+        overwrite=overwrite,
+    )
+    return {
+        "analysis_type": INTERSECTION_KIND,
+        "project_id": project_id,
+        "system_id": system_id,
+        "cluster_id": cluster_id,
+        "analysis": out["metadata"],
+        "analysis_npz": out["analysis_npz"],
+        "created": bool(out.get("created")),
+    }
 
 
 def compute_pair_spectral_analysis(

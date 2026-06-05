@@ -252,6 +252,16 @@ class HamiltonianSpectralJobRequest(BaseModel):
     overwrite: Optional[bool] = None
 
 
+class SpectralIntersectionJobRequest(BaseModel):
+    project_id: str
+    system_id: str
+    cluster_id: str
+    single_analysis_id: str
+    pair_analysis_id: str
+    min_group_size: Optional[int] = None
+    overwrite: Optional[bool] = None
+
+
 class DeltaJsJobRequest(BaseModel):
     """
     Incremental delta-JS A/B/Other analysis for a fixed (model A, model B) pair.

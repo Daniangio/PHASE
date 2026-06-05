@@ -7,7 +7,12 @@ import numpy as np
 os.environ.setdefault("PHASE_DATA_ROOT", "/tmp/phase-test-data")
 
 from phase.potts.potts_model import PottsModel, save_potts_model, zero_sum_gauge_model
-from phase.potts.spectral_analysis import frobenius_coupling_matrix, normalized_laplacian, upsert_hamiltonian_spectral_batch
+from phase.potts.spectral_analysis import (
+    compute_spectral_intersection_analysis,
+    frobenius_coupling_matrix,
+    normalized_laplacian,
+    upsert_hamiltonian_spectral_batch,
+)
 from phase.services.project_store import DescriptorState, ProjectStore
 
 
@@ -124,3 +129,25 @@ def test_hamiltonian_spectral_batch_is_incremental(monkeypatch, tmp_path):
     assert second["pair_count"] == 2
     assert (pair_root / "pair_active__pas" / "analysis.npz").exists()
     assert (pair_root / "pair_inactive__pas" / "analysis.npz").exists()
+
+    intersection = compute_spectral_intersection_analysis(
+        store=store,
+        project_id="proj",
+        system_id="sys",
+        cluster_id=cluster_id,
+        single_analysis_id="single_active",
+        pair_analysis_id="pair_active__inactive",
+        min_group_size=2,
+    )
+    assert intersection["created"] is True
+    meta = intersection["metadata"]
+    assert meta["analysis_type"] == "hamiltonian_spectral_intersection"
+    assert meta["summary"]["n_residues"] == 3
+    intersection_npz = dirs["cluster_dir"] / "analyses" / "hamiltonian_spectral_intersection" / meta["analysis_id"] / "analysis.npz"
+    with np.load(intersection_npz, allow_pickle=False) as data:
+        assert np.asarray(data["structural_community_ids"]).shape == (3,)
+        assert np.asarray(data["functional_community_ids"]).shape == (3,)
+        assert np.asarray(data["piston_ids"]).shape == (3,)
+        assert np.asarray(data["residue_class_codes"]).shape == (3,)
+        assert np.asarray(data["class_counts"]).shape == (4, 2)
+        assert "piston_members_json" in data.files

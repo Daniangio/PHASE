@@ -18,6 +18,8 @@ import DeltaJsTablePage from './pages/DeltaJsTablePage';
 import TransientStatesPage from './pages/TransientStatesPage';
 import HamiltonianSpectralPage from './pages/HamiltonianSpectralPage';
 import HamiltonianSpectral3DPage from './pages/HamiltonianSpectral3DPage';
+import SpectralIntersectionPage from './pages/SpectralIntersectionPage';
+import SpectralIntersection3DPage from './pages/SpectralIntersection3DPage';
 import TransientStates3DPage from './pages/TransientStates3DPage';
 import LambdaSweepPage from './pages/LambdaSweepPage';
 import GibbsRelaxationPage from './pages/GibbsRelaxationPage';
@@ -78,6 +80,14 @@ export default function App() {
           <Route
             path="/projects/:projectId/systems/:systemId/sampling/hamiltonian_spectral_3d"
             element={<HamiltonianSpectral3DPage />}
+          />
+          <Route
+            path="/projects/:projectId/systems/:systemId/sampling/spectral_intersection"
+            element={<SpectralIntersectionPage />}
+          />
+          <Route
+            path="/projects/:projectId/systems/:systemId/sampling/spectral_intersection_3d"
+            element={<SpectralIntersection3DPage />}
           />
           <Route
             path="/projects/:projectId/systems/:systemId/sampling/transient_states"
