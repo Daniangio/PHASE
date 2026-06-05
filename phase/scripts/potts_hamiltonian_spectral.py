@@ -41,11 +41,11 @@ def main(argv: list[str] | None = None) -> int:
         progress_callback=progress,
     )
     print(f"[hamiltonian_spectral] requested_states={','.join(out.get('requested_state_ids') or [])}")
-    print(f"[hamiltonian_spectral] single_written_or_reused={out.get('single_count')}")
-    print(f"[hamiltonian_spectral] pair_created={out.get('pair_count')}")
+    print(f"[hamiltonian_spectral] states_with_single_analysis={out.get('single_count')}")
+    print(f"[hamiltonian_spectral] new_pair_analyses_created={out.get('pair_count')}")
     skipped = out.get("skipped_states") or {}
     if skipped:
-        print("[hamiltonian_spectral] skipped states:")
+        print("[hamiltonian_spectral] skipped states (no unambiguous full state Potts Hamiltonian):")
         for sid, reason in skipped.items():
             print(f"  - {sid}: {reason}")
     return 0

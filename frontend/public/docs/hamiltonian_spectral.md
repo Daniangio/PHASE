@@ -97,3 +97,36 @@ Important NPZ arrays:
 - `top_eigenvalues`: saved leading eigenvalues.
 - `top_eigenvectors`: shape `(top_k, n_residues)`.
 - `residue_strength`: row-sum strength for quick ranking.
+
+## Why A State Can Be Skipped
+
+A skipped state does not mean that MD frames were not assigned to clusters. Cluster assignment and Hamiltonian spectra are separate steps.
+
+This analysis requires a full fitted Potts Hamiltonian for each state. A state is skipped when PHASE cannot find one unambiguous full model associated with that state. Common cases:
+
+- The state exists and has MD/sample labels, but no Potts model was fitted on that state.
+- The state was added after an older fit, so its labels exist but no state-specific Hamiltonian exists.
+- Multiple equally plausible models match the same state name and PHASE refuses to guess.
+- Only a delta-patch model exists; patch-only models are not complete Hamiltonians and are skipped.
+
+To include a skipped state, fit or create a full/combined Potts model for that state, then rerun the spectral analysis. The run is incremental, so existing singles and pairs are reused unless overwrite is enabled.
+
+## 3D Coloring
+
+The 3D page loads a reference PDB/state and colors the cartoon representation by eigenvector participation.
+
+Selected eigenvector mode:
+
+- Single-state spectra: green intensity is proportional to `|v_i|`.
+- Pair spectra: red and blue are opposite signed sides of the selected rewiring eigenvector of `Delta F`.
+
+All-vectors mode:
+
+- The first eight saved eigenvectors are considered.
+- Each residue is assigned to the eigenvector with the largest contribution `|lambda_k| * |v_ki|`.
+- The eigenvector identity defines hue; contribution strength defines intensity.
+
+Residue numbering:
+
+- `PDB/auth residue id` uses numbers parsed from stored residue keys such as `res_193`.
+- `Sequential label_seq_id` uses residue index + 1 and is useful when the PDB starts at 1 while PHASE residue keys use a different numbering.

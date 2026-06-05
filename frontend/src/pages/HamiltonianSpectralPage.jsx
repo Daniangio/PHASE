@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { useLocation, useParams } from 'react-router-dom';
+import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import Plot from 'react-plotly.js';
 import { CircleHelp, RefreshCw } from 'lucide-react';
 
@@ -47,6 +47,7 @@ function buildTopEdges(matrix, labels, limit = 30) {
 export default function HamiltonianSpectralPage() {
   const { projectId, systemId } = useParams();
   const location = useLocation();
+  const navigate = useNavigate();
   const [system, setSystem] = useState(null);
   const [loadingSystem, setLoadingSystem] = useState(true);
   const [systemError, setSystemError] = useState(null);
@@ -292,6 +293,7 @@ export default function HamiltonianSpectralPage() {
           <div className="flex flex-wrap gap-2">
             <button type="button" onClick={() => setHelpOpen(true)} className="inline-flex items-center gap-2 rounded-md border border-gray-700 px-3 py-2 text-sm text-gray-200 hover:bg-gray-800"><CircleHelp className="h-4 w-4" /> Help</button>
             <button type="button" onClick={loadAnalyses} className="inline-flex items-center gap-2 rounded-md border border-gray-700 px-3 py-2 text-sm text-gray-200 hover:bg-gray-800"><RefreshCw className="h-4 w-4" /> Refresh</button>
+            <button type="button" onClick={() => navigate(`/projects/${projectId}/systems/${systemId}/sampling/hamiltonian_spectral_3d${selectedClusterId ? `?cluster_id=${encodeURIComponent(selectedClusterId)}` : ''}`)} className="rounded-md border border-gray-700 px-3 py-2 text-sm text-gray-200 hover:bg-gray-800">3D view</button>
             <button type="button" onClick={() => setRunPanelOpen(true)} className="rounded-md bg-cyan-500 px-3 py-2 text-sm font-semibold text-black hover:bg-cyan-400">Run analysis</button>
           </div>
         </div>
@@ -356,10 +358,28 @@ export default function HamiltonianSpectralPage() {
                   </p>
                 </div>
                 <div className="grid grid-cols-1 2xl:grid-cols-2 gap-4">
-                  <div className="rounded-lg border border-gray-800 bg-gray-900 p-3 overflow-hidden"><Plot data={eigenPlot.data} layout={eigenPlot.layout} config={eigenPlot.config} style={{ width: '100%' }} /></div>
-                  <div className="rounded-lg border border-gray-800 bg-gray-900 p-3 overflow-hidden"><Plot data={vectorPlot.data} layout={vectorPlot.layout} config={vectorPlot.config} style={{ width: '100%' }} /></div>
+                  <div className="rounded-lg border border-gray-800 bg-gray-900 p-3 overflow-hidden space-y-2">
+                    <div>
+                      <h3 className="text-sm font-semibold text-gray-100">Eigenvalue spectrum</h3>
+                      <p className="text-xs text-gray-400">Large absolute eigenvalues define dominant sectors. Pair mode can have negative eigenvalues because couplings can decrease from A to B.</p>
+                    </div>
+                    <Plot data={eigenPlot.data} layout={eigenPlot.layout} config={eigenPlot.config} style={{ width: '100%' }} />
+                  </div>
+                  <div className="rounded-lg border border-gray-800 bg-gray-900 p-3 overflow-hidden space-y-2">
+                    <div>
+                      <h3 className="text-sm font-semibold text-gray-100">Residue loadings</h3>
+                      <p className="text-xs text-gray-400">Single mode shows |v_i| participation. Pair mode shows signed rewiring loadings for the selected ΔF eigenvector.</p>
+                    </div>
+                    <Plot data={vectorPlot.data} layout={vectorPlot.layout} config={vectorPlot.config} style={{ width: '100%' }} />
+                  </div>
                 </div>
-                <div className="rounded-lg border border-gray-800 bg-gray-900 p-3 overflow-hidden"><Plot data={heatmapPlot.data} layout={heatmapPlot.layout} config={heatmapPlot.config} style={{ width: '100%' }} /></div>
+                <div className="rounded-lg border border-gray-800 bg-gray-900 p-3 overflow-hidden space-y-2">
+                  <div>
+                    <h3 className="text-sm font-semibold text-gray-100">Coupling matrix heatmap</h3>
+                    <p className="text-xs text-gray-400">Single mode is the zero-sum-gauged Frobenius coupling matrix F. Pair mode is ΔF = F_B - F_A, so red/blue separates gained/lost coupling strength.</p>
+                  </div>
+                  <Plot data={heatmapPlot.data} layout={heatmapPlot.layout} config={heatmapPlot.config} style={{ width: '100%' }} />
+                </div>
                 <div className="rounded-lg border border-gray-800 bg-gray-900 p-4 overflow-x-auto">
                   <h3 className="text-sm font-semibold text-gray-100 mb-2">Strongest matrix edges</h3>
                   <table className="min-w-full text-sm">
