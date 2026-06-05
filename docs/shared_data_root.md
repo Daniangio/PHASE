@@ -66,6 +66,7 @@ mkdir -p "$PHASE_DATA_ROOT"
 This writes:
 
 ```bash
+COMPOSE_PROJECT_NAME=<unique docker compose project name>
 PHASE_UID=<your uid>
 PHASE_GID=<your gid>
 PHASE_DOCKER_USER=<your uid>:<your gid>
@@ -80,6 +81,8 @@ PHASE also keeps a repo-local `.phase_defaults` file. `phase_console` updates th
 
 Docker Compose uses `PHASE_HOST_DATA_ROOT` for the host bind mount. This is intentional: it prevents a stale shell `PHASE_DATA_ROOT` export from overriding the repo-local `.env`.
 
+`COMPOSE_PROJECT_NAME` should be unique per user or per clone. Without this, users who all clone the repo into a directory called `PHASE` can collide on Compose-managed container, network, and volume names even if their host ports differ.
+
 `./scripts/compose_env.sh` reads roots in this order:
 
 1. exported `PHASE_HOST_DATA_ROOT`
@@ -88,7 +91,7 @@ Docker Compose uses `PHASE_HOST_DATA_ROOT` for the host bind mount. This is inte
 4. `.env`
 5. `./data`
 
-Docker Compose reads `.env` automatically, so after changing the root in `phase_console`, the webserver uses the same root on the next `docker compose up`.
+Docker Compose reads `.env` automatically, so after changing the root in `phase_console`, the webserver uses the same root on the next `docker compose up`. `./scripts/compose_env.sh` preserves existing `.env` port values and `COMPOSE_PROJECT_NAME`, unless you override them in the shell.
 
 If `.env` is missing, direct `docker compose up` falls back to running backend/worker as `root` to avoid startup permission errors. This is only a safety fallback. Run `./scripts/compose_env.sh` once so Docker writes as your host user.
 
@@ -218,6 +221,35 @@ docker compose up --build
 
 After this, newly created project files should remain editable from both Docker
 and local CLI tools without `sudo`.
+
+
+## Multiple users on one machine
+
+Each user should have an independent data root, Compose project name, and host ports. Example `.env` for one user:
+
+```bash
+COMPOSE_PROJECT_NAME=phase_raimoc
+PHASE_HOST_DATA_ROOT=/storage_common/raimoc/PHASE/data
+PHASE_DATA_ROOT=/storage_common/raimoc/PHASE/data
+PHASE_FRONTEND_PORT=18180
+PHASE_BACKEND_PORT=18100
+PHASE_REDIS_PORT=16180
+```
+
+Another user should choose different values, for example `COMPOSE_PROJECT_NAME=phase_angiod` and another set of ports. Container-internal ports stay unchanged: frontend `3000`, backend `8000`, Redis `6379`. Only the host-side ports change.
+
+After editing `.env`, run:
+
+```bash
+./scripts/compose_env.sh
+docker compose up -d
+```
+
+The web UI is available at `http://localhost:<PHASE_FRONTEND_PORT>`. You can verify the final port mapping with:
+
+```bash
+docker compose ps
+```
 
 ## Important distinction: host path vs container path
 

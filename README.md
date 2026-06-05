@@ -109,6 +109,7 @@ Generate `.env` for Docker Compose:
 This writes:
 
 ```bash
+COMPOSE_PROJECT_NAME=<unique docker compose project name>
 PHASE_UID=<your uid>
 PHASE_GID=<your gid>
 PHASE_DOCKER_USER=<your uid>:<your gid>
@@ -120,11 +121,13 @@ PHASE_REDIS_PORT=<optional host redis port>
 ```
 
 The compose file uses these values so `backend` and `worker` write files as your host user, not as `root`.
+`COMPOSE_PROJECT_NAME` also prevents container/network name collisions when several users run PHASE from repos with the same directory name.
 
 Important:
 
 - Docker Compose uses `PHASE_HOST_DATA_ROOT` for the host bind mount; this avoids stale shell `PHASE_DATA_ROOT` values overriding `.env`
 - `./scripts/compose_env.sh` reads root defaults from `PHASE_HOST_DATA_ROOT`, then `.phase_defaults`, then shell `PHASE_DATA_ROOT`, then `.env`, then `./data`
+- `./scripts/compose_env.sh` preserves port values and `COMPOSE_PROJECT_NAME` already present in `.env`, unless you override them in the shell
 - if you choose a root through `phase_console`, Docker will use the same root on the next `docker compose up`
 - direct `docker compose up` without `.env` is allowed, but services run as `root`; run `./scripts/compose_env.sh` once to make Docker write as your user
 
@@ -201,14 +204,23 @@ Default host ports are intentionally non-standard to avoid clashing with other l
 - backend API: `18000`
 - redis: `16380`
 
-You can override them by exporting:
+For multiple users on the same machine, each clone should use a different Compose project name and different host ports. Edit `.env` directly, for example:
 
 ```bash
-export PHASE_FRONTEND_PORT=28080
-export PHASE_BACKEND_PORT=28000
-export PHASE_REDIS_PORT=26380
-./scripts/compose_env.sh
+COMPOSE_PROJECT_NAME=phase_raimoc
+PHASE_FRONTEND_PORT=18180
+PHASE_BACKEND_PORT=18100
+PHASE_REDIS_PORT=16180
 ```
+
+Then start normally:
+
+```bash
+./scripts/compose_env.sh
+docker compose up -d
+```
+
+Replace the project name and port numbers with values unique to that user. The frontend is available at `http://localhost:<PHASE_FRONTEND_PORT>`.
 
 ### Development stack
 
