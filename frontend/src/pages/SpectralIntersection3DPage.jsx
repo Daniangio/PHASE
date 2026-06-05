@@ -17,11 +17,19 @@ import { fetchClusterAnalyses, fetchClusterAnalysisData, fetchSystem } from '../
 
 const INTERSECTION_TYPE = 'hamiltonian_spectral_intersection';
 const PALETTE = ['#ef4444', '#3b82f6', '#22c55e', '#f59e0b', '#a855f7', '#06b6d4', '#f97316', '#ec4899', '#84cc16', '#14b8a6'];
+const RESIDUE_CLASSES = [
+  { code: 3, key: 'allosteric_piston', label: 'Allosteric pistons', color: '#ef4444', description: 'Core-core groups large enough to be treated as mechanical piston candidates.' },
+  { code: 1, key: 'structural_scaffold', label: 'Structural scaffolds', color: '#22c55e', description: 'Structural-core residues without matching functional-core piston overlap.' },
+  { code: 2, key: 'transient_switch', label: 'Transient switches', color: '#f59e0b', description: 'Functional-core residues that lack structural-core support; often isolated dynamic switches.' },
+  { code: 4, key: 'subthreshold_core_overlap', label: 'Subthreshold core overlap', color: '#a855f7', description: 'Core-core overlaps smaller than the current minimum piston size.' },
+  { code: 0, key: 'thermodynamic_bulk', label: 'Thermodynamic bulks', color: '#64748b', description: 'Halo/background residues outside the core mechanical classes.' },
+];
 
 function safeArray(x) { return Array.isArray(x) ? x : []; }
 function hexToInt(hex) { return parseInt(String(hex || '#9ca3af').replace('#', ''), 16); }
 function parseResid(raw) { const m = String(raw || '').match(/(-?\d+)/); return m ? Number(m[1]) : NaN; }
 function pistonColor(id) { return PALETTE[Math.max(0, (Number(id) || 1) - 1) % PALETTE.length]; }
+function classColor(code) { return RESIDUE_CLASSES.find((c) => c.code === Number(code))?.color || '#9ca3af'; }
 function analysisTitle(meta) {
   if (!meta) return '';
   return `${meta.single_state_name || meta.single_analysis_id} x ${meta.pair_state_a_name || meta.pair_state_a_id} -> ${meta.pair_state_b_name || meta.pair_state_b_id}`;
@@ -48,6 +56,7 @@ export default function SpectralIntersection3DPage() {
   const [analysisData, setAnalysisData] = useState(null);
   const [selectedStateId, setSelectedStateId] = useState('');
   const [selectedPistonId, setSelectedPistonId] = useState(0);
+  const [selectedClassCodes, setSelectedClassCodes] = useState([3]);
   const [residueIdMode, setResidueIdMode] = useState('auth');
   const [viewerStatus, setViewerStatus] = useState('initializing');
   const [helpOpen, setHelpOpen] = useState(false);
@@ -100,7 +109,7 @@ export default function SpectralIntersection3DPage() {
   useEffect(() => {
     if (!selectedAnalysisId || !selectedClusterId) { setAnalysisData(null); return; }
     fetchClusterAnalysisData(projectId, systemId, selectedClusterId, INTERSECTION_TYPE, selectedAnalysisId)
-      .then((payload) => { setAnalysisData(payload); setSelectedPistonId(0); })
+      .then((payload) => { setAnalysisData(payload); setSelectedPistonId(0); setSelectedClassCodes((prev) => (prev.length ? prev : [3])); })
       .catch((err) => setError(err.message || 'Failed to load intersection data.'));
   }, [projectId, systemId, selectedClusterId, selectedAnalysisId]);
 
@@ -144,7 +153,7 @@ export default function SpectralIntersection3DPage() {
     const roots = plugin.managers.structure.hierarchy.current.structures;
     if (roots?.length) await plugin.managers.structure.component.clear(roots);
     const base = await plugin.builders.structure.tryCreateComponentFromExpression(structureCell, MS.struct.generator.all(), 'piston-base');
-    await plugin.builders.structure.representation.addRepresentation(base, { type: 'cartoon', color: 'uniform', colorParams: { value: hexToInt('#6b7280') }, typeParams: { alpha: 0.22 } });
+    await plugin.builders.structure.representation.addRepresentation(base, { type: 'cartoon', color: 'uniform', colorParams: { value: hexToInt('#6b7280') }, transparency: { name: 'uniform', params: { value: 0.0 } } });
     baseComponentRef.current = base.ref;
   }, [projectId, systemId, selectedStateId]);
 
@@ -153,17 +162,41 @@ export default function SpectralIntersection3DPage() {
   const data = analysisData?.data || {};
   const residueKeys = useMemo(() => safeArray(data.residue_keys).map(String), [data.residue_keys]);
   const pistonIds = useMemo(() => safeArray(data.piston_ids).map(Number), [data.piston_ids]);
+  const classCodes = useMemo(() => safeArray(data.residue_class_codes).map(Number), [data.residue_class_codes]);
   const pistonMembers = useMemo(() => parsePistonMembers(data.piston_members_json), [data.piston_members_json]);
+  const selectedClassSet = useMemo(() => new Set(selectedClassCodes.map(Number)), [selectedClassCodes]);
+
+  const classSummaries = useMemo(() => RESIDUE_CLASSES.map((klass) => {
+    const residues = residueKeys.filter((_, idx) => Number(classCodes[idx]) === klass.code);
+    return { ...klass, count: residues.length, residues };
+  }), [classCodes, residueKeys]);
+
+  const toggleClass = useCallback((code) => {
+    setSelectedClassCodes((prev) => {
+      const set = new Set(prev.map(Number));
+      if (set.has(Number(code))) set.delete(Number(code));
+      else set.add(Number(code));
+      return Array.from(set);
+    });
+  }, []);
 
   const residueColors = useMemo(() => {
     const colors = new Map();
-    pistonIds.forEach((pid, idx) => {
-      if (!pid) return;
-      if (selectedPistonId && Number(pid) !== Number(selectedPistonId)) return;
-      colors.set(idx, pistonColor(pid));
-    });
+    const n = Math.max(residueKeys.length, classCodes.length, pistonIds.length);
+    for (let idx = 0; idx < n; idx += 1) {
+      const code = Number(classCodes[idx]);
+      if (!selectedClassSet.has(code)) continue;
+      if (code === 3) {
+        const pid = Number(pistonIds[idx] || 0);
+        if (!pid) continue;
+        if (selectedPistonId && pid !== Number(selectedPistonId)) continue;
+        colors.set(idx, pistonColor(pid));
+      } else {
+        colors.set(idx, classColor(code));
+      }
+    }
     return colors;
-  }, [pistonIds, selectedPistonId]);
+  }, [classCodes, pistonIds, residueKeys.length, selectedClassSet, selectedPistonId]);
 
   const applyColoring = useCallback(async () => {
     const plugin = pluginRef.current;
@@ -200,8 +233,8 @@ export default function SpectralIntersection3DPage() {
         <div className="flex items-start justify-between gap-3">
           <div>
             <button type="button" onClick={() => navigate(`/projects/${projectId}/systems/${systemId}/sampling/spectral_intersection${selectedClusterId ? `?cluster_id=${encodeURIComponent(selectedClusterId)}` : ''}`)} className="text-xs text-cyan-300 hover:text-cyan-200">Back to intersection plots</button>
-            <h1 className="mt-2 text-2xl font-semibold text-white">Allosteric Pistons 3D</h1>
-            <p className="max-w-3xl text-sm text-gray-400">Base protein is a quiet transparent trace; only core-core allosteric piston residues are highlighted with categorical colors by `(Cstruct, Cfunc)` group.</p>
+            <h1 className="mt-2 text-2xl font-semibold text-white">Piston Classes 3D</h1>
+            <p className="max-w-3xl text-sm text-gray-400">Base protein is shown as an opaque gray cartoon. Select pistons, scaffolds, transient switches, subthreshold overlaps, or thermodynamic bulk residues to color them on the structure.</p>
           </div>
           <div className="flex gap-2"><button type="button" onClick={() => setHelpOpen(true)} className="inline-flex items-center gap-2 rounded-md border border-gray-700 px-3 py-2 text-sm text-gray-200 hover:bg-gray-800"><CircleHelp className="h-4 w-4" /> Help</button><button type="button" onClick={loadAnalyses} className="inline-flex items-center gap-2 rounded-md border border-gray-700 px-3 py-2 text-sm text-gray-200 hover:bg-gray-800"><RefreshCw className="h-4 w-4" /> Refresh</button></div>
         </div>
@@ -212,10 +245,23 @@ export default function SpectralIntersection3DPage() {
             <label className="block text-xs text-gray-400">Intersection<select value={selectedAnalysisId} onChange={(e) => setSelectedAnalysisId(e.target.value)} className="mt-1 w-full rounded border border-gray-700 bg-gray-950 px-2 py-2 text-sm">{analyses.map((a) => <option key={a.analysis_id} value={a.analysis_id}>{analysisTitle(a)}</option>)}</select></label>
             <label className="block text-xs text-gray-400">Reference PDB/state<select value={selectedStateId} onChange={(e) => setSelectedStateId(e.target.value)} className="mt-1 w-full rounded border border-gray-700 bg-gray-950 px-2 py-2 text-sm">{states.map((s) => <option key={s.state_id} value={s.state_id}>{s.name || s.state_id}</option>)}</select></label>
             <label className="block text-xs text-gray-400">Residue numbering<select value={residueIdMode} onChange={(e) => setResidueIdMode(e.target.value)} className="mt-1 w-full rounded border border-gray-700 bg-gray-950 px-2 py-2 text-sm"><option value="auth">PDB/auth residue id from residue key</option><option value="label">Sequential label_seq_id</option></select></label>
-            <div className="rounded-md border border-gray-800 bg-gray-950/60 p-3 text-xs text-gray-400"><div className="font-semibold text-gray-200">Piston isolation</div><p className="mt-1">Choose `All pistons` or isolate a single piston. Piston colors are categorical and do not encode magnitude.</p></div>
+            <div className="rounded-md border border-gray-800 bg-gray-950/60 p-3 text-xs text-gray-400"><div className="font-semibold text-gray-200">Residue classes</div><p className="mt-1">Toggle which classes are colored. Pistons use categorical colors per piston; the other classes use fixed class colors.</p></div>
             <div className="space-y-2">
-              <button type="button" onClick={() => setSelectedPistonId(0)} className={`w-full rounded-md border px-3 py-2 text-left text-sm ${selectedPistonId === 0 ? 'border-cyan-500 bg-cyan-500/10' : 'border-gray-700 bg-gray-950/50 hover:bg-gray-800'}`}>All pistons</button>
-              {pistonMembers.map((p) => <button key={p.piston_id} type="button" onClick={() => setSelectedPistonId(Number(p.piston_id))} className={`w-full rounded-md border px-3 py-2 text-left text-sm ${Number(selectedPistonId) === Number(p.piston_id) ? 'border-cyan-500 bg-cyan-500/10' : 'border-gray-700 bg-gray-950/50 hover:bg-gray-800'}`}><div className="flex items-center gap-2"><span className="h-3 w-3 rounded-full" style={{ background: pistonColor(p.piston_id) }} />P{p.piston_id} · S{p.structural_community_id}/F{p.functional_community_id} · {p.size} residues</div><div className="mt-1 text-xs text-gray-400">{safeArray(p.residue_keys).slice(0, 8).join(', ')}{safeArray(p.residue_keys).length > 8 ? ' ...' : ''}</div></button>)}
+              {classSummaries.map((klass) => {
+                const active = selectedClassSet.has(klass.code);
+                return (
+                  <button key={klass.code} type="button" onClick={() => toggleClass(klass.code)} className={`w-full rounded-md border px-3 py-2 text-left text-sm ${active ? 'border-cyan-500 bg-cyan-500/10' : 'border-gray-700 bg-gray-950/50 hover:bg-gray-800'}`}>
+                    <div className="flex items-center justify-between gap-2"><span className="inline-flex items-center gap-2 text-gray-100"><span className="h-3 w-3 rounded-full" style={{ background: klass.color }} />{klass.label}</span><span className="text-xs text-gray-400">{klass.count}</span></div>
+                    <div className="mt-1 text-xs text-gray-500">{klass.description}</div>
+                    <div className="mt-1 text-xs text-gray-400">{klass.residues.slice(0, 8).join(', ')}{klass.residues.length > 8 ? ' ...' : ''}</div>
+                  </button>
+                );
+              })}
+            </div>
+            <div className="space-y-2">
+              <div className="pt-2 text-xs font-semibold uppercase tracking-[0.16em] text-gray-500">Piston groups</div>
+              <button type="button" onClick={() => { setSelectedPistonId(0); if (!selectedClassSet.has(3)) setSelectedClassCodes((prev) => Array.from(new Set([...prev, 3]))); }} className={`w-full rounded-md border px-3 py-2 text-left text-sm ${selectedPistonId === 0 ? 'border-cyan-500 bg-cyan-500/10' : 'border-gray-700 bg-gray-950/50 hover:bg-gray-800'}`}>All pistons</button>
+              {pistonMembers.map((p) => <button key={p.piston_id} type="button" onClick={() => { setSelectedPistonId(Number(p.piston_id)); if (!selectedClassSet.has(3)) setSelectedClassCodes((prev) => Array.from(new Set([...prev, 3]))); }} className={`w-full rounded-md border px-3 py-2 text-left text-sm ${Number(selectedPistonId) === Number(p.piston_id) ? 'border-cyan-500 bg-cyan-500/10' : 'border-gray-700 bg-gray-950/50 hover:bg-gray-800'}`}><div className="flex items-center gap-2"><span className="h-3 w-3 rounded-full" style={{ background: pistonColor(p.piston_id) }} />P{p.piston_id} · S{p.structural_community_id}/F{p.functional_community_id} · {p.size} residues</div><div className="mt-1 text-xs text-gray-400">{safeArray(p.residue_keys).slice(0, 8).join(', ')}{safeArray(p.residue_keys).length > 8 ? ' ...' : ''}</div></button>)}
               {!pistonMembers.length ? <p className="text-xs text-gray-500">No piston groups in this analysis.</p> : null}
             </div>
           </aside>

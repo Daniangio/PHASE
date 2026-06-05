@@ -25,6 +25,16 @@ function analysisTitle(meta) {
   return meta.analysis_id || '';
 }
 
+function projectionTitle(meta, intersections) {
+  if (!meta) return '';
+  if (meta.single_state_name || meta.single_analysis_id || meta.pair_state_a_name || meta.pair_state_a_id) {
+    return `${meta.single_state_name || meta.single_analysis_id || 'single'} x ${meta.pair_state_a_name || meta.pair_state_a_id || 'A'} -> ${meta.pair_state_b_name || meta.pair_state_b_id || 'B'}`;
+  }
+  const linked = safeArray(intersections).find((a) => String(a.analysis_id) === String(meta.intersection_analysis_id));
+  if (linked) return analysisTitle(linked);
+  return safeArray(meta.sample_names).slice(0, 2).join(', ') || meta.analysis_id || '';
+}
+
 function parsePistonMembers(raw) {
   const first = Array.isArray(raw) ? raw[0] : raw;
   if (!first) return [];
@@ -342,7 +352,7 @@ export default function SpectralIntersectionPage() {
             </div>
             <div className="pt-3 text-xs uppercase tracking-[0.15em] text-gray-500">Ligand projections</div>
             <div className="space-y-2">
-              {projectionAnalyses.map((a) => <button key={a.analysis_id} type="button" onClick={() => setSelectedProjectionId(String(a.analysis_id))} className={`w-full rounded-md border px-3 py-2 text-left ${String(selectedProjectionId) === String(a.analysis_id) ? 'border-amber-400 bg-amber-500/10' : 'border-gray-700 bg-gray-950/50 hover:bg-gray-800'}`}><div className="text-sm text-gray-100">{safeArray(a.sample_names).slice(0, 2).join(', ') || a.analysis_id}</div><div className="mt-1 text-xs text-gray-400">samples {a?.summary?.n_samples ?? 'n/a'} · pistons {a?.summary?.n_pistons ?? 'n/a'}</div></button>)}
+              {projectionAnalyses.map((a) => <button key={a.analysis_id} type="button" onClick={() => setSelectedProjectionId(String(a.analysis_id))} className={`w-full rounded-md border px-3 py-2 text-left ${String(selectedProjectionId) === String(a.analysis_id) ? 'border-amber-400 bg-amber-500/10' : 'border-gray-700 bg-gray-950/50 hover:bg-gray-800'}`}><div className="text-sm text-gray-100">{projectionTitle(a, intersections)}</div><div className="mt-1 text-xs text-gray-400">samples {a?.summary?.n_samples ?? 'n/a'} · pistons {a?.summary?.n_pistons ?? 'n/a'}{safeArray(a.sample_names).length ? ` · ${safeArray(a.sample_names).slice(0, 2).join(', ')}` : ''}</div></button>)}
               {!projectionAnalyses.length ? <p className="text-xs text-gray-500">No ligand projections yet.</p> : null}
             </div>
           </aside>

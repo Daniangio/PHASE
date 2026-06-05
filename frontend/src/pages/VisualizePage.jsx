@@ -176,7 +176,7 @@ export default function VisualizePage() {
         const trajectory = await pluginRef.current.builders.structure.parseTrajectory(data, 'pdb');
         await pluginRef.current.builders.structure.hierarchy.applyPreset(trajectory, 'default');
       });
-      // Add a translucent cartoon overlay for context
+      // Add an opaque cartoon overlay for context
       const structureCell = pluginRef.current.managers.structure.hierarchy.current.structures[0]?.cell;
       if (structureCell) {
         const allExpr = MS.struct.generator.all();
@@ -189,7 +189,7 @@ export default function VisualizePage() {
           await pluginRef.current.builders.structure.representation.addRepresentation(baseComponent, {
             type: 'cartoon',
             color: { name: 'uniform', params: { value: Color.fromHexString('#9ca3af') } },
-            transparency: { name: 'uniform', params: { value: 0.6 } },
+            transparency: { name: 'uniform', params: { value: 0.0 } },
           });
         }
       }
