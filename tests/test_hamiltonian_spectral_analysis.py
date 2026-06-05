@@ -7,7 +7,7 @@ import numpy as np
 os.environ.setdefault("PHASE_DATA_ROOT", "/tmp/phase-test-data")
 
 from phase.potts.potts_model import PottsModel, save_potts_model, zero_sum_gauge_model
-from phase.potts.spectral_analysis import frobenius_coupling_matrix, upsert_hamiltonian_spectral_batch
+from phase.potts.spectral_analysis import frobenius_coupling_matrix, normalized_laplacian, upsert_hamiltonian_spectral_batch
 from phase.services.project_store import DescriptorState, ProjectStore
 
 
@@ -48,6 +48,16 @@ def test_frobenius_matrix_uses_zero_sum_gauge():
     assert np.isclose(F[1, 0], expected)
 
 
+def test_normalized_laplacian_uses_nonnegative_adjacency():
+    A = np.asarray([[0.0, 2.0, 0.0], [2.0, 0.0, 1.0], [0.0, 1.0, 0.0]])
+    L, degree = normalized_laplacian(A)
+    assert np.allclose(degree, [2.0, 3.0, 1.0])
+    assert np.isclose(L[0, 0], 1.0)
+    assert np.isclose(L[0, 1], -2.0 / np.sqrt(6.0))
+    assert np.isclose(L[1, 2], -1.0 / np.sqrt(3.0))
+    assert np.isclose(L[0, 2], 0.0)
+
+
 def test_hamiltonian_spectral_batch_is_incremental(monkeypatch, tmp_path):
     data_root = tmp_path / "data"
     monkeypatch.setenv("PHASE_DATA_ROOT", str(data_root))
@@ -81,15 +91,27 @@ def test_hamiltonian_spectral_batch_is_incremental(monkeypatch, tmp_path):
     assert first["single_count"] == 2
     assert first["pair_count"] == 1
 
+    single_root = dirs["cluster_dir"] / "analyses" / "hamiltonian_spectral_single"
+    with np.load(single_root / "single_active" / "analysis.npz", allow_pickle=False) as data:
+        assert np.asarray(data["laplacian_source_matrix"]).shape == (3, 3)
+        assert np.asarray(data["laplacian_embedding"]).ndim == 2
+        assert np.asarray(data["community_ids"]).shape == (3,)
+        assert np.asarray(data["community_sizes"]).shape[1] == 2
+        assert np.asarray(data["community_matrix_order"]).shape == (3,)
+        assert np.asarray(data["community_interaction_matrix"]).ndim == 2
+
     pair_root = dirs["cluster_dir"] / "analyses" / "hamiltonian_spectral_pair"
     assert (pair_root / "pair_active__inactive" / "analysis.npz").exists()
     with np.load(pair_root / "pair_active__inactive" / "analysis.npz", allow_pickle=False) as data:
         assert np.asarray(data["matrix"]).shape == (3, 3)
         assert np.asarray(data["top_eigenvectors"]).shape == (2, 3)
+        assert np.asarray(data["laplacian_source_matrix"]).shape == (3, 3)
         assert np.asarray(data["laplacian_matrix"]).shape == (3, 3)
         assert np.asarray(data["laplacian_degree"]).shape == (3,)
         assert np.asarray(data["laplacian_top_eigenvectors"]).shape == (2, 3)
         assert np.asarray(data["laplacian_top_indices"]).shape == (2,)
+        assert np.asarray(data["community_ids"]).shape == (3,)
+        assert np.asarray(data["community_interaction_matrix"]).ndim == 2
 
     second = upsert_hamiltonian_spectral_batch(
         project_id="proj",

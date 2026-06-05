@@ -44,6 +44,19 @@ function buildTopEdges(matrix, labels, limit = 30) {
   return out.slice(0, limit);
 }
 
+function orderMatrix(matrix, order) {
+  const rows = safeArray(matrix);
+  const ord = safeArray(order).map(Number).filter((x) => Number.isInteger(x) && x >= 0 && x < rows.length);
+  if (!ord.length) return rows;
+  return ord.map((i) => ord.map((j) => Number(rows[i]?.[j] ?? 0)));
+}
+
+function orderLabels(labels, order) {
+  const ord = safeArray(order).map(Number).filter((x) => Number.isInteger(x) && x >= 0 && x < labels.length);
+  if (!ord.length) return labels;
+  return ord.map((i) => labels[i] || `res_${i + 1}`);
+}
+
 export default function HamiltonianSpectralPage() {
   const { projectId, systemId } = useParams();
   const location = useLocation();
@@ -206,16 +219,27 @@ export default function HamiltonianSpectralPage() {
   const data = analysisData?.data || {};
   const labels = useMemo(() => safeArray(data.residue_keys).map(String), [data.residue_keys]);
   const pairMode = mode === 'pair';
-  const hasLaplacian = pairMode && Array.isArray(data.laplacian_matrix) && Array.isArray(data.laplacian_top_eigenvectors);
-  const viewMode = pairMode && spectralView === 'laplacian' && hasLaplacian ? 'laplacian' : 'absolute';
-  const matrix = useMemo(() => (viewMode === 'laplacian' ? safeArray(data.laplacian_matrix) : safeArray(data.matrix)), [data.laplacian_matrix, data.matrix, viewMode]);
+  const hasLaplacian = Array.isArray(data.laplacian_matrix) && Array.isArray(data.laplacian_top_eigenvectors);
+  const viewMode = spectralView === 'laplacian' && hasLaplacian ? 'laplacian' : 'absolute';
+  const communityIds = useMemo(() => safeArray(data.community_ids).map(Number), [data.community_ids]);
+  const communitySizes = useMemo(() => safeArray(data.community_sizes).map((row) => safeArray(row).map(Number)), [data.community_sizes]);
+  const communityOrder = useMemo(() => safeArray(data.community_matrix_order).map(Number), [data.community_matrix_order]);
+  const communityInteraction = useMemo(() => safeArray(data.community_interaction_matrix), [data.community_interaction_matrix]);
+  const rawMatrix = useMemo(() => {
+    if (viewMode === 'laplacian') return safeArray(data.laplacian_source_matrix?.length ? data.laplacian_source_matrix : data.laplacian_matrix);
+    return safeArray(data.matrix);
+  }, [data.laplacian_source_matrix, data.laplacian_matrix, data.matrix, viewMode]);
+  const matrix = useMemo(() => (viewMode === 'laplacian' ? orderMatrix(rawMatrix, communityOrder) : rawMatrix), [rawMatrix, communityOrder, viewMode]);
+  const matrixLabels = useMemo(() => (viewMode === 'laplacian' ? orderLabels(labels, communityOrder) : labels), [labels, communityOrder, viewMode]);
   const eigenvalues = useMemo(() => safeArray(viewMode === 'laplacian' ? data.laplacian_eigenvalues : data.eigenvalues).map(Number), [data.laplacian_eigenvalues, data.eigenvalues, viewMode]);
   const topValues = useMemo(() => safeArray(viewMode === 'laplacian' ? data.laplacian_top_eigenvalues : data.top_eigenvalues).map(Number), [data.laplacian_top_eigenvalues, data.top_eigenvalues, viewMode]);
   const topVectors = useMemo(() => safeArray(viewMode === 'laplacian' ? data.laplacian_top_eigenvectors : data.top_eigenvectors), [data.laplacian_top_eigenvectors, data.top_eigenvectors, viewMode]);
   const selectedVector = useMemo(() => safeArray(topVectors[Math.min(componentIndex, Math.max(0, topVectors.length - 1))]).map(Number), [topVectors, componentIndex]);
   const selectedEigenvalue = topValues[Math.min(componentIndex, Math.max(0, topValues.length - 1))];
-  const topEdges = useMemo(() => buildTopEdges(matrix, labels, edgeLimit), [matrix, labels, edgeLimit]);
-  const viewTitle = viewMode === 'laplacian' ? 'Differential Laplacian allostery' : (pairMode ? 'ΔF spectral rewiring' : 'Absolute entropy / Frobenius');
+  const topEdges = useMemo(() => buildTopEdges(matrix, matrixLabels, edgeLimit), [matrix, matrixLabels, edgeLimit]);
+  const viewTitle = viewMode === 'laplacian'
+    ? (pairMode ? 'Differential Laplacian allostery' : 'Single-state Laplacian communities')
+    : (pairMode ? 'ΔF spectral rewiring' : 'Absolute entropy / Frobenius');
 
   const eigenPlot = useMemo(() => ({
     data: [{ x: eigenvalues.map((_, i) => i + 1), y: eigenvalues, type: 'bar', marker: { color: viewMode === 'laplacian' ? '#a855f7' : (pairMode ? '#f59e0b' : '#22d3ee') } }],
@@ -236,10 +260,23 @@ export default function HamiltonianSpectralPage() {
   }), [labels, selectedVector, pairMode, componentIndex, selectedEigenvalue, viewTitle]);
 
   const heatmapPlot = useMemo(() => ({
-    data: [{ z: matrix, x: labels, y: labels, type: 'heatmap', colorscale: pairMode ? 'RdBu' : 'Viridis', reversescale: pairMode, zmid: pairMode ? 0 : undefined, colorbar: { title: viewMode === 'laplacian' ? 'L' : (pairMode ? 'ΔF' : 'F') } }],
-    layout: { title: viewMode === 'laplacian' ? 'Signed normalized Laplacian L' : (pairMode ? 'Differential Frobenius matrix ΔF = F_B - F_A' : 'Frobenius coupling matrix F'), paper_bgcolor: '#111827', plot_bgcolor: '#111827', font: { color: '#e5e7eb' }, height: 520, margin: { l: 90, r: 20, t: 45, b: 90 }, xaxis: { tickangle: -70, automargin: true }, yaxis: { automargin: true } },
+    data: [{ z: matrix, x: matrixLabels, y: matrixLabels, type: 'heatmap', colorscale: pairMode && viewMode !== 'laplacian' ? 'RdBu' : 'Viridis', reversescale: pairMode && viewMode !== 'laplacian', zmid: pairMode && viewMode !== 'laplacian' ? 0 : undefined, colorbar: { title: viewMode === 'laplacian' ? (pairMode ? '|ΔF|' : 'F') : (pairMode ? 'ΔF' : 'F') } }],
+    layout: { title: viewMode === 'laplacian' ? 'Community-ordered Laplacian source matrix' : (pairMode ? 'Differential Frobenius matrix ΔF = F_B - F_A' : 'Frobenius coupling matrix F'), paper_bgcolor: '#111827', plot_bgcolor: '#111827', font: { color: '#e5e7eb' }, height: 520, margin: { l: 90, r: 20, t: 45, b: 90 }, xaxis: { tickangle: -70, automargin: true }, yaxis: { automargin: true } },
     config: { responsive: true, displayModeBar: true },
-  }), [matrix, labels, pairMode, viewMode]);
+  }), [matrix, matrixLabels, pairMode, viewMode]);
+
+  const communityPlot = useMemo(() => ({
+    data: [{
+      z: communityInteraction,
+      x: communitySizes.map((row) => `c${row[0]}`),
+      y: communitySizes.map((row) => `c${row[0]}`),
+      type: 'heatmap',
+      colorscale: 'YlOrRd',
+      colorbar: { title: pairMode ? '|ΔF| sum' : 'F sum' },
+    }],
+    layout: { title: 'Sector-level network matrix', paper_bgcolor: '#111827', plot_bgcolor: '#111827', font: { color: '#e5e7eb' }, height: 320, margin: { l: 65, r: 20, t: 45, b: 60 } },
+    config: { responsive: true, displayModeBar: false },
+  }), [communityInteraction, communitySizes, pairMode]);
 
   if (loadingSystem) return <Loader message="Loading Hamiltonian spectral analyses..." />;
 
@@ -325,16 +362,14 @@ export default function HamiltonianSpectralPage() {
               <div>
                 <label className="block text-xs text-gray-400 mb-1">Spectral view</label>
                 <select
-                  value={pairMode ? spectralView : 'absolute'}
+                  value={spectralView}
                   onChange={(e) => { setSpectralView(e.target.value); setComponentIndex(0); }}
-                  disabled={!pairMode}
-                  className="w-full bg-gray-950 border border-gray-800 rounded-md px-2 py-2 text-sm text-gray-100 disabled:opacity-60"
+                  className="w-full bg-gray-950 border border-gray-800 rounded-md px-2 py-2 text-sm text-gray-100"
                 >
-                  <option value="laplacian">Differential Laplacian allostery</option>
-                  <option value="absolute">Absolute entropy / ΔF spectral rewiring</option>
+                  <option value="laplacian">{pairMode ? 'Differential Laplacian allostery' : 'Single-state Laplacian communities'}</option>
+                  <option value="absolute">{pairMode ? 'ΔF spectral rewiring' : 'Absolute entropy / Frobenius'}</option>
                 </select>
-                {!pairMode ? <p className="mt-1 text-[11px] text-gray-500">Single-state analyses only have the absolute entropy/Frobenius view. Switch Mode to Pair rewiring sectors to compare Laplacian vs ΔF.</p> : null}
-                {pairMode && spectralView === 'laplacian' && !hasLaplacian ? <p className="mt-1 text-[11px] text-amber-300">This pair was computed before Laplacian support. Rerun spectral analysis to upgrade it.</p> : null}
+                {spectralView === 'laplacian' && !hasLaplacian ? <p className="mt-1 text-[11px] text-amber-300">This analysis was computed before v3 Laplacian/community support. Rerun spectral analysis to upgrade it.</p> : null}
               </div>
               <div className="space-y-2">
                 <div className="text-xs uppercase tracking-[0.15em] text-gray-500">Available analyses</div>
@@ -371,8 +406,8 @@ export default function HamiltonianSpectralPage() {
                   <h2 className="mt-2 text-lg font-semibold text-white">{analysisTitle(meta)}</h2>
                   <p className="mt-1 text-sm text-gray-400">
                     {pairMode
-                      ? (viewMode === 'laplacian' ? `Differential Laplacian suppresses high-degree flexible hubs and highlights normalized allosteric rewiring communities between ${meta?.state_a_name || meta?.state_a_id} and ${meta?.state_b_name || meta?.state_b_id}.` : `Pair analysis uses signed ΔF. Red positive loadings increase from ${meta?.state_a_name || meta?.state_a_id} to ${meta?.state_b_name || meta?.state_b_id}; blue negative loadings decrease.`)
-                      : `Single analysis uses |v_i| from the Frobenius coupling matrix of ${meta?.state_name || scalarString(data.state_name)}.`}
+                      ? (viewMode === 'laplacian' ? `Differential Laplacian uses A=|ΔF| and DADApy communities to highlight normalized allosteric pathways between ${meta?.state_a_name || meta?.state_a_id} and ${meta?.state_b_name || meta?.state_b_id}.` : `Pair analysis uses signed ΔF. Red positive loadings increase from ${meta?.state_a_name || meta?.state_a_id} to ${meta?.state_b_name || meta?.state_b_id}; blue negative loadings decrease.`)
+                      : (viewMode === 'laplacian' ? `Single-state Laplacian uses A=F and DADApy communities to identify rigid coupled structural modules in ${meta?.state_name || scalarString(data.state_name)}.` : `Single analysis uses |v_i| from the Frobenius coupling matrix of ${meta?.state_name || scalarString(data.state_name)}.`)}
                   </p>
                 </div>
                 <div className="grid grid-cols-1 2xl:grid-cols-2 gap-4">
@@ -386,7 +421,7 @@ export default function HamiltonianSpectralPage() {
                   <div className="rounded-lg border border-gray-800 bg-gray-900 p-3 overflow-hidden space-y-2">
                     <div>
                       <h3 className="text-sm font-semibold text-gray-100">Residue loadings</h3>
-                      <p className="text-xs text-gray-400">Single mode shows |v_i| participation. Pair views show signed residue loadings; Laplacian mode is normalized by absolute degree to reduce flexible-loop hub effects.</p>
+                      <p className="text-xs text-gray-400">Absolute modes show Hamiltonian sector loadings. Laplacian modes show Fiedler-like loadings used to build the community embedding.</p>
                     </div>
                     <Plot data={vectorPlot.data} layout={vectorPlot.layout} config={vectorPlot.config} style={{ width: '100%' }} />
                   </div>
@@ -394,10 +429,27 @@ export default function HamiltonianSpectralPage() {
                 <div className="rounded-lg border border-gray-800 bg-gray-900 p-3 overflow-hidden space-y-2">
                   <div>
                     <h3 className="text-sm font-semibold text-gray-100">Coupling matrix heatmap</h3>
-                    <p className="text-xs text-gray-400">Single mode is the zero-sum-gauged Frobenius coupling matrix F. Pair mode shows either ΔF or the signed normalized Laplacian L used for allostery sectors.</p>
+                    <p className="text-xs text-gray-400">Absolute modes show F or signed ΔF. Laplacian modes show the source adjacency reordered by DADApy community: F for single-state modules and |ΔF| for pair allostery pathways.</p>
                   </div>
                   <Plot data={heatmapPlot.data} layout={heatmapPlot.layout} config={heatmapPlot.config} style={{ width: '100%' }} />
                 </div>
+                {viewMode === 'laplacian' && communityIds.length ? (
+                  <div className="grid grid-cols-1 2xl:grid-cols-2 gap-4">
+                    <div className="rounded-lg border border-gray-800 bg-gray-900 p-4 overflow-x-auto">
+                      <h3 className="text-sm font-semibold text-gray-100 mb-2">DADApy communities</h3>
+                      <p className="text-xs text-gray-400 mb-3">Community labels are categorical sectors from cosine-distance density peak clustering in Laplacian spectral space.</p>
+                      <table className="min-w-full text-sm">
+                        <thead className="text-xs uppercase tracking-[0.12em] text-gray-500"><tr><th className="px-2 py-2 text-left">Community</th><th className="px-2 py-2 text-right">Residues</th></tr></thead>
+                        <tbody>
+                          {communitySizes.map((row) => <tr key={row[0]} className="border-t border-gray-800"><td className="px-2 py-2 text-gray-200">c{row[0]}</td><td className="px-2 py-2 text-right text-gray-300">{row[1]}</td></tr>)}
+                        </tbody>
+                      </table>
+                    </div>
+                    <div className="rounded-lg border border-gray-800 bg-gray-900 p-3 overflow-hidden">
+                      <Plot data={communityPlot.data} layout={communityPlot.layout} config={communityPlot.config} style={{ width: '100%' }} />
+                    </div>
+                  </div>
+                ) : null}
                 <div className="rounded-lg border border-gray-800 bg-gray-900 p-4 overflow-x-auto">
                   <h3 className="text-sm font-semibold text-gray-100 mb-2">Strongest matrix edges</h3>
                   <table className="min-w-full text-sm">

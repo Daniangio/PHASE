@@ -51,6 +51,11 @@ function allVectorColor(component, intensity) {
   return mixColor('#e5e7eb', PALETTE[component % PALETTE.length], intensity);
 }
 
+function communityColor(label) {
+  const idx = Math.max(0, (Number(label) || 1) - 1);
+  return PALETTE[idx % PALETTE.length];
+}
+
 function analysisTitle(meta) {
   if (!meta) return '';
   if (meta.mode === 'pair') return `${meta.state_a_name || meta.state_a_id} → ${meta.state_b_name || meta.state_b_id}`;
@@ -208,14 +213,26 @@ export default function HamiltonianSpectral3DPage() {
   const spectral = analysisData?.data || {};
   const residueKeys = useMemo(() => safeArray(spectral.residue_keys).map(String), [spectral.residue_keys]);
   const pairMode = mode === 'pair';
-  const hasLaplacian = pairMode && Array.isArray(spectral.laplacian_top_eigenvectors);
-  const viewMode = pairMode && spectralView === 'laplacian' && hasLaplacian ? 'laplacian' : 'absolute';
+  const hasLaplacian = Array.isArray(spectral.laplacian_top_eigenvectors);
+  const viewMode = spectralView === 'laplacian' && hasLaplacian ? 'laplacian' : 'absolute';
   const topVectors = useMemo(() => safeArray(viewMode === 'laplacian' ? spectral.laplacian_top_eigenvectors : spectral.top_eigenvectors), [spectral.laplacian_top_eigenvectors, spectral.top_eigenvectors, viewMode]);
   const topValues = useMemo(() => safeArray(viewMode === 'laplacian' ? spectral.laplacian_top_eigenvalues : spectral.top_eigenvalues).map(Number), [spectral.laplacian_top_eigenvalues, spectral.top_eigenvalues, viewMode]);
+  const communityIds = useMemo(() => safeArray(spectral.community_ids).map(Number), [spectral.community_ids]);
+
+  useEffect(() => {
+    if (vectorMode === 'communities' && (viewMode !== 'laplacian' || !communityIds.length)) {
+      setVectorMode('selected');
+    }
+  }, [vectorMode, viewMode, communityIds.length]);
 
   const residueColors = useMemo(() => {
     const colors = new Map();
-    if (!residueKeys.length || !topVectors.length) return colors;
+    if (!residueKeys.length) return colors;
+    if (vectorMode === 'communities' && communityIds.length) {
+      communityIds.forEach((label, ridx) => colors.set(ridx, communityColor(label)));
+      return colors;
+    }
+    if (!topVectors.length) return colors;
     if (vectorMode === 'selected') {
       const idx = Math.min(componentIndex, topVectors.length - 1);
       const vec = safeArray(topVectors[idx]).map(Number);
@@ -236,7 +253,7 @@ export default function HamiltonianSpectral3DPage() {
     const max = Math.max(1e-12, ...contributions.map((x) => x.value));
     contributions.forEach((x, ridx) => colors.set(ridx, allVectorColor(x.component, x.value / max)));
     return colors;
-  }, [residueKeys, topVectors, topValues, vectorMode, componentIndex, pairMode, viewMode]);
+  }, [residueKeys, topVectors, topValues, vectorMode, componentIndex, pairMode, viewMode, communityIds]);
 
   const applyColoring = useCallback(async () => {
     const plugin = pluginRef.current;
@@ -288,26 +305,24 @@ export default function HamiltonianSpectral3DPage() {
             <label className="block text-xs text-gray-400">Mode<select value={mode} onChange={(e) => setMode(e.target.value)} className="mt-1 w-full rounded bg-gray-950 border border-gray-700 px-2 py-2 text-sm"><option value="single">Single-state sectors</option><option value="pair">Pair rewiring sectors</option></select></label>
             <label className="block text-xs text-gray-400">Spectral view
               <select
-                value={pairMode ? spectralView : 'absolute'}
+                value={spectralView}
                 onChange={(e) => { setSpectralView(e.target.value); setComponentIndex(0); }}
-                disabled={!pairMode}
-                className="mt-1 w-full rounded bg-gray-950 border border-gray-700 px-2 py-2 text-sm disabled:opacity-60"
+                className="mt-1 w-full rounded bg-gray-950 border border-gray-700 px-2 py-2 text-sm"
               >
-                <option value="laplacian">Differential Laplacian allostery</option>
-                <option value="absolute">Absolute entropy / ΔF spectral rewiring</option>
+                <option value="laplacian">{pairMode ? 'Differential Laplacian allostery' : 'Single-state Laplacian communities'}</option>
+                <option value="absolute">{pairMode ? 'ΔF spectral rewiring' : 'Absolute entropy / Frobenius'}</option>
               </select>
-              {!pairMode ? <span className="mt-1 block text-[11px] text-gray-500">Single-state analyses only have the absolute entropy/Frobenius view. Switch Mode to Pair rewiring sectors to use Laplacian.</span> : null}
-              {pairMode && spectralView === 'laplacian' && !hasLaplacian ? <span className="mt-1 block text-[11px] text-amber-300">Rerun this spectral analysis to add Laplacian fields.</span> : null}
+              {spectralView === 'laplacian' && !hasLaplacian ? <span className="mt-1 block text-[11px] text-amber-300">Rerun this spectral analysis to add v3 Laplacian/community fields.</span> : null}
             </label>
             <label className="block text-xs text-gray-400">Analysis<select value={selectedAnalysisId} onChange={(e) => setSelectedAnalysisId(e.target.value)} className="mt-1 w-full rounded bg-gray-950 border border-gray-700 px-2 py-2 text-sm">{analyses.map((a) => <option key={a.analysis_id} value={a.analysis_id}>{analysisTitle(a)}</option>)}</select></label>
             <label className="block text-xs text-gray-400">Reference PDB/state<select value={selectedStateId} onChange={(e) => setSelectedStateId(e.target.value)} className="mt-1 w-full rounded bg-gray-950 border border-gray-700 px-2 py-2 text-sm">{states.map((s) => <option key={s.state_id} value={s.state_id}>{s.name || s.state_id}</option>)}</select></label>
-            <label className="block text-xs text-gray-400">Color mode<select value={vectorMode} onChange={(e) => setVectorMode(e.target.value)} className="mt-1 w-full rounded bg-gray-950 border border-gray-700 px-2 py-2 text-sm"><option value="selected">Selected eigenvector</option><option value="all">Dominant among first 8 vectors</option></select></label>
+            <label className="block text-xs text-gray-400">Color mode<select value={vectorMode} onChange={(e) => setVectorMode(e.target.value)} className="mt-1 w-full rounded bg-gray-950 border border-gray-700 px-2 py-2 text-sm"><option value="selected">Selected eigenvector</option><option value="all">Dominant among first 8 vectors</option>{viewMode === 'laplacian' && communityIds.length ? <option value="communities">DADApy communities</option> : null}</select></label>
             {vectorMode === 'selected' ? <label className="block text-xs text-gray-400">Eigenvector<select value={componentIndex} onChange={(e) => setComponentIndex(Number(e.target.value))} className="mt-1 w-full rounded bg-gray-950 border border-gray-700 px-2 py-2 text-sm">{topValues.map((v, idx) => <option key={idx} value={idx}>{viewMode === 'laplacian' ? 'Fiedler ' : 'v'}{idx + 1} · λ={Number(v).toFixed(4)}</option>)}</select></label> : null}
             <label className="block text-xs text-gray-400">Residue numbering<select value={residueIdMode} onChange={(e) => setResidueIdMode(e.target.value)} className="mt-1 w-full rounded bg-gray-950 border border-gray-700 px-2 py-2 text-sm"><option value="auth">PDB/auth residue id from residue key</option><option value="label">Sequential label_seq_id</option></select></label>
             <div className="rounded-md border border-gray-800 bg-gray-950/60 p-3 text-xs text-gray-400 space-y-1">
               <div className="text-gray-200 font-semibold">Interpretation</div>
-              <p>{pairMode ? 'Pair mode: red/blue are opposite signed sectors. In Laplacian mode they are normalized allosteric/Fiedler sectors; in ΔF mode they are raw rewiring sectors.' : 'Single mode: green saturation is proportional to |v_i|, the residue participation in the selected sector.'}</p>
-              <p>All-vectors mode assigns each residue the color of its dominant component. ΔF mode weights by |λ|; Laplacian mode weights earlier Fiedler modes by rank.</p>
+              <p>{vectorMode === 'communities' ? 'Community mode uses categorical colors from DADApy density peak clustering in cosine-distance Laplacian spectral space.' : (pairMode ? 'Pair mode: red/blue are opposite signed sectors in ΔF view. Laplacian view uses normalized Fiedler-like loadings.' : 'Single mode: green saturation is proportional to |v_i| in Frobenius view; Laplacian view identifies structural modules.')}</p>
+              <p>All-vectors mode assigns each residue the color of its dominant component. Community colors are labels, not scalar intensity.</p>
             </div>
           </aside>
           <section className="rounded-lg border border-gray-800 bg-gray-900 overflow-hidden min-h-[720px] relative">

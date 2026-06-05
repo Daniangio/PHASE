@@ -2,10 +2,12 @@
 
 This analysis identifies PHASE dynamic sectors from fitted Potts Hamiltonians.
 
-It implements the non-ligand parts of the PHASE spectral-sector pipeline:
+It implements the non-ligand spectral-sector pipeline:
 
-- Single-state spectra: intrinsic sectors of one thermodynamic state.
-- Pair spectra: rewiring sectors between two states.
+- Single-state Frobenius spectra: intrinsic sectors of one thermodynamic state.
+- Single-state Laplacian communities: rigid structural modules inside one state.
+- Pair DeltaF spectra: signed rewiring sectors between two states.
+- Pair differential Laplacian communities: normalized allosteric pathways between two states.
 
 Ligand empirical-flow projection is intentionally not included yet.
 
@@ -31,10 +33,16 @@ For each selected state with a resolvable model:
 F[i,j] = sqrt(sum_{s_i,s_j} J_ij(s_i,s_j)^2)
 ```
 
-3. The symmetric matrix `F` is diagonalized.
-4. Eigenvalues and leading eigenvectors are saved.
+3. The symmetric matrix `F` is diagonalized for the absolute Frobenius spectrum.
+4. A normalized graph Laplacian is computed from `A = F`.
+5. The smallest non-zero Laplacian modes are used as a spectral embedding.
+6. Rows of the embedding are normalized onto the unit hypersphere.
+7. DADApy density peak clustering is run on cosine distances in that embedding to assign residue communities.
 
-Large absolute residue loadings `|v_i|` indicate residues strongly participating in that Hamiltonian sector.
+Interpretation:
+
+- Large absolute Frobenius loadings `|v_i|` indicate residues strongly participating in a Hamiltonian sector.
+- Single-state Laplacian communities suppress hyper-flexible high-degree loops and identify rigid coupled architectural modules of that state.
 
 ## Pair Analysis
 
@@ -50,25 +58,78 @@ Delta F = F_B - F_A
 - Negative matrix entries indicate couplings weaker in state B than state A.
 - Signed eigenvector loadings identify residues participating in the rewiring mode.
 
+For differential Laplacian allostery, PHASE uses the non-negative adjacency:
+
+```text
+A = |Delta F|
+```
+
+This represents total coupling rewiring magnitude. The normalized Laplacian and DADApy community detection then identify functional pathways between states.
+
 Pairs are incremental: rerunning the analysis with a new state adds that state's single analysis and missing pairs between that state and states already analyzed.
+
+## Normalized Laplacian
+
+For single-state communities, `A = F`. For pair communities, `A = |Delta F|`.
+
+```text
+D_i = sum_j A[i,j]
+L[i,i] = 1.0                    if D_i > 0
+L[i,j] = -A[i,j] / sqrt(D_i D_j) if i != j and D_i,D_j > 0
+L[i,j] = 0.0                     otherwise
+```
+
+The complete Laplacian spectrum is sorted ascending. The stored `laplacian_top_*` vectors are the smallest non-zero modes. The embedding dimension is chosen by a simple eigengap rule over those non-zero modes.
+
+## DADApy Communities
+
+PHASE builds a spectral embedding from the selected non-zero Laplacian modes, row-normalizes it to the unit hypersphere, and computes cosine distances:
+
+```text
+distance(i,j) = 1 - dot(Y_i, Y_j)
+```
+
+DADApy density peak clustering is then applied to those distances. Cosine distance is used because the embedding lives on a sphere; treating rows as ordinary Euclidean coordinates can distort angular sectors.
+
+Stored community IDs are integer labels. They are categorical, not ordered continuous values.
 
 ## Web Interpretation
 
 The page has two modes:
 
-- Single-state sectors: displays spectra for `F`.
-- Pair rewiring sectors: displays spectra for `Delta F`.
+- Single-state sectors: displays either `F` spectra or single-state Laplacian communities.
+- Pair rewiring sectors: displays either signed `Delta F` spectra or differential Laplacian communities.
 
 Common panels:
 
 - Eigenvalue spectrum: ranks sector components.
 - Residue loading bars: shows the selected eigenvector component.
-- Matrix heatmap: shows `F` or `Delta F` over residue pairs.
-- Strongest edges: table of largest matrix entries by absolute magnitude.
+- Matrix heatmap: shows `F`, `Delta F`, or the Laplacian source matrix reordered by community when community mode is active.
+- Strongest edges: table of largest displayed matrix entries by absolute magnitude.
+- Community summary: community sizes and inter-community coupling sums when Laplacian communities are available.
 
-For single-state plots, residue bars use `|v_i|` because eigenvector sign is arbitrary.
+For single-state Frobenius plots, residue bars use `|v_i|` because eigenvector sign is arbitrary.
 
-For pair plots, residue bars are signed. Red and blue separate opposite sides of the differential sector; the sign depends on the stored order `state B - state A`.
+For pair `Delta F` plots, residue bars are signed. Red and blue separate opposite sides of the differential sector; the sign depends on the stored order `state B - state A`.
+
+For community views, colors are categorical. Do not interpret community color intensity as a scalar score.
+
+## 3D Coloring
+
+The 3D page loads a reference PDB/state and colors the cartoon representation.
+
+Color modes:
+
+- Selected eigenvector: colors by the selected component loading.
+- Dominant among first 8 vectors: each residue is colored by its strongest component.
+- Communities: each residue is colored by its DADApy community ID using a categorical palette.
+
+Single-state Laplacian communities map structural modules in one state. Pair differential Laplacian communities map functional allosteric pathways between two states.
+
+Residue numbering:
+
+- `PDB/auth residue id` uses numbers parsed from stored residue keys such as `res_193`.
+- `Sequential label_seq_id` uses residue index + 1 and is useful when the PDB starts at 1 while PHASE residue keys use a different numbering.
 
 ## Output Files
 
@@ -91,12 +152,27 @@ Each folder contains:
 
 Important NPZ arrays:
 
-- `matrix`: `F` for single mode or `Delta F` for pair mode.
+- `matrix`: `F` for single mode or signed `Delta F` for pair mode.
 - `residue_keys`: residue labels aligned to matrix axes.
-- `eigenvalues`: complete eigenspectrum.
-- `top_eigenvalues`: saved leading eigenvalues.
+- `eigenvalues`: complete absolute/Frobenius eigenspectrum.
+- `top_eigenvalues`: saved leading absolute/Frobenius eigenvalues.
 - `top_eigenvectors`: shape `(top_k, n_residues)`.
 - `residue_strength`: row-sum strength for quick ranking.
+- `laplacian_source_matrix`: `F` for single community mode or `|Delta F|` for pair community mode.
+- `laplacian_matrix`: normalized Laplacian `L`.
+- `laplacian_degree`: degree vector `D`.
+- `laplacian_eigenvalues`: full ascending Laplacian spectrum.
+- `laplacian_top_eigenvalues`: selected smallest non-zero eigenvalues.
+- `laplacian_top_eigenvectors`: selected Fiedler-like eigenvectors, shape `(top_k, n_residues)`.
+- `laplacian_top_indices`: indices of selected modes in the full ascending spectrum.
+- `laplacian_embedding`: row-normalized spectral embedding used for clustering.
+- `laplacian_embedding_indices`: eigenvector indices used in that embedding.
+- `community_ids`: DADApy community ID for each residue.
+- `community_halo_ids`: DADApy halo assignment for each residue.
+- `community_sizes`: two-column array `(community_id, n_residues)`.
+- `community_matrix_order`: residue order that groups the matrix by community.
+- `community_interaction_matrix`: coarse-grained inter-community coupling sums.
+- `community_diagnostics_json`: clustering method, distance metric, DADApy parameters, and fallback warnings if any.
 
 ## Why A State Can Be Skipped
 
@@ -110,63 +186,3 @@ This analysis requires a full fitted Potts Hamiltonian for each state. A state i
 - Only a delta-patch model exists; patch-only models are not complete Hamiltonians and are skipped.
 
 To include a skipped state, fit or create a full/combined Potts model for that state, then rerun the spectral analysis. The run is incremental, so existing singles and pairs are reused unless overwrite is enabled.
-
-## 3D Coloring
-
-The 3D page loads a reference PDB/state and colors the cartoon representation by eigenvector participation.
-
-Selected eigenvector mode:
-
-- Single-state spectra: green intensity is proportional to `|v_i|`.
-- Pair spectra: red and blue are opposite signed sides of the selected rewiring eigenvector of `Delta F`.
-
-All-vectors mode:
-
-- The first eight saved eigenvectors are considered.
-- Each residue is assigned to the eigenvector with the largest contribution `|lambda_k| * |v_ki|`.
-- The eigenvector identity defines hue; contribution strength defines intensity.
-
-Residue numbering:
-
-- `PDB/auth residue id` uses numbers parsed from stored residue keys such as `res_193`.
-- `Sequential label_seq_id` uses residue index + 1 and is useful when the PDB starts at 1 while PHASE residue keys use a different numbering.
-
-## Differential Laplacian Allostery Mode
-
-PHASE also stores a normalized allostery view for every pair analysis.
-
-For a pair ordered as `state A -> state B`, the raw pair matrix is:
-
-```text
-Delta F = F_B - F_A
-```
-
-The signed normalized Laplacian is then computed with absolute degree:
-
-```text
-D_i = sum_j |Delta F[i,j]|
-L[i,i] = 1                            if D_i > 0
-L[i,j] = -Delta F[i,j] / sqrt(D_i D_j) if i != j and D_i,D_j > 0
-L[i,j] = 0                             otherwise
-```
-
-This normalization reduces the dominance of intrinsically high-degree flexible residues and makes sparse allosteric rewiring communities easier to detect.
-
-Interpretation:
-
-- `Delta F spectral rewiring` is the raw signed coupling-change view.
-- `Differential Laplacian allostery` is the normalized graph view.
-- Laplacian eigenvalues are shown ascending.
-- The stored Laplacian vectors are the smallest non-zero modes, i.e. Fiedler-like sectors.
-- Red and blue in pair views are opposite signed sides of the selected sector.
-
-If a pair analysis was created before Laplacian support, rerun Hamiltonian spectral analysis. Existing pair folders are upgraded automatically because PHASE now checks for the Laplacian arrays before skipping a pair.
-
-Important stored arrays for pair analyses:
-
-- `laplacian_matrix`: signed normalized Laplacian `L`.
-- `laplacian_degree`: absolute degree vector `D`.
-- `laplacian_eigenvalues`: full ascending Laplacian spectrum.
-- `laplacian_top_eigenvalues`: selected smallest non-zero eigenvalues.
-- `laplacian_top_eigenvectors`: selected Fiedler-like eigenvectors, shape `(top_k, n_residues)`.
-- `laplacian_top_indices`: indices of selected modes in the full ascending spectrum.

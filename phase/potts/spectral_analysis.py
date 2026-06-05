@@ -226,6 +226,25 @@ def signed_normalized_laplacian(delta_matrix: np.ndarray) -> tuple[np.ndarray, n
     return 0.5 * (L + L.T), degree
 
 
+def normalized_laplacian(adjacency: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Return the normalized graph Laplacian for a non-negative adjacency matrix.
+
+    This is the v3 Laplacian used for both structural single-state communities
+    (A=F) and functional pair communities (A=|DeltaF|).
+    """
+    A = np.asarray(adjacency, dtype=np.float64)
+    A = np.abs(0.5 * (A + A.T))
+    np.fill_diagonal(A, 0.0)
+    degree = np.sum(A, axis=1)
+    L = np.zeros_like(A, dtype=np.float64)
+    active = degree > 0
+    L[active, active] = 1.0
+    denom = np.sqrt(np.outer(degree, degree))
+    mask = (denom > 0) & (~np.eye(A.shape[0], dtype=bool))
+    L[mask] = -A[mask] / denom[mask]
+    return 0.5 * (L + L.T), degree
+
+
 def laplacian_spectral_decomposition(
     laplacian: np.ndarray,
     *,
@@ -247,6 +266,168 @@ def laplacian_spectral_decomposition(
     top_values = values_sorted[selected]
     top_vectors = vectors_sorted[:, selected]
     return values_sorted, vectors_sorted, top_values, top_vectors, selected.astype(np.int32)
+
+
+def _choose_laplacian_embedding_indices(
+    values: np.ndarray,
+    *,
+    top_k: int = 20,
+    zero_tol: float = 1e-10,
+) -> np.ndarray:
+    vals = np.asarray(values, dtype=np.float64)
+    nonzero = np.where(vals > float(zero_tol))[0]
+    if nonzero.size == 0:
+        return np.asarray([0], dtype=np.int32) if vals.size else np.asarray([], dtype=np.int32)
+    candidates = nonzero[: min(max(1, int(top_k)), int(nonzero.size))]
+    if candidates.size <= 2:
+        return candidates.astype(np.int32)
+    candidate_values = vals[candidates]
+    gaps = np.diff(candidate_values)
+    if gaps.size == 0 or not np.any(np.isfinite(gaps)):
+        return candidates[:2].astype(np.int32)
+    # Choose all modes before the largest eigengap, with at least two modes
+    # when available. This follows the usual spectral-clustering heuristic.
+    k = int(np.nanargmax(gaps)) + 1
+    k = max(2, min(k, int(candidates.size)))
+    return candidates[:k].astype(np.int32)
+
+
+def _row_normalize(matrix: np.ndarray) -> np.ndarray:
+    arr = np.asarray(matrix, dtype=np.float64)
+    if arr.ndim != 2:
+        return np.zeros((0, 0), dtype=np.float64)
+    denom = np.linalg.norm(arr, axis=1, keepdims=True)
+    out = np.zeros_like(arr, dtype=np.float64)
+    np.divide(arr, denom, out=out, where=denom > 0)
+    return out
+
+
+def spectral_embedding_from_laplacian(
+    eigenvalues: np.ndarray,
+    eigenvectors: np.ndarray,
+    *,
+    top_k: int = 20,
+    zero_tol: float = 1e-10,
+) -> tuple[np.ndarray, np.ndarray]:
+    selected = _choose_laplacian_embedding_indices(eigenvalues, top_k=top_k, zero_tol=zero_tol)
+    if selected.size == 0:
+        return np.zeros((0, 0), dtype=np.float64), selected
+    vectors = np.asarray(eigenvectors, dtype=np.float64)
+    embedding = _row_normalize(vectors[:, selected])
+    return embedding, selected
+
+
+def _fallback_communities(embedding: np.ndarray) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
+    n = int(np.asarray(embedding).shape[0])
+    labels = np.ones(n, dtype=np.int32)
+    return labels, labels.copy(), {
+        "method": "fallback_single_community",
+        "distance_metric": "cosine",
+        "n_communities": 1 if n else 0,
+        "warning": "DADApy clustering was unavailable or failed; assigned one community.",
+    }
+
+
+def dadapy_density_peak_communities(
+    embedding: np.ndarray,
+    *,
+    maxk: int | None = None,
+    density_k: int | None = None,
+) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
+    """Cluster row-normalized spectral embedding with DADApy on cosine distances."""
+    Y = _row_normalize(np.asarray(embedding, dtype=np.float64))
+    n = int(Y.shape[0])
+    if n <= 1 or Y.shape[1] == 0:
+        return _fallback_communities(Y)
+    cosine = 1.0 - np.clip(Y @ Y.T, -1.0, 1.0)
+    cosine = np.clip(0.5 * (cosine + cosine.T), 0.0, 2.0)
+    np.fill_diagonal(cosine, 0.0)
+    kmax = int(maxk) if maxk is not None else min(n - 1, max(10, int(np.ceil(np.sqrt(n))) * 2))
+    kmax = max(1, min(kmax, n - 1))
+    dk = int(density_k) if density_k is not None else min(10, kmax)
+    dk = max(1, min(dk, kmax))
+    try:
+        from dadapy.data import Data  # type: ignore
+
+        dp_data = Data(distances=cosine, maxk=kmax, verbose=False, n_jobs=1)
+        dp_data.compute_density_kNN(k=dk)
+        assigned, halo = dp_data.compute_clustering_ADP(Z=1.65)
+        labels = np.asarray(assigned, dtype=np.int32) + 1
+        halo_labels = np.asarray(halo, dtype=np.int32) + 1
+        n_communities = int(len(set(labels.tolist())))
+        return labels, halo_labels, {
+            "method": "dadapy_density_peak_adp",
+            "distance_metric": "cosine",
+            "maxk": int(kmax),
+            "density_k": int(dk),
+            "n_communities": n_communities,
+            "cluster_centers": [int(x) for x in getattr(dp_data, "cluster_centers", [])],
+        }
+    except Exception as exc:
+        labels, halo, diagnostics = _fallback_communities(Y)
+        diagnostics["error"] = f"{type(exc).__name__}: {exc}"
+        return labels, halo, diagnostics
+
+
+def _community_sizes(labels: np.ndarray) -> np.ndarray:
+    arr = np.asarray(labels, dtype=np.int32)
+    if arr.size == 0:
+        return np.zeros((0, 2), dtype=np.int32)
+    unique, counts = np.unique(arr, return_counts=True)
+    order = np.argsort(unique)
+    return np.column_stack([unique[order], counts[order]]).astype(np.int32)
+
+
+def _community_order(labels: np.ndarray) -> np.ndarray:
+    arr = np.asarray(labels, dtype=np.int32)
+    if arr.size == 0:
+        return np.zeros((0,), dtype=np.int32)
+    return np.lexsort((np.arange(arr.size), arr)).astype(np.int32)
+
+
+def _community_interaction_matrix(source_matrix: np.ndarray, labels: np.ndarray) -> np.ndarray:
+    M = np.asarray(source_matrix, dtype=np.float64)
+    labs = np.asarray(labels, dtype=np.int32)
+    unique = np.unique(labs)
+    out = np.zeros((unique.size, unique.size), dtype=np.float64)
+    index = {int(label): idx for idx, label in enumerate(unique.tolist())}
+    for i in range(M.shape[0]):
+        ci = index.get(int(labs[i]))
+        if ci is None:
+            continue
+        for j in range(i + 1, M.shape[1]):
+            cj = index.get(int(labs[j]))
+            if cj is None:
+                continue
+            value = float(abs(M[i, j]))
+            out[ci, cj] += value
+            if ci != cj:
+                out[cj, ci] += value
+    return out
+
+
+def _laplacian_community_bundle(source_matrix: np.ndarray, *, top_k: int = 20) -> dict[str, np.ndarray | dict[str, Any]]:
+    laplacian, degree = normalized_laplacian(source_matrix)
+    values, vectors, top_values, top_vectors, top_indices = laplacian_spectral_decomposition(laplacian, top_k=top_k)
+    embedding, embedding_indices = spectral_embedding_from_laplacian(values, vectors, top_k=top_k)
+    community_ids, community_halo_ids, diagnostics = dadapy_density_peak_communities(embedding)
+    order = _community_order(community_ids)
+    return {
+        "laplacian_matrix": laplacian,
+        "laplacian_degree": degree,
+        "laplacian_eigenvalues": values,
+        "laplacian_top_eigenvalues": top_values,
+        "laplacian_top_eigenvectors": top_vectors,
+        "laplacian_top_indices": top_indices,
+        "laplacian_embedding": embedding,
+        "laplacian_embedding_indices": embedding_indices,
+        "community_ids": community_ids,
+        "community_halo_ids": community_halo_ids,
+        "community_sizes": _community_sizes(community_ids),
+        "community_matrix_order": order,
+        "community_interaction_matrix": _community_interaction_matrix(source_matrix, community_ids),
+        "community_diagnostics": diagnostics,
+    }
 
 
 def _load_residue_keys(cluster_dir: Path, n_res: int) -> np.ndarray:
@@ -284,6 +465,32 @@ def _analysis_exists(cluster_dir: Path, kind: str, analysis_id: str) -> bool:
     return (d / ANALYSIS_METADATA_FILENAME).exists() and (d / "analysis.npz").exists()
 
 
+def _npz_has_fields(npz_path: Path, required: set[str]) -> bool:
+    if not npz_path.exists():
+        return False
+    try:
+        with np.load(npz_path, allow_pickle=False) as data:
+            return required.issubset(set(data.files))
+    except Exception:
+        return False
+
+
+def _single_npz_has_v3_fields(npz_path: Path) -> bool:
+    return _npz_has_fields(
+        npz_path,
+        {
+            "laplacian_matrix",
+            "laplacian_source_matrix",
+            "laplacian_embedding",
+            "laplacian_embedding_indices",
+            "community_ids",
+            "community_sizes",
+            "community_matrix_order",
+            "community_interaction_matrix",
+        },
+    )
+
+
 def compute_single_spectral_analysis(
     *,
     store: ProjectStore,
@@ -303,7 +510,7 @@ def compute_single_spectral_analysis(
     analysis_dir = cluster_dir / "analyses" / SINGLE_KIND / analysis_id
     meta_path = analysis_dir / ANALYSIS_METADATA_FILENAME
     npz_path = analysis_dir / "analysis.npz"
-    if not overwrite and meta_path.exists() and npz_path.exists():
+    if not overwrite and meta_path.exists() and _single_npz_has_v3_fields(npz_path):
         return {"metadata": _read_json(meta_path), "analysis_npz": str(npz_path), "created": False}
 
     analysis_dir.mkdir(parents=True, exist_ok=True)
@@ -311,11 +518,13 @@ def compute_single_spectral_analysis(
     model = load_potts_model(model_path)
     F = frobenius_coupling_matrix(model)
     eigenvalues, _, top_values, top_vectors = spectral_decomposition(F, top_k=top_k, sort_mode="desc")
+    community = _laplacian_community_bundle(F, top_k=top_k)
     residue_keys = _load_residue_keys(cluster_dir, F.shape[0])
     strength = np.asarray(F.sum(axis=1), dtype=np.float32)
+    community_diagnostics = community["community_diagnostics"]
     np.savez_compressed(
         npz_path,
-        analysis_format_version=np.asarray([1], dtype=np.int32),
+        analysis_format_version=np.asarray([3], dtype=np.int32),
         mode=np.asarray(["single"], dtype=str),
         state_id=np.asarray([state_id], dtype=str),
         state_name=np.asarray([state_names.get(state_id, state_id)], dtype=str),
@@ -327,6 +536,21 @@ def compute_single_spectral_analysis(
         eigenvalues=np.asarray(eigenvalues, dtype=np.float32),
         top_eigenvalues=np.asarray(top_values, dtype=np.float32),
         top_eigenvectors=np.asarray(top_vectors.T, dtype=np.float32),
+        laplacian_source_matrix=np.asarray(F, dtype=np.float32),
+        laplacian_matrix=np.asarray(community["laplacian_matrix"], dtype=np.float32),
+        laplacian_degree=np.asarray(community["laplacian_degree"], dtype=np.float32),
+        laplacian_eigenvalues=np.asarray(community["laplacian_eigenvalues"], dtype=np.float32),
+        laplacian_top_eigenvalues=np.asarray(community["laplacian_top_eigenvalues"], dtype=np.float32),
+        laplacian_top_eigenvectors=np.asarray(community["laplacian_top_eigenvectors"], dtype=np.float32).T,
+        laplacian_top_indices=np.asarray(community["laplacian_top_indices"], dtype=np.int32),
+        laplacian_embedding=np.asarray(community["laplacian_embedding"], dtype=np.float32),
+        laplacian_embedding_indices=np.asarray(community["laplacian_embedding_indices"], dtype=np.int32),
+        community_ids=np.asarray(community["community_ids"], dtype=np.int32),
+        community_halo_ids=np.asarray(community["community_halo_ids"], dtype=np.int32),
+        community_sizes=np.asarray(community["community_sizes"], dtype=np.int32),
+        community_matrix_order=np.asarray(community["community_matrix_order"], dtype=np.int32),
+        community_interaction_matrix=np.asarray(community["community_interaction_matrix"], dtype=np.float32),
+        community_diagnostics_json=np.asarray([json.dumps(_convert_nan_to_none(community_diagnostics))], dtype=str),
     )
     now = _utc_now()
     meta = {
@@ -348,28 +572,35 @@ def compute_single_spectral_analysis(
             "n_edges": int(np.count_nonzero(np.triu(F, 1))),
             "top_k": int(top_vectors.shape[1]),
             "largest_eigenvalue": float(top_values[0]) if top_values.size else None,
+            "laplacian_top_k": int(np.asarray(community["laplacian_top_eigenvectors"]).shape[1]),
+            "laplacian_embedding_k": int(np.asarray(community["laplacian_embedding"]).shape[1]),
+            "n_communities": int(np.asarray(community["community_sizes"]).shape[0]),
+            "community_method": str(community_diagnostics.get("method") if isinstance(community_diagnostics, dict) else ""),
         },
     }
     _write_json(meta_path, meta)
     return {"metadata": meta, "analysis_npz": str(npz_path), "created": True}
 
 
-def _pair_npz_has_laplacian(npz_path: Path) -> bool:
-    if not npz_path.exists():
-        return False
-    try:
-        with np.load(npz_path, allow_pickle=False) as data:
-            required = {
-                "laplacian_matrix",
-                "laplacian_degree",
-                "laplacian_eigenvalues",
-                "laplacian_top_eigenvalues",
-                "laplacian_top_eigenvectors",
-                "laplacian_top_indices",
-            }
-            return required.issubset(set(data.files))
-    except Exception:
-        return False
+def _pair_npz_has_v3_fields(npz_path: Path) -> bool:
+    return _npz_has_fields(
+        npz_path,
+        {
+            "laplacian_matrix",
+            "laplacian_source_matrix",
+            "laplacian_degree",
+            "laplacian_eigenvalues",
+            "laplacian_top_eigenvalues",
+            "laplacian_top_eigenvectors",
+            "laplacian_top_indices",
+            "laplacian_embedding",
+            "laplacian_embedding_indices",
+            "community_ids",
+            "community_sizes",
+            "community_matrix_order",
+            "community_interaction_matrix",
+        },
+    )
 
 
 def compute_pair_spectral_analysis(
@@ -390,7 +621,7 @@ def compute_pair_spectral_analysis(
     analysis_dir = cluster_dir / "analyses" / PAIR_KIND / analysis_id
     meta_path = analysis_dir / ANALYSIS_METADATA_FILENAME
     npz_path = analysis_dir / "analysis.npz"
-    if not overwrite and meta_path.exists() and _pair_npz_has_laplacian(npz_path):
+    if not overwrite and meta_path.exists() and _pair_npz_has_v3_fields(npz_path):
         return {"metadata": _read_json(meta_path), "analysis_npz": str(npz_path), "created": False}
 
     single_a = cluster_dir / "analyses" / SINGLE_KIND / _single_id(state_a_id) / "analysis.npz"
@@ -406,17 +637,12 @@ def compute_pair_spectral_analysis(
         raise ValueError(f"Single-state Frobenius matrices have different shapes for {state_a_id} and {state_b_id}.")
     dF = 0.5 * ((F_b - F_a) + (F_b - F_a).T)
     eigenvalues, _, top_values, top_vectors = spectral_decomposition(dF, top_k=top_k, sort_mode="abs")
-    laplacian, laplacian_degree = signed_normalized_laplacian(dF)
-    (
-        laplacian_eigenvalues,
-        _,
-        laplacian_top_values,
-        laplacian_top_vectors,
-        laplacian_top_indices,
-    ) = laplacian_spectral_decomposition(laplacian, top_k=top_k)
+    laplacian_source = np.abs(dF)
+    community = _laplacian_community_bundle(laplacian_source, top_k=top_k)
+    community_diagnostics = community["community_diagnostics"]
     np.savez_compressed(
         npz_path,
-        analysis_format_version=np.asarray([2], dtype=np.int32),
+        analysis_format_version=np.asarray([3], dtype=np.int32),
         mode=np.asarray(["pair"], dtype=str),
         state_a_id=np.asarray([state_a_id], dtype=str),
         state_b_id=np.asarray([state_b_id], dtype=str),
@@ -428,12 +654,21 @@ def compute_pair_spectral_analysis(
         eigenvalues=np.asarray(eigenvalues, dtype=np.float32),
         top_eigenvalues=np.asarray(top_values, dtype=np.float32),
         top_eigenvectors=np.asarray(top_vectors.T, dtype=np.float32),
-        laplacian_matrix=np.asarray(laplacian, dtype=np.float32),
-        laplacian_degree=np.asarray(laplacian_degree, dtype=np.float32),
-        laplacian_eigenvalues=np.asarray(laplacian_eigenvalues, dtype=np.float32),
-        laplacian_top_eigenvalues=np.asarray(laplacian_top_values, dtype=np.float32),
-        laplacian_top_eigenvectors=np.asarray(laplacian_top_vectors.T, dtype=np.float32),
-        laplacian_top_indices=np.asarray(laplacian_top_indices, dtype=np.int32),
+        laplacian_source_matrix=np.asarray(laplacian_source, dtype=np.float32),
+        laplacian_matrix=np.asarray(community["laplacian_matrix"], dtype=np.float32),
+        laplacian_degree=np.asarray(community["laplacian_degree"], dtype=np.float32),
+        laplacian_eigenvalues=np.asarray(community["laplacian_eigenvalues"], dtype=np.float32),
+        laplacian_top_eigenvalues=np.asarray(community["laplacian_top_eigenvalues"], dtype=np.float32),
+        laplacian_top_eigenvectors=np.asarray(community["laplacian_top_eigenvectors"], dtype=np.float32).T,
+        laplacian_top_indices=np.asarray(community["laplacian_top_indices"], dtype=np.int32),
+        laplacian_embedding=np.asarray(community["laplacian_embedding"], dtype=np.float32),
+        laplacian_embedding_indices=np.asarray(community["laplacian_embedding_indices"], dtype=np.int32),
+        community_ids=np.asarray(community["community_ids"], dtype=np.int32),
+        community_halo_ids=np.asarray(community["community_halo_ids"], dtype=np.int32),
+        community_sizes=np.asarray(community["community_sizes"], dtype=np.int32),
+        community_matrix_order=np.asarray(community["community_matrix_order"], dtype=np.int32),
+        community_interaction_matrix=np.asarray(community["community_interaction_matrix"], dtype=np.float32),
+        community_diagnostics_json=np.asarray([json.dumps(_convert_nan_to_none(community_diagnostics))], dtype=str),
     )
     now = _utc_now()
     meta = {
@@ -454,9 +689,12 @@ def compute_pair_spectral_analysis(
             "n_changed_edges": int(np.count_nonzero(np.triu(np.abs(dF) > 0, 1))),
             "top_k": int(top_vectors.shape[1]),
             "principal_abs_eigenvalue": float(top_values[0]) if top_values.size else None,
-            "laplacian_top_k": int(laplacian_top_vectors.shape[1]),
-            "laplacian_first_nonzero_eigenvalue": float(laplacian_top_values[0]) if laplacian_top_values.size else None,
-            "laplacian_zero_degree_residues": int(np.count_nonzero(laplacian_degree <= 0)),
+            "laplacian_top_k": int(np.asarray(community["laplacian_top_eigenvectors"]).shape[1]),
+            "laplacian_embedding_k": int(np.asarray(community["laplacian_embedding"]).shape[1]),
+            "laplacian_first_nonzero_eigenvalue": float(np.asarray(community["laplacian_top_eigenvalues"])[0]) if np.asarray(community["laplacian_top_eigenvalues"]).size else None,
+            "laplacian_zero_degree_residues": int(np.count_nonzero(np.asarray(community["laplacian_degree"]) <= 0)),
+            "n_communities": int(np.asarray(community["community_sizes"]).shape[0]),
+            "community_method": str(community_diagnostics.get("method") if isinstance(community_diagnostics, dict) else ""),
         },
     }
     _write_json(meta_path, meta)
@@ -537,7 +775,7 @@ def upsert_hamiltonian_spectral_batch(
         progress_callback("Computing pair Hamiltonian spectra", 0, max(1, pair_total))
     pairs: list[dict[str, Any]] = []
     for idx, (a, b) in enumerate(pair_candidates):
-        if not overwrite and _pair_npz_has_laplacian(cluster_dir / "analyses" / PAIR_KIND / _pair_id(a, b) / "analysis.npz"):
+        if not overwrite and _pair_npz_has_v3_fields(cluster_dir / "analyses" / PAIR_KIND / _pair_id(a, b) / "analysis.npz"):
             continue
         out = compute_pair_spectral_analysis(
             store=store,
