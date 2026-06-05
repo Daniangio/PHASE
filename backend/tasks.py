@@ -34,6 +34,7 @@ from phase.potts.analysis_run import (
     _single_frame_ligand_completion_worker,
 )
 from phase.potts.transient_analysis import run_transient_state_analysis
+from phase.potts.spectral_analysis import upsert_hamiltonian_spectral_batch
 from phase.potts.orchestration import (
     aggregate_gibbs_relaxation_batch,
     aggregate_ligand_completion_batch,
@@ -2800,6 +2801,107 @@ def run_delta_energy_job(
     save_progress("Delta-energy analysis completed", 100)
     return sanitized_payload
 
+
+
+def run_hamiltonian_spectral_job(
+    job_uuid: str,
+    dataset_ref: Dict[str, str],
+    params: Dict[str, Any],
+):
+    """Incremental single-state and pair Hamiltonian spectral analysis."""
+    job = get_current_job()
+    start_time = datetime.utcnow()
+    rq_job_id = job.id if job else f"hamiltonian-spectral-{job_uuid}"
+
+    project_id = dataset_ref.get("project_id")
+    system_id = dataset_ref.get("system_id")
+    cluster_id = dataset_ref.get("cluster_id")
+    if not project_id or not system_id or not cluster_id:
+        raise ValueError("hamiltonian_spectral requires project_id/system_id/cluster_id.")
+
+    results_dirs = project_store.ensure_results_directories(project_id, system_id)
+    result_filepath = results_dirs["jobs_dir"] / f"{job_uuid}.json"
+    result_payload: Dict[str, Any] = {
+        "job_id": job_uuid,
+        "rq_job_id": rq_job_id,
+        "analysis_type": "hamiltonian_spectral",
+        "status": "started",
+        "created_at": start_time.isoformat(),
+        "params": params,
+        "results": None,
+        "system_reference": {
+            "project_id": project_id,
+            "system_id": system_id,
+            "cluster_id": cluster_id,
+        },
+        "error": None,
+        "completed_at": None,
+    }
+
+    def save_progress(status_msg: str, progress: int):
+        if job:
+            job.meta["status"] = status_msg
+            job.meta["progress"] = progress
+            job.save_meta()
+        print(f"[HamiltonianSpectral {job_uuid}] {status_msg}")
+
+    def write_result_to_disk(payload: Dict[str, Any]):
+        try:
+            with open(result_filepath, "w") as f:
+                json.dump(payload, f, indent=2)
+        except Exception as e:
+            print(f"CRITICAL: Failed to save result file {result_filepath}: {e}")
+            payload["status"] = "failed"
+            payload["error"] = f"Failed to save result file: {e}"
+
+    try:
+        save_progress("Initializing...", 0)
+        write_result_to_disk(result_payload)
+
+        state_ids = params.get("state_ids")
+        if isinstance(state_ids, str):
+            state_ids = [s.strip() for s in state_ids.split(",") if s.strip()]
+        if not isinstance(state_ids, list) or not state_ids:
+            raise ValueError("hamiltonian_spectral requires non-empty state_ids.")
+        top_k = int(params.get("top_k") or 20)
+        overwrite = bool(params.get("overwrite", False))
+
+        def progress_cb(message: str, current: int, total: int):
+            if total <= 0:
+                return
+            ratio = max(0.0, min(1.0, float(current) / float(total)))
+            base = 10 if "single" in message.lower() else 55
+            span = 40 if "single" in message.lower() else 35
+            save_progress(message, base + int(span * ratio))
+
+        out = upsert_hamiltonian_spectral_batch(
+            project_id=project_id,
+            system_id=system_id,
+            cluster_id=cluster_id,
+            state_ids=state_ids,
+            top_k=top_k,
+            overwrite=overwrite,
+            progress_callback=progress_cb,
+        )
+
+        result_payload["status"] = "finished"
+        result_payload["results"] = out
+
+    except Exception as e:
+        print(f"[HamiltonianSpectral {job_uuid}] FAILED: {e}")
+        traceback.print_exc()
+        result_payload["status"] = "failed"
+        result_payload["error"] = str(e)
+        raise e
+
+    finally:
+        save_progress("Saving final result", 95)
+        result_payload["completed_at"] = datetime.utcnow().isoformat()
+        sanitized_payload = _convert_nan_to_none(result_payload)
+        write_result_to_disk(sanitized_payload)
+
+    save_progress("Hamiltonian spectral analysis completed", 100)
+    return sanitized_payload
 
 def run_delta_js_job(
     job_uuid: str,

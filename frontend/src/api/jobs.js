@@ -77,6 +77,13 @@ export function submitDeltaEnergyJob(payload) {
   });
 }
 
+export function submitHamiltonianSpectralJob(payload) {
+  return requestJSON('/submit/hamiltonian_spectral', {
+    method: 'POST',
+    body: payload,
+  });
+}
+
 export function submitDeltaJsJob(payload) {
   return requestJSON('/submit/delta_js', {
     method: 'POST',

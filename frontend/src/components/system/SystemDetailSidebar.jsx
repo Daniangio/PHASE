@@ -70,6 +70,14 @@ export default function SystemDetailSidebar({
         <Eye className="h-4 w-4" />
         NN mismatch graph
       </button>
+      <button
+        type="button"
+        onClick={() => navigate(`/projects/${projectId}/systems/${systemId}/sampling/hamiltonian_spectral${buildSamplingSuffix()}`)}
+        className="w-full text-xs px-3 py-2 rounded-md border border-gray-600 text-gray-200 hover:bg-gray-700/40 inline-flex items-center justify-center gap-2"
+      >
+        <Eye className="h-4 w-4" />
+        Hamiltonian spectra
+      </button>
       <div className="grid grid-cols-2 gap-2">
         <button
           type="button"

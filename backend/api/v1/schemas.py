@@ -243,6 +243,15 @@ class DeltaEnergyJobRequest(BaseModel):
     workers: Optional[int] = None
 
 
+class HamiltonianSpectralJobRequest(BaseModel):
+    project_id: str
+    system_id: str
+    cluster_id: str
+    state_ids: List[str]
+    top_k: Optional[int] = None
+    overwrite: Optional[bool] = None
+
+
 class DeltaJsJobRequest(BaseModel):
     """
     Incremental delta-JS A/B/Other analysis for a fixed (model A, model B) pair.
