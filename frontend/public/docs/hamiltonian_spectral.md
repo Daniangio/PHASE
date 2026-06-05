@@ -130,3 +130,43 @@ Residue numbering:
 
 - `PDB/auth residue id` uses numbers parsed from stored residue keys such as `res_193`.
 - `Sequential label_seq_id` uses residue index + 1 and is useful when the PDB starts at 1 while PHASE residue keys use a different numbering.
+
+## Differential Laplacian Allostery Mode
+
+PHASE also stores a normalized allostery view for every pair analysis.
+
+For a pair ordered as `state A -> state B`, the raw pair matrix is:
+
+```text
+Delta F = F_B - F_A
+```
+
+The signed normalized Laplacian is then computed with absolute degree:
+
+```text
+D_i = sum_j |Delta F[i,j]|
+L[i,i] = 1                            if D_i > 0
+L[i,j] = -Delta F[i,j] / sqrt(D_i D_j) if i != j and D_i,D_j > 0
+L[i,j] = 0                             otherwise
+```
+
+This normalization reduces the dominance of intrinsically high-degree flexible residues and makes sparse allosteric rewiring communities easier to detect.
+
+Interpretation:
+
+- `Delta F spectral rewiring` is the raw signed coupling-change view.
+- `Differential Laplacian allostery` is the normalized graph view.
+- Laplacian eigenvalues are shown ascending.
+- The stored Laplacian vectors are the smallest non-zero modes, i.e. Fiedler-like sectors.
+- Red and blue in pair views are opposite signed sides of the selected sector.
+
+If a pair analysis was created before Laplacian support, rerun Hamiltonian spectral analysis. Existing pair folders are upgraded automatically because PHASE now checks for the Laplacian arrays before skipping a pair.
+
+Important stored arrays for pair analyses:
+
+- `laplacian_matrix`: signed normalized Laplacian `L`.
+- `laplacian_degree`: absolute degree vector `D`.
+- `laplacian_eigenvalues`: full ascending Laplacian spectrum.
+- `laplacian_top_eigenvalues`: selected smallest non-zero eigenvalues.
+- `laplacian_top_eigenvectors`: selected Fiedler-like eigenvectors, shape `(top_k, n_residues)`.
+- `laplacian_top_indices`: indices of selected modes in the full ascending spectrum.

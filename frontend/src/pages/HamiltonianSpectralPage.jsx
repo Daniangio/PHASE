@@ -53,6 +53,7 @@ export default function HamiltonianSpectralPage() {
   const [systemError, setSystemError] = useState(null);
   const [selectedClusterId, setSelectedClusterId] = useState('');
   const [mode, setMode] = useState('single');
+  const [spectralView, setSpectralView] = useState('laplacian');
   const [analyses, setAnalyses] = useState([]);
   const [selectedAnalysisId, setSelectedAnalysisId] = useState('');
   const [analysisData, setAnalysisData] = useState(null);
@@ -204,20 +205,23 @@ export default function HamiltonianSpectralPage() {
   const meta = analysisData?.metadata || null;
   const data = analysisData?.data || {};
   const labels = useMemo(() => safeArray(data.residue_keys).map(String), [data.residue_keys]);
-  const matrix = useMemo(() => safeArray(data.matrix), [data.matrix]);
-  const eigenvalues = useMemo(() => safeArray(data.eigenvalues).map(Number), [data.eigenvalues]);
-  const topValues = useMemo(() => safeArray(data.top_eigenvalues).map(Number), [data.top_eigenvalues]);
-  const topVectors = useMemo(() => safeArray(data.top_eigenvectors), [data.top_eigenvectors]);
+  const pairMode = mode === 'pair';
+  const hasLaplacian = pairMode && Array.isArray(data.laplacian_matrix) && Array.isArray(data.laplacian_top_eigenvectors);
+  const viewMode = pairMode && spectralView === 'laplacian' && hasLaplacian ? 'laplacian' : 'absolute';
+  const matrix = useMemo(() => (viewMode === 'laplacian' ? safeArray(data.laplacian_matrix) : safeArray(data.matrix)), [data.laplacian_matrix, data.matrix, viewMode]);
+  const eigenvalues = useMemo(() => safeArray(viewMode === 'laplacian' ? data.laplacian_eigenvalues : data.eigenvalues).map(Number), [data.laplacian_eigenvalues, data.eigenvalues, viewMode]);
+  const topValues = useMemo(() => safeArray(viewMode === 'laplacian' ? data.laplacian_top_eigenvalues : data.top_eigenvalues).map(Number), [data.laplacian_top_eigenvalues, data.top_eigenvalues, viewMode]);
+  const topVectors = useMemo(() => safeArray(viewMode === 'laplacian' ? data.laplacian_top_eigenvectors : data.top_eigenvectors), [data.laplacian_top_eigenvectors, data.top_eigenvectors, viewMode]);
   const selectedVector = useMemo(() => safeArray(topVectors[Math.min(componentIndex, Math.max(0, topVectors.length - 1))]).map(Number), [topVectors, componentIndex]);
   const selectedEigenvalue = topValues[Math.min(componentIndex, Math.max(0, topValues.length - 1))];
   const topEdges = useMemo(() => buildTopEdges(matrix, labels, edgeLimit), [matrix, labels, edgeLimit]);
-  const pairMode = mode === 'pair';
+  const viewTitle = viewMode === 'laplacian' ? 'Differential Laplacian allostery' : (pairMode ? 'ΔF spectral rewiring' : 'Absolute entropy / Frobenius');
 
   const eigenPlot = useMemo(() => ({
-    data: [{ x: eigenvalues.map((_, i) => i + 1), y: eigenvalues, type: 'bar', marker: { color: pairMode ? '#f59e0b' : '#22d3ee' } }],
-    layout: { title: 'Eigenvalue spectrum', paper_bgcolor: '#111827', plot_bgcolor: '#111827', font: { color: '#e5e7eb' }, height: 260, margin: { l: 55, r: 15, t: 35, b: 45 }, xaxis: { title: 'component' }, yaxis: { title: pairMode ? 'ΔF eigenvalue' : 'F eigenvalue' } },
+    data: [{ x: eigenvalues.map((_, i) => i + 1), y: eigenvalues, type: 'bar', marker: { color: viewMode === 'laplacian' ? '#a855f7' : (pairMode ? '#f59e0b' : '#22d3ee') } }],
+    layout: { title: viewMode === 'laplacian' ? 'Laplacian spectrum (ascending)' : 'Eigenvalue spectrum', paper_bgcolor: '#111827', plot_bgcolor: '#111827', font: { color: '#e5e7eb' }, height: 260, margin: { l: 55, r: 15, t: 35, b: 45 }, xaxis: { title: 'component' }, yaxis: { title: viewMode === 'laplacian' ? 'L eigenvalue' : (pairMode ? 'ΔF eigenvalue' : 'F eigenvalue') } },
     config: { responsive: true, displayModeBar: false },
-  }), [eigenvalues, pairMode]);
+  }), [eigenvalues, pairMode, viewMode]);
 
   const vectorPlot = useMemo(() => ({
     data: [{
@@ -227,15 +231,15 @@ export default function HamiltonianSpectralPage() {
       marker: { color: selectedVector.map((v) => (pairMode ? (v >= 0 ? '#ef4444' : '#3b82f6') : '#22c55e')) },
       hovertemplate: '%{x}<br>loading=%{y:.5f}<extra></extra>',
     }],
-    layout: { title: `${pairMode ? 'Signed differential' : 'Absolute'} residue loadings · component ${componentIndex + 1} · λ=${fmt(selectedEigenvalue)}`, paper_bgcolor: '#111827', plot_bgcolor: '#111827', font: { color: '#e5e7eb' }, height: 330, margin: { l: 55, r: 15, t: 45, b: 95 }, xaxis: { tickangle: -70, automargin: true }, yaxis: { title: pairMode ? 'v_i' : '|v_i|' } },
+    layout: { title: `${pairMode ? 'Signed' : 'Absolute'} residue loadings · ${viewTitle} · component ${componentIndex + 1} · λ=${fmt(selectedEigenvalue)}`, paper_bgcolor: '#111827', plot_bgcolor: '#111827', font: { color: '#e5e7eb' }, height: 330, margin: { l: 55, r: 15, t: 45, b: 95 }, xaxis: { tickangle: -70, automargin: true }, yaxis: { title: pairMode ? 'v_i' : '|v_i|' } },
     config: { responsive: true, displayModeBar: false },
-  }), [labels, selectedVector, pairMode, componentIndex, selectedEigenvalue]);
+  }), [labels, selectedVector, pairMode, componentIndex, selectedEigenvalue, viewTitle]);
 
   const heatmapPlot = useMemo(() => ({
-    data: [{ z: matrix, x: labels, y: labels, type: 'heatmap', colorscale: pairMode ? 'RdBu' : 'Viridis', reversescale: pairMode, zmid: pairMode ? 0 : undefined, colorbar: { title: pairMode ? 'ΔF' : 'F' } }],
-    layout: { title: pairMode ? 'Differential Frobenius matrix ΔF = F_B - F_A' : 'Frobenius coupling matrix F', paper_bgcolor: '#111827', plot_bgcolor: '#111827', font: { color: '#e5e7eb' }, height: 520, margin: { l: 90, r: 20, t: 45, b: 90 }, xaxis: { tickangle: -70, automargin: true }, yaxis: { automargin: true } },
+    data: [{ z: matrix, x: labels, y: labels, type: 'heatmap', colorscale: pairMode ? 'RdBu' : 'Viridis', reversescale: pairMode, zmid: pairMode ? 0 : undefined, colorbar: { title: viewMode === 'laplacian' ? 'L' : (pairMode ? 'ΔF' : 'F') } }],
+    layout: { title: viewMode === 'laplacian' ? 'Signed normalized Laplacian L' : (pairMode ? 'Differential Frobenius matrix ΔF = F_B - F_A' : 'Frobenius coupling matrix F'), paper_bgcolor: '#111827', plot_bgcolor: '#111827', font: { color: '#e5e7eb' }, height: 520, margin: { l: 90, r: 20, t: 45, b: 90 }, xaxis: { tickangle: -70, automargin: true }, yaxis: { automargin: true } },
     config: { responsive: true, displayModeBar: true },
-  }), [matrix, labels, pairMode]);
+  }), [matrix, labels, pairMode, viewMode]);
 
   if (loadingSystem) return <Loader message="Loading Hamiltonian spectral analyses..." />;
 
@@ -318,6 +322,16 @@ export default function HamiltonianSpectralPage() {
                   <option value="pair">Pair rewiring sectors</option>
                 </select>
               </div>
+              {pairMode ? (
+                <div>
+                  <label className="block text-xs text-gray-400 mb-1">Spectral view</label>
+                  <select value={spectralView} onChange={(e) => { setSpectralView(e.target.value); setComponentIndex(0); }} className="w-full bg-gray-950 border border-gray-800 rounded-md px-2 py-2 text-sm text-gray-100">
+                    <option value="laplacian">Differential Laplacian allostery</option>
+                    <option value="absolute">ΔF spectral rewiring</option>
+                  </select>
+                  {spectralView === 'laplacian' && !hasLaplacian ? <p className="mt-1 text-[11px] text-amber-300">This pair was computed before Laplacian support. Rerun spectral analysis to upgrade it.</p> : null}
+                </div>
+              ) : null}
               <div className="space-y-2">
                 <div className="text-xs uppercase tracking-[0.15em] text-gray-500">Available analyses</div>
                 {analyses.map((analysis) => (
@@ -333,7 +347,7 @@ export default function HamiltonianSpectralPage() {
               <div>
                 <label className="block text-xs text-gray-400 mb-1">Component</label>
                 <select value={componentIndex} onChange={(e) => setComponentIndex(Number(e.target.value))} className="w-full bg-gray-950 border border-gray-800 rounded-md px-2 py-2 text-sm text-gray-100">
-                  {topValues.map((value, idx) => <option key={idx} value={idx}>v{idx + 1} · λ={fmt(value)}</option>)}
+                  {topValues.map((value, idx) => <option key={idx} value={idx}>{viewMode === 'laplacian' ? 'Fiedler ' : 'v'}{idx + 1} · λ={fmt(value)}</option>)}
                 </select>
               </div>
               <div>
@@ -353,7 +367,7 @@ export default function HamiltonianSpectralPage() {
                   <h2 className="mt-2 text-lg font-semibold text-white">{analysisTitle(meta)}</h2>
                   <p className="mt-1 text-sm text-gray-400">
                     {pairMode
-                      ? `Pair analysis uses signed ΔF. Red positive loadings increase from ${meta?.state_a_name || meta?.state_a_id} to ${meta?.state_b_name || meta?.state_b_id}; blue negative loadings decrease.`
+                      ? (viewMode === 'laplacian' ? `Differential Laplacian suppresses high-degree flexible hubs and highlights normalized allosteric rewiring communities between ${meta?.state_a_name || meta?.state_a_id} and ${meta?.state_b_name || meta?.state_b_id}.` : `Pair analysis uses signed ΔF. Red positive loadings increase from ${meta?.state_a_name || meta?.state_a_id} to ${meta?.state_b_name || meta?.state_b_id}; blue negative loadings decrease.`)
                       : `Single analysis uses |v_i| from the Frobenius coupling matrix of ${meta?.state_name || scalarString(data.state_name)}.`}
                   </p>
                 </div>
@@ -361,14 +375,14 @@ export default function HamiltonianSpectralPage() {
                   <div className="rounded-lg border border-gray-800 bg-gray-900 p-3 overflow-hidden space-y-2">
                     <div>
                       <h3 className="text-sm font-semibold text-gray-100">Eigenvalue spectrum</h3>
-                      <p className="text-xs text-gray-400">Large absolute eigenvalues define dominant sectors. Pair mode can have negative eigenvalues because couplings can decrease from A to B.</p>
+                      <p className="text-xs text-gray-400">Absolute mode uses large eigenvalues. Laplacian allostery mode focuses on the smallest non-zero eigenvalues, i.e. Fiedler-like rewiring communities.</p>
                     </div>
                     <Plot data={eigenPlot.data} layout={eigenPlot.layout} config={eigenPlot.config} style={{ width: '100%' }} />
                   </div>
                   <div className="rounded-lg border border-gray-800 bg-gray-900 p-3 overflow-hidden space-y-2">
                     <div>
                       <h3 className="text-sm font-semibold text-gray-100">Residue loadings</h3>
-                      <p className="text-xs text-gray-400">Single mode shows |v_i| participation. Pair mode shows signed rewiring loadings for the selected ΔF eigenvector.</p>
+                      <p className="text-xs text-gray-400">Single mode shows |v_i| participation. Pair views show signed residue loadings; Laplacian mode is normalized by absolute degree to reduce flexible-loop hub effects.</p>
                     </div>
                     <Plot data={vectorPlot.data} layout={vectorPlot.layout} config={vectorPlot.config} style={{ width: '100%' }} />
                   </div>
@@ -376,7 +390,7 @@ export default function HamiltonianSpectralPage() {
                 <div className="rounded-lg border border-gray-800 bg-gray-900 p-3 overflow-hidden space-y-2">
                   <div>
                     <h3 className="text-sm font-semibold text-gray-100">Coupling matrix heatmap</h3>
-                    <p className="text-xs text-gray-400">Single mode is the zero-sum-gauged Frobenius coupling matrix F. Pair mode is ΔF = F_B - F_A, so red/blue separates gained/lost coupling strength.</p>
+                    <p className="text-xs text-gray-400">Single mode is the zero-sum-gauged Frobenius coupling matrix F. Pair mode shows either ΔF or the signed normalized Laplacian L used for allostery sectors.</p>
                   </div>
                   <Plot data={heatmapPlot.data} layout={heatmapPlot.layout} config={heatmapPlot.config} style={{ width: '100%' }} />
                 </div>

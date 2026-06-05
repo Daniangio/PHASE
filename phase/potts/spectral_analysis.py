@@ -183,26 +183,70 @@ def frobenius_coupling_matrix(model: Any) -> np.ndarray:
     return 0.5 * (F + F.T)
 
 
+def _orient_eigenvectors(vectors: np.ndarray) -> np.ndarray:
+    out = np.asarray(vectors, dtype=np.float64).copy()
+    for k in range(out.shape[1]):
+        col = out[:, k]
+        idx = int(np.argmax(np.abs(col))) if col.size else 0
+        if col.size and col[idx] < 0:
+            out[:, k] = -col
+    return out
+
+
 def spectral_decomposition(matrix: np.ndarray, *, top_k: int = 20, sort_mode: str = "desc") -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     M = np.asarray(matrix, dtype=np.float64)
     M = 0.5 * (M + M.T)
     values, vectors = np.linalg.eigh(M)
     if sort_mode == "abs":
         order = np.argsort(np.abs(values))[::-1]
+    elif sort_mode == "asc":
+        order = np.argsort(values)
     else:
         order = np.argsort(values)[::-1]
     values_sorted = values[order]
-    vectors_sorted = vectors[:, order]
+    vectors_sorted = _orient_eigenvectors(vectors[:, order])
     top = max(1, min(int(top_k), int(vectors_sorted.shape[1])))
     top_values = values_sorted[:top]
     top_vectors = vectors_sorted[:, :top]
-    # Make eigenvector sign deterministic for stable visualization.
-    for k in range(top_vectors.shape[1]):
-        col = top_vectors[:, k]
-        idx = int(np.argmax(np.abs(col))) if col.size else 0
-        if col.size and col[idx] < 0:
-            top_vectors[:, k] = -col
     return values_sorted, vectors_sorted, top_values, top_vectors
+
+
+def signed_normalized_laplacian(delta_matrix: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Return signed normalized graph Laplacian using absolute degree D_i=sum_j |DeltaF_ij|."""
+    dF = np.asarray(delta_matrix, dtype=np.float64)
+    dF = 0.5 * (dF + dF.T)
+    np.fill_diagonal(dF, 0.0)
+    degree = np.sum(np.abs(dF), axis=1)
+    L = np.zeros_like(dF, dtype=np.float64)
+    active = degree > 0
+    L[active, active] = 1.0
+    denom = np.sqrt(np.outer(degree, degree))
+    mask = (denom > 0) & (~np.eye(dF.shape[0], dtype=bool))
+    L[mask] = -dF[mask] / denom[mask]
+    return 0.5 * (L + L.T), degree
+
+
+def laplacian_spectral_decomposition(
+    laplacian: np.ndarray,
+    *,
+    top_k: int = 20,
+    zero_tol: float = 1e-10,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Sort complete spectrum ascending, but expose top vectors as smallest non-zero modes."""
+    L = np.asarray(laplacian, dtype=np.float64)
+    L = 0.5 * (L + L.T)
+    values, vectors = np.linalg.eigh(L)
+    order = np.argsort(values)
+    values_sorted = values[order]
+    vectors_sorted = _orient_eigenvectors(vectors[:, order])
+    nonzero = np.where(np.abs(values_sorted) > float(zero_tol))[0]
+    if nonzero.size == 0:
+        selected = np.arange(min(max(1, int(top_k)), values_sorted.shape[0]))
+    else:
+        selected = nonzero[: min(int(top_k), int(nonzero.size))]
+    top_values = values_sorted[selected]
+    top_vectors = vectors_sorted[:, selected]
+    return values_sorted, vectors_sorted, top_values, top_vectors, selected.astype(np.int32)
 
 
 def _load_residue_keys(cluster_dir: Path, n_res: int) -> np.ndarray:
@@ -310,6 +354,24 @@ def compute_single_spectral_analysis(
     return {"metadata": meta, "analysis_npz": str(npz_path), "created": True}
 
 
+def _pair_npz_has_laplacian(npz_path: Path) -> bool:
+    if not npz_path.exists():
+        return False
+    try:
+        with np.load(npz_path, allow_pickle=False) as data:
+            required = {
+                "laplacian_matrix",
+                "laplacian_degree",
+                "laplacian_eigenvalues",
+                "laplacian_top_eigenvalues",
+                "laplacian_top_eigenvectors",
+                "laplacian_top_indices",
+            }
+            return required.issubset(set(data.files))
+    except Exception:
+        return False
+
+
 def compute_pair_spectral_analysis(
     *,
     store: ProjectStore,
@@ -328,7 +390,7 @@ def compute_pair_spectral_analysis(
     analysis_dir = cluster_dir / "analyses" / PAIR_KIND / analysis_id
     meta_path = analysis_dir / ANALYSIS_METADATA_FILENAME
     npz_path = analysis_dir / "analysis.npz"
-    if not overwrite and meta_path.exists() and npz_path.exists():
+    if not overwrite and meta_path.exists() and _pair_npz_has_laplacian(npz_path):
         return {"metadata": _read_json(meta_path), "analysis_npz": str(npz_path), "created": False}
 
     single_a = cluster_dir / "analyses" / SINGLE_KIND / _single_id(state_a_id) / "analysis.npz"
@@ -344,9 +406,17 @@ def compute_pair_spectral_analysis(
         raise ValueError(f"Single-state Frobenius matrices have different shapes for {state_a_id} and {state_b_id}.")
     dF = 0.5 * ((F_b - F_a) + (F_b - F_a).T)
     eigenvalues, _, top_values, top_vectors = spectral_decomposition(dF, top_k=top_k, sort_mode="abs")
+    laplacian, laplacian_degree = signed_normalized_laplacian(dF)
+    (
+        laplacian_eigenvalues,
+        _,
+        laplacian_top_values,
+        laplacian_top_vectors,
+        laplacian_top_indices,
+    ) = laplacian_spectral_decomposition(laplacian, top_k=top_k)
     np.savez_compressed(
         npz_path,
-        analysis_format_version=np.asarray([1], dtype=np.int32),
+        analysis_format_version=np.asarray([2], dtype=np.int32),
         mode=np.asarray(["pair"], dtype=str),
         state_a_id=np.asarray([state_a_id], dtype=str),
         state_b_id=np.asarray([state_b_id], dtype=str),
@@ -358,6 +428,12 @@ def compute_pair_spectral_analysis(
         eigenvalues=np.asarray(eigenvalues, dtype=np.float32),
         top_eigenvalues=np.asarray(top_values, dtype=np.float32),
         top_eigenvectors=np.asarray(top_vectors.T, dtype=np.float32),
+        laplacian_matrix=np.asarray(laplacian, dtype=np.float32),
+        laplacian_degree=np.asarray(laplacian_degree, dtype=np.float32),
+        laplacian_eigenvalues=np.asarray(laplacian_eigenvalues, dtype=np.float32),
+        laplacian_top_eigenvalues=np.asarray(laplacian_top_values, dtype=np.float32),
+        laplacian_top_eigenvectors=np.asarray(laplacian_top_vectors.T, dtype=np.float32),
+        laplacian_top_indices=np.asarray(laplacian_top_indices, dtype=np.int32),
     )
     now = _utc_now()
     meta = {
@@ -378,6 +454,9 @@ def compute_pair_spectral_analysis(
             "n_changed_edges": int(np.count_nonzero(np.triu(np.abs(dF) > 0, 1))),
             "top_k": int(top_vectors.shape[1]),
             "principal_abs_eigenvalue": float(top_values[0]) if top_values.size else None,
+            "laplacian_top_k": int(laplacian_top_vectors.shape[1]),
+            "laplacian_first_nonzero_eigenvalue": float(laplacian_top_values[0]) if laplacian_top_values.size else None,
+            "laplacian_zero_degree_residues": int(np.count_nonzero(laplacian_degree <= 0)),
         },
     }
     _write_json(meta_path, meta)
@@ -458,7 +537,7 @@ def upsert_hamiltonian_spectral_batch(
         progress_callback("Computing pair Hamiltonian spectra", 0, max(1, pair_total))
     pairs: list[dict[str, Any]] = []
     for idx, (a, b) in enumerate(pair_candidates):
-        if not overwrite and _analysis_exists(cluster_dir, PAIR_KIND, _pair_id(a, b)):
+        if not overwrite and _pair_npz_has_laplacian(cluster_dir / "analyses" / PAIR_KIND / _pair_id(a, b) / "analysis.npz"):
             continue
         out = compute_pair_spectral_analysis(
             store=store,

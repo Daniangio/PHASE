@@ -86,6 +86,10 @@ def test_hamiltonian_spectral_batch_is_incremental(monkeypatch, tmp_path):
     with np.load(pair_root / "pair_active__inactive" / "analysis.npz", allow_pickle=False) as data:
         assert np.asarray(data["matrix"]).shape == (3, 3)
         assert np.asarray(data["top_eigenvectors"]).shape == (2, 3)
+        assert np.asarray(data["laplacian_matrix"]).shape == (3, 3)
+        assert np.asarray(data["laplacian_degree"]).shape == (3,)
+        assert np.asarray(data["laplacian_top_eigenvectors"]).shape == (2, 3)
+        assert np.asarray(data["laplacian_top_indices"]).shape == (2,)
 
     second = upsert_hamiltonian_spectral_batch(
         project_id="proj",

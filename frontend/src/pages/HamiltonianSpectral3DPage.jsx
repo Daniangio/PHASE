@@ -70,6 +70,7 @@ export default function HamiltonianSpectral3DPage() {
   const [error, setError] = useState(null);
   const [selectedClusterId, setSelectedClusterId] = useState('');
   const [mode, setMode] = useState('single');
+  const [spectralView, setSpectralView] = useState('laplacian');
   const [analyses, setAnalyses] = useState([]);
   const [selectedAnalysisId, setSelectedAnalysisId] = useState('');
   const [analysisData, setAnalysisData] = useState(null);
@@ -206,9 +207,11 @@ export default function HamiltonianSpectral3DPage() {
 
   const spectral = analysisData?.data || {};
   const residueKeys = useMemo(() => safeArray(spectral.residue_keys).map(String), [spectral.residue_keys]);
-  const topVectors = useMemo(() => safeArray(spectral.top_eigenvectors), [spectral.top_eigenvectors]);
-  const topValues = useMemo(() => safeArray(spectral.top_eigenvalues).map(Number), [spectral.top_eigenvalues]);
   const pairMode = mode === 'pair';
+  const hasLaplacian = pairMode && Array.isArray(spectral.laplacian_top_eigenvectors);
+  const viewMode = pairMode && spectralView === 'laplacian' && hasLaplacian ? 'laplacian' : 'absolute';
+  const topVectors = useMemo(() => safeArray(viewMode === 'laplacian' ? spectral.laplacian_top_eigenvectors : spectral.top_eigenvectors), [spectral.laplacian_top_eigenvectors, spectral.top_eigenvectors, viewMode]);
+  const topValues = useMemo(() => safeArray(viewMode === 'laplacian' ? spectral.laplacian_top_eigenvalues : spectral.top_eigenvalues).map(Number), [spectral.laplacian_top_eigenvalues, spectral.top_eigenvalues, viewMode]);
 
   const residueColors = useMemo(() => {
     const colors = new Map();
@@ -224,7 +227,7 @@ export default function HamiltonianSpectral3DPage() {
     const contributions = residueKeys.map(() => ({ component: 0, value: 0 }));
     for (let k = 0; k < maxComponents; k += 1) {
       const vec = safeArray(topVectors[k]).map(Number);
-      const w = Math.abs(Number(topValues[k]) || 0);
+      const w = viewMode === 'laplacian' ? (maxComponents - k) / maxComponents : Math.abs(Number(topValues[k]) || 0);
       vec.forEach((value, ridx) => {
         const c = w * Math.abs(value);
         if (c > contributions[ridx].value) contributions[ridx] = { component: k, value: c };
@@ -233,7 +236,7 @@ export default function HamiltonianSpectral3DPage() {
     const max = Math.max(1e-12, ...contributions.map((x) => x.value));
     contributions.forEach((x, ridx) => colors.set(ridx, allVectorColor(x.component, x.value / max)));
     return colors;
-  }, [residueKeys, topVectors, topValues, vectorMode, componentIndex, pairMode]);
+  }, [residueKeys, topVectors, topValues, vectorMode, componentIndex, pairMode, viewMode]);
 
   const applyColoring = useCallback(async () => {
     const plugin = pluginRef.current;
@@ -271,7 +274,7 @@ export default function HamiltonianSpectral3DPage() {
           <div>
             <button type="button" onClick={() => navigate(`/projects/${projectId}/systems/${systemId}/sampling/hamiltonian_spectral${selectedClusterId ? `?cluster_id=${encodeURIComponent(selectedClusterId)}` : ''}`)} className="text-xs text-cyan-300 hover:text-cyan-200">Back to spectral plots</button>
             <h1 className="text-2xl font-semibold text-white mt-2">Hamiltonian Spectra 3D</h1>
-            <p className="text-sm text-gray-400 max-w-3xl">Color a reference PDB by sector eigenvector loadings. Single mode maps |v_i|; pair mode maps signed ΔF rewiring loadings.</p>
+            <p className="text-sm text-gray-400 max-w-3xl">Color a reference PDB by sector eigenvector loadings. Single mode maps |v_i|; pair mode can show signed ΔF rewiring or normalized Laplacian allostery loadings.</p>
           </div>
           <div className="flex gap-2">
             <button type="button" onClick={() => setHelpOpen(true)} className="inline-flex items-center gap-2 px-3 py-2 rounded-md border border-gray-700 text-sm text-gray-200 hover:bg-gray-800"><CircleHelp className="h-4 w-4" /> Help</button>
@@ -283,15 +286,16 @@ export default function HamiltonianSpectral3DPage() {
           <aside className="rounded-lg border border-gray-800 bg-gray-900/50 p-4 space-y-3">
             <label className="block text-xs text-gray-400">Cluster<select value={selectedClusterId} onChange={(e) => setSelectedClusterId(e.target.value)} className="mt-1 w-full rounded bg-gray-950 border border-gray-700 px-2 py-2 text-sm">{clusters.map((c) => <option key={c.cluster_id} value={c.cluster_id}>{c.name || c.cluster_id}</option>)}</select></label>
             <label className="block text-xs text-gray-400">Mode<select value={mode} onChange={(e) => setMode(e.target.value)} className="mt-1 w-full rounded bg-gray-950 border border-gray-700 px-2 py-2 text-sm"><option value="single">Single-state sectors</option><option value="pair">Pair rewiring sectors</option></select></label>
+            {pairMode ? <label className="block text-xs text-gray-400">Spectral view<select value={spectralView} onChange={(e) => { setSpectralView(e.target.value); setComponentIndex(0); }} className="mt-1 w-full rounded bg-gray-950 border border-gray-700 px-2 py-2 text-sm"><option value="laplacian">Differential Laplacian allostery</option><option value="absolute">ΔF spectral rewiring</option></select>{spectralView === 'laplacian' && !hasLaplacian ? <span className="mt-1 block text-[11px] text-amber-300">Rerun this spectral analysis to add Laplacian fields.</span> : null}</label> : null}
             <label className="block text-xs text-gray-400">Analysis<select value={selectedAnalysisId} onChange={(e) => setSelectedAnalysisId(e.target.value)} className="mt-1 w-full rounded bg-gray-950 border border-gray-700 px-2 py-2 text-sm">{analyses.map((a) => <option key={a.analysis_id} value={a.analysis_id}>{analysisTitle(a)}</option>)}</select></label>
             <label className="block text-xs text-gray-400">Reference PDB/state<select value={selectedStateId} onChange={(e) => setSelectedStateId(e.target.value)} className="mt-1 w-full rounded bg-gray-950 border border-gray-700 px-2 py-2 text-sm">{states.map((s) => <option key={s.state_id} value={s.state_id}>{s.name || s.state_id}</option>)}</select></label>
             <label className="block text-xs text-gray-400">Color mode<select value={vectorMode} onChange={(e) => setVectorMode(e.target.value)} className="mt-1 w-full rounded bg-gray-950 border border-gray-700 px-2 py-2 text-sm"><option value="selected">Selected eigenvector</option><option value="all">Dominant among first 8 vectors</option></select></label>
-            {vectorMode === 'selected' ? <label className="block text-xs text-gray-400">Eigenvector<select value={componentIndex} onChange={(e) => setComponentIndex(Number(e.target.value))} className="mt-1 w-full rounded bg-gray-950 border border-gray-700 px-2 py-2 text-sm">{topValues.map((v, idx) => <option key={idx} value={idx}>v{idx + 1} · λ={Number(v).toFixed(4)}</option>)}</select></label> : null}
+            {vectorMode === 'selected' ? <label className="block text-xs text-gray-400">Eigenvector<select value={componentIndex} onChange={(e) => setComponentIndex(Number(e.target.value))} className="mt-1 w-full rounded bg-gray-950 border border-gray-700 px-2 py-2 text-sm">{topValues.map((v, idx) => <option key={idx} value={idx}>{viewMode === 'laplacian' ? 'Fiedler ' : 'v'}{idx + 1} · λ={Number(v).toFixed(4)}</option>)}</select></label> : null}
             <label className="block text-xs text-gray-400">Residue numbering<select value={residueIdMode} onChange={(e) => setResidueIdMode(e.target.value)} className="mt-1 w-full rounded bg-gray-950 border border-gray-700 px-2 py-2 text-sm"><option value="auth">PDB/auth residue id from residue key</option><option value="label">Sequential label_seq_id</option></select></label>
             <div className="rounded-md border border-gray-800 bg-gray-950/60 p-3 text-xs text-gray-400 space-y-1">
               <div className="text-gray-200 font-semibold">Interpretation</div>
-              <p>{pairMode ? 'Pair mode: red/blue are opposite signed rewiring sectors of ΔF = F_B - F_A. Saturation is proportional to |v_i|.' : 'Single mode: green saturation is proportional to |v_i|, the residue participation in the selected sector.'}</p>
-              <p>All-vectors mode assigns each residue the color of the dominant eigenvector contribution weighted by |λ|.</p>
+              <p>{pairMode ? 'Pair mode: red/blue are opposite signed sectors. In Laplacian mode they are normalized allosteric/Fiedler sectors; in ΔF mode they are raw rewiring sectors.' : 'Single mode: green saturation is proportional to |v_i|, the residue participation in the selected sector.'}</p>
+              <p>All-vectors mode assigns each residue the color of its dominant component. ΔF mode weights by |λ|; Laplacian mode weights earlier Fiedler modes by rank.</p>
             </div>
           </aside>
           <section className="rounded-lg border border-gray-800 bg-gray-900 overflow-hidden min-h-[720px] relative">
