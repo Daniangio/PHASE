@@ -322,16 +322,20 @@ export default function HamiltonianSpectralPage() {
                   <option value="pair">Pair rewiring sectors</option>
                 </select>
               </div>
-              {pairMode ? (
-                <div>
-                  <label className="block text-xs text-gray-400 mb-1">Spectral view</label>
-                  <select value={spectralView} onChange={(e) => { setSpectralView(e.target.value); setComponentIndex(0); }} className="w-full bg-gray-950 border border-gray-800 rounded-md px-2 py-2 text-sm text-gray-100">
-                    <option value="laplacian">Differential Laplacian allostery</option>
-                    <option value="absolute">ΔF spectral rewiring</option>
-                  </select>
-                  {spectralView === 'laplacian' && !hasLaplacian ? <p className="mt-1 text-[11px] text-amber-300">This pair was computed before Laplacian support. Rerun spectral analysis to upgrade it.</p> : null}
-                </div>
-              ) : null}
+              <div>
+                <label className="block text-xs text-gray-400 mb-1">Spectral view</label>
+                <select
+                  value={pairMode ? spectralView : 'absolute'}
+                  onChange={(e) => { setSpectralView(e.target.value); setComponentIndex(0); }}
+                  disabled={!pairMode}
+                  className="w-full bg-gray-950 border border-gray-800 rounded-md px-2 py-2 text-sm text-gray-100 disabled:opacity-60"
+                >
+                  <option value="laplacian">Differential Laplacian allostery</option>
+                  <option value="absolute">Absolute entropy / ΔF spectral rewiring</option>
+                </select>
+                {!pairMode ? <p className="mt-1 text-[11px] text-gray-500">Single-state analyses only have the absolute entropy/Frobenius view. Switch Mode to Pair rewiring sectors to compare Laplacian vs ΔF.</p> : null}
+                {pairMode && spectralView === 'laplacian' && !hasLaplacian ? <p className="mt-1 text-[11px] text-amber-300">This pair was computed before Laplacian support. Rerun spectral analysis to upgrade it.</p> : null}
+              </div>
               <div className="space-y-2">
                 <div className="text-xs uppercase tracking-[0.15em] text-gray-500">Available analyses</div>
                 {analyses.map((analysis) => (

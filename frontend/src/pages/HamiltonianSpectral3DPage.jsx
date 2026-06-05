@@ -286,7 +286,19 @@ export default function HamiltonianSpectral3DPage() {
           <aside className="rounded-lg border border-gray-800 bg-gray-900/50 p-4 space-y-3">
             <label className="block text-xs text-gray-400">Cluster<select value={selectedClusterId} onChange={(e) => setSelectedClusterId(e.target.value)} className="mt-1 w-full rounded bg-gray-950 border border-gray-700 px-2 py-2 text-sm">{clusters.map((c) => <option key={c.cluster_id} value={c.cluster_id}>{c.name || c.cluster_id}</option>)}</select></label>
             <label className="block text-xs text-gray-400">Mode<select value={mode} onChange={(e) => setMode(e.target.value)} className="mt-1 w-full rounded bg-gray-950 border border-gray-700 px-2 py-2 text-sm"><option value="single">Single-state sectors</option><option value="pair">Pair rewiring sectors</option></select></label>
-            {pairMode ? <label className="block text-xs text-gray-400">Spectral view<select value={spectralView} onChange={(e) => { setSpectralView(e.target.value); setComponentIndex(0); }} className="mt-1 w-full rounded bg-gray-950 border border-gray-700 px-2 py-2 text-sm"><option value="laplacian">Differential Laplacian allostery</option><option value="absolute">ΔF spectral rewiring</option></select>{spectralView === 'laplacian' && !hasLaplacian ? <span className="mt-1 block text-[11px] text-amber-300">Rerun this spectral analysis to add Laplacian fields.</span> : null}</label> : null}
+            <label className="block text-xs text-gray-400">Spectral view
+              <select
+                value={pairMode ? spectralView : 'absolute'}
+                onChange={(e) => { setSpectralView(e.target.value); setComponentIndex(0); }}
+                disabled={!pairMode}
+                className="mt-1 w-full rounded bg-gray-950 border border-gray-700 px-2 py-2 text-sm disabled:opacity-60"
+              >
+                <option value="laplacian">Differential Laplacian allostery</option>
+                <option value="absolute">Absolute entropy / ΔF spectral rewiring</option>
+              </select>
+              {!pairMode ? <span className="mt-1 block text-[11px] text-gray-500">Single-state analyses only have the absolute entropy/Frobenius view. Switch Mode to Pair rewiring sectors to use Laplacian.</span> : null}
+              {pairMode && spectralView === 'laplacian' && !hasLaplacian ? <span className="mt-1 block text-[11px] text-amber-300">Rerun this spectral analysis to add Laplacian fields.</span> : null}
+            </label>
             <label className="block text-xs text-gray-400">Analysis<select value={selectedAnalysisId} onChange={(e) => setSelectedAnalysisId(e.target.value)} className="mt-1 w-full rounded bg-gray-950 border border-gray-700 px-2 py-2 text-sm">{analyses.map((a) => <option key={a.analysis_id} value={a.analysis_id}>{analysisTitle(a)}</option>)}</select></label>
             <label className="block text-xs text-gray-400">Reference PDB/state<select value={selectedStateId} onChange={(e) => setSelectedStateId(e.target.value)} className="mt-1 w-full rounded bg-gray-950 border border-gray-700 px-2 py-2 text-sm">{states.map((s) => <option key={s.state_id} value={s.state_id}>{s.name || s.state_id}</option>)}</select></label>
             <label className="block text-xs text-gray-400">Color mode<select value={vectorMode} onChange={(e) => setVectorMode(e.target.value)} className="mt-1 w-full rounded bg-gray-950 border border-gray-700 px-2 py-2 text-sm"><option value="selected">Selected eigenvector</option><option value="all">Dominant among first 8 vectors</option></select></label>
