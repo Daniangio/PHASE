@@ -77,6 +77,81 @@ def build_cluster_entry(
     }
 
 
+
+# Residues whose descriptor symmetry can split equivalent rotamers if chi2 is
+# clustered literally. The current descriptor order is phi, psi, omega, chi1, chi2.
+# VAL is included as requested; it is normally a no-op here because VAL has no chi2
+# in the current MDAnalysis-style descriptor extraction.
+SYMMETRIC_CHI2_RESNAMES = frozenset({"PHE", "TYR", "LEU", "ASP"})
+CHI2_DESCRIPTOR_INDEX = 4
+
+
+def _resname_from_residue_key(residue_key: str | None) -> str:
+    text = str(residue_key or "").upper()
+    tokens = [tok for tok in re.split(r"[^A-Z0-9]+", text) if tok]
+    for token in reversed(tokens):
+        letters = "".join(ch for ch in token if ch.isalpha())
+        if len(letters) == 3:
+            return letters
+    m = re.search(r"([A-Z]{3})", text)
+    return m.group(1) if m else ""
+
+
+def _chi2_symmetry_metadata(residue_key: str | None) -> Dict[str, Any]:
+    resname = _resname_from_residue_key(residue_key)
+    enabled = bool(resname in SYMMETRIC_CHI2_RESNAMES)
+    return {
+        "enabled": enabled,
+        "version": "chi2_abs_signed_v1",
+        "residue_key": str(residue_key or ""),
+        "resname": resname,
+        "descriptor": "chi2",
+        "descriptor_index": CHI2_DESCRIPTOR_INDEX,
+        "symmetric_resnames": sorted(SYMMETRIC_CHI2_RESNAMES),
+    }
+
+
+def _fold_symmetric_chi2_for_clustering(samples: np.ndarray, residue_key: str | None = None) -> tuple[np.ndarray, Dict[str, Any]]:
+    """Return a clustering-only copy with equivalent chi2 signs folded together.
+
+    Raw descriptors are left untouched. For symmetric residues, chi2 is mapped
+    from signed angle space [-pi, pi) to abs(signed angle), so +90 and -90
+    degrees become the same clustering coordinate.
+    """
+    arr = np.asarray(samples, dtype=np.float64)
+    if arr.ndim == 1:
+        arr = arr.reshape(1, -1)
+    meta = _chi2_symmetry_metadata(residue_key)
+    if not meta["enabled"] or arr.shape[1] <= CHI2_DESCRIPTOR_INDEX:
+        return arr, meta
+    folded = arr.copy()
+    two_pi = 2.0 * np.pi
+    signed = np.mod(folded[:, CHI2_DESCRIPTOR_INDEX] + np.pi, two_pi) - np.pi
+    folded[:, CHI2_DESCRIPTOR_INDEX] = np.abs(signed)
+    meta["applied"] = True
+    return folded, meta
+
+
+def _fold_samples_for_model_symmetry(samples: np.ndarray, model: Any) -> np.ndarray:
+    meta = getattr(model, "phase_descriptor_symmetry", None)
+    if not isinstance(meta, dict) or not bool(meta.get("enabled")):
+        return np.asarray(samples, dtype=np.float64)
+    folded, _ = _fold_symmetric_chi2_for_clustering(samples, str(meta.get("residue_key") or ""))
+    return folded
+
+
+def _descriptor_symmetry_summary(residue_keys: Sequence[str]) -> Dict[str, Any]:
+    candidates = [str(k) for k in residue_keys if _chi2_symmetry_metadata(str(k)).get("enabled")]
+    return {
+        "version": "chi2_abs_signed_v1",
+        "description": "For selected symmetric residues, chi2 is folded as abs(signed chi2) only for density-peak clustering and prediction; raw descriptor values are unchanged. Residues without a chi2 descriptor are unaffected.",
+        "descriptor": "chi2",
+        "descriptor_index": CHI2_DESCRIPTOR_INDEX,
+        "symmetric_resnames": sorted(SYMMETRIC_CHI2_RESNAMES),
+        "candidate_residue_keys": candidates,
+    }
+
+
 def _build_state_name_maps(system_meta: SystemMetadata) -> tuple[Dict[str, str], Dict[str, str]]:
     state_labels = {}
     for state_id, state in (system_meta.states or {}).items():
@@ -183,6 +258,7 @@ def _predict_cluster_adp(
             expected_dims = int(np.asarray(model_X).shape[1])
         except Exception:
             expected_dims = None
+    samples = _fold_samples_for_model_symmetry(samples, dp_data)
     emb, _ = _angles_to_periodic(samples, expected_dims=expected_dims)
     if emb.shape[0] == 0:
         empty = np.zeros((0,), dtype=np.int32)
@@ -585,6 +661,7 @@ def _cluster_residue_samples(
     *,
     density_maxk: int,
     density_z: float | str,
+    residue_key: str | None = None,
     ) -> Tuple[np.ndarray, np.ndarray, int, Dict[str, Any], Data]:
     """Cluster angles with ADP density peaks."""
     if samples.size == 0:
@@ -600,11 +677,17 @@ def _cluster_residue_samples(
     if samples.ndim != 2 or samples.shape[1] < 1:
         raise ValueError("Residue samples must be (n_frames, >=1) shaped.")
 
+    cluster_samples, symmetry_meta = _fold_symmetric_chi2_for_clustering(samples, residue_key)
     dp_data, labels_assigned, labels_halo, k_final, diagnostics = _fit_density_peaks(
-        samples,
+        cluster_samples,
         density_maxk=density_maxk,
         density_z=density_z,
     )
+    try:
+        setattr(dp_data, "phase_descriptor_symmetry", symmetry_meta)
+    except Exception:
+        pass
+    diagnostics["descriptor_symmetry"] = symmetry_meta
     return labels_halo, labels_assigned, int(k_final), diagnostics, dp_data
 
 
@@ -623,6 +706,7 @@ def _cluster_with_subsample(
     density_z: float | str,
     max_cluster_frames: Optional[int],
     subsample_indices: Optional[np.ndarray] = None,
+    residue_key: str | None = None,
 ) -> Tuple[np.ndarray, np.ndarray, int, Dict[str, Any], int, Data]:
     """Fit ADP on a subsample if requested, then predict labels on all frames."""
     def _coerce_1d(labels: np.ndarray) -> np.ndarray:
@@ -638,6 +722,7 @@ def _cluster_with_subsample(
             samples,
             density_maxk=density_maxk,
             density_z=density_z,
+            residue_key=residue_key,
         )
         labels_halo = _coerce_1d(labels_halo)
         labels_assigned = _coerce_1d(labels_assigned)
@@ -657,6 +742,7 @@ def _cluster_with_subsample(
         sub_samples,
         density_maxk=density_maxk,
         density_z=density_z,
+        residue_key=residue_key,
     )
     labels_assigned, labels_halo = _predict_cluster_adp(
         dp_data,
@@ -678,6 +764,7 @@ def _cluster_residue_worker(
     density_z: float | str,
     max_cluster_frames: Optional[int],
     subsample_indices: Optional[np.ndarray],
+    residue_key: str | None = None,
 ) -> Tuple[int, np.ndarray, np.ndarray, int]:
     labels_halo, labels_assigned, k, _, _, _ = _cluster_with_subsample(
         samples,
@@ -685,6 +772,7 @@ def _cluster_residue_worker(
         density_z=density_z,
         max_cluster_frames=max_cluster_frames,
         subsample_indices=subsample_indices,
+        residue_key=residue_key,
     )
     return col, labels_halo, labels_assigned, k
 
@@ -696,6 +784,7 @@ def _cluster_residue_worker_with_models(
     density_z: float | str,
     max_cluster_frames: Optional[int],
     subsample_indices: Optional[np.ndarray],
+    residue_key: str | None = None,
 ) -> Tuple[int, np.ndarray, np.ndarray, int, Data]:
     labels_halo, labels_assigned, k, _, _, dp_data = _cluster_with_subsample(
         samples,
@@ -703,6 +792,7 @@ def _cluster_residue_worker_with_models(
         density_z=density_z,
         max_cluster_frames=max_cluster_frames,
         subsample_indices=subsample_indices,
+        residue_key=residue_key,
     )
     return col, labels_halo, labels_assigned, k, dp_data
 
@@ -2633,6 +2723,7 @@ def generate_metastable_cluster_npz(
                         density_z_val,
                         max_cluster_frames_val,
                         merged_subsample_indices,
+                        residue_keys[col],
                     )
                 )
             for fut in as_completed(futures):
@@ -2666,6 +2757,7 @@ def generate_metastable_cluster_npz(
                 density_z=density_z_val,
                 max_cluster_frames=max_cluster_frames_val,
                 subsample_indices=merged_subsample_indices,
+                residue_key=residue_keys[col],
             )
             if labels_halo.size == 0:
                 merged_labels_halo[:, col] = -1
@@ -2717,6 +2809,7 @@ def generate_metastable_cluster_npz(
         },
         "residue_keys": residue_keys,
         "residue_mapping": residue_mapping,
+        "descriptor_symmetry": _descriptor_symmetry_summary(residue_keys),
         "random_state": random_state,
         "contact_sources": contact_sources,
         "merged": {
@@ -2941,6 +3034,7 @@ def generate_cluster_npz_from_descriptors(
                         density_z_val,
                         max_cluster_frames_val,
                         merged_subsample_indices,
+                        residue_keys[col],
                     )
                 )
             for fut in as_completed(futures):
@@ -2971,6 +3065,7 @@ def generate_cluster_npz_from_descriptors(
                 density_z=density_z_val,
                 max_cluster_frames=max_cluster_frames_val,
                 subsample_indices=merged_subsample_indices,
+                residue_key=residue_keys[col],
             )
             if labels_halo.size == 0:
                 merged_labels_halo[:, col] = -1
@@ -3010,6 +3105,7 @@ def generate_cluster_npz_from_descriptors(
         },
         "residue_keys": residue_keys,
         "residue_mapping": {},
+        "descriptor_symmetry": _descriptor_symmetry_summary(residue_keys),
         "random_state": random_state,
         "contact_sources": [],
         "merged": {
@@ -3133,12 +3229,15 @@ def run_cluster_chunk(
         raise ValueError(f"Residue index {residue_index} out of range (0..{n_residues - 1}).")
 
     params = manifest.get("cluster_params", {})
+    residue_keys = [str(v) for v in (manifest.get("residue_keys") or [])]
+    residue_key = residue_keys[residue_index] if residue_index < len(residue_keys) else None
     sample_arr = np.asarray(angles[:, residue_index, :], dtype=float)
     labels_halo, labels_assigned, k, diag, _, _ = _cluster_with_subsample(
         sample_arr,
         density_maxk=int(params.get("density_maxk", 100)),
         density_z=params.get("density_z", 2.5),
         max_cluster_frames=params.get("max_cluster_frames"),
+        residue_key=residue_key,
     )
 
     out_path = work_dir / f"chunk_{residue_index:04d}.npz"
@@ -3193,6 +3292,7 @@ def reduce_cluster_workspace(work_dir: Path) -> Tuple[Path, Dict[str, Any]]:
             density_z=density_z_val,
             max_cluster_frames=max_cluster_frames_val,
             subsample_indices=merged_subsample_indices,
+            residue_key=residue_keys[idx],
         )
         if labels_halo.size == 0:
             merged_labels_halo[:, idx] = -1
@@ -3238,6 +3338,7 @@ def reduce_cluster_workspace(work_dir: Path) -> Tuple[Path, Dict[str, Any]]:
         "cluster_params": cluster_params,
         "residue_keys": residue_keys,
         "residue_mapping": residue_mapping,
+        "descriptor_symmetry": _descriptor_symmetry_summary(residue_keys),
         "random_state": cluster_params.get("random_state"),
         "contact_sources": contact_sources,
         "merged": {

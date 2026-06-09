@@ -37,6 +37,23 @@ except Exception as exc:  # pragma: no cover - import guard
 
 DIHEDRAL_KEYS = ("phi", "psi", "omega", "chi1", "chi2")
 
+CHI2_DESCRIPTOR_INDEX = 4
+
+
+def _fold_samples_for_model_symmetry(samples: np.ndarray, model: Any) -> np.ndarray:
+    meta = getattr(model, "phase_descriptor_symmetry", None)
+    if not isinstance(meta, dict) or not bool(meta.get("enabled")):
+        return np.asarray(samples, dtype=np.float64)
+    arr = np.asarray(samples, dtype=np.float64)
+    if arr.ndim == 1:
+        arr = arr.reshape(1, -1)
+    if arr.shape[1] <= CHI2_DESCRIPTOR_INDEX:
+        return arr
+    folded = arr.copy()
+    two_pi = 2.0 * np.pi
+    signed = np.mod(folded[:, CHI2_DESCRIPTOR_INDEX] + np.pi, two_pi) - np.pi
+    folded[:, CHI2_DESCRIPTOR_INDEX] = np.abs(signed)
+    return folded
 
 def _effective_angle_columns(samples: np.ndarray) -> np.ndarray:
     arr = np.asarray(samples, dtype=np.float64)
@@ -97,6 +114,7 @@ def _predict_cluster_adp(dp_data: Data, samples: np.ndarray, *, density_maxk: in
         except Exception:
             expected_dims = None
 
+    samples = _fold_samples_for_model_symmetry(samples, dp_data)
     emb, _ = _angles_to_periodic(samples, expected_dims=expected_dims)
     if emb.shape[0] == 0:
         empty = np.zeros((0,), dtype=np.int32)

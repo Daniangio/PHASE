@@ -10,7 +10,7 @@ The clustering job is split into three phases:
 
 1) **Preprocess (orchestrator job)**
    - Collect all frames for the selected metastable states.
-   - Build a merged per-residue angle tensor with shape `(n_frames, n_residues, 3)` (phi/psi/chi1).
+   - Build a merged per-residue angle tensor with shape `(n_frames, n_residues, 5)` (`phi`, `psi`, `omega`, `chi1`, `chi2`).
    - Persist intermediate inputs to a workspace directory.
 
 2) **Chunk jobs (fan-out)**
@@ -32,7 +32,7 @@ The preprocess step creates a workspace under:
 
 Typical files:
 
-- `angles.npy` (float32, shape `(n_frames, n_residues, 3)`)
+- `angles.npy` (float32, shape `(n_frames, n_residues, 5)`)
 - `frame_state_ids.npy` (state id for each frame)
 - `frame_meta_ids.npy` (metastable id for each frame)
 - `frame_indices.npy` (frame index inside each state trajectory)
@@ -77,6 +77,16 @@ NPZ, we do a per-residue k-nearest-neighbor (kNN) assignment in a periodic angle
 
 This is distance-based, but done in the sin/cos embedding rather than raw angles.
 See `backend/services/metastable_clusters.py` (`assign_cluster_labels_to_states` and `_assign_labels_from_reference`).
+
+## Symmetric Chi2 Folding
+
+Some sidechains have equivalent torsional states that differ only by a symmetric flip. For DADApy density-peak clustering, PHASE folds `chi2` for selected symmetric residue types before fitting or predicting cluster labels:
+
+- `PHE`, `TYR`, `LEU`, `ASP`, `VAL`
+
+The rule maps `chi2` from signed angle space to `abs(signed chi2)`, so states such as `+90` and `-90` degrees are treated as the same clustering coordinate. This is only applied to the clustering/prediction copy of the descriptor matrix. Stored descriptor NPZ files and descriptor visualizations keep the original physical `chi2` values.
+
+The cluster metadata stores `descriptor_symmetry` with the rule version, descriptor index, symmetric residue names, and candidate residue keys for reproducibility. A listed candidate with no available `chi2` column is unaffected.
 
 ## Worker Configuration
 
