@@ -32,6 +32,34 @@ function buildEdgeMatrix(n, edges, values) {
   return matrix;
 }
 
+function finiteMaxFromNested(items, pickValues, fallback = 1) {
+  let maxValue = Number.NEGATIVE_INFINITY;
+  (items || []).forEach((item) => {
+    const values = pickValues(item);
+    (Array.isArray(values) ? values : []).forEach((raw) => {
+      const value = Number(raw);
+      if (Number.isFinite(value) && value > maxValue) maxValue = value;
+    });
+  });
+  return Number.isFinite(maxValue) ? Math.max(maxValue, 1e-9) : fallback;
+}
+
+function finiteRangeFromEnergyGraphs(graphs) {
+  let minValue = Number.POSITIVE_INFINITY;
+  let maxValue = Number.NEGATIVE_INFINITY;
+  (graphs || []).forEach((graph) => {
+    (graph?.series || []).forEach((series) => {
+      (Array.isArray(series?.values) ? series.values : []).forEach((raw) => {
+        const value = Number(raw);
+        if (!Number.isFinite(value)) return;
+        if (value < minValue) minValue = value;
+        if (value > maxValue) maxValue = value;
+      });
+    });
+  });
+  return Number.isFinite(minValue) && Number.isFinite(maxValue) ? [minValue, maxValue] : null;
+}
+
 function PlotOverlay({ overlay, onClose }) {
   if (!overlay) return null;
   const layout = { ...(overlay.layout || {}), autosize: true };
@@ -809,13 +837,11 @@ export default function SamplingVizPage() {
   }, [comparisonDataMap, edgeDisplayMode, edges, jsComparisonItems, modelEdgeSet, residueLabels.length]);
 
   const globalNodeJsMax = useMemo(() => {
-    const vals = jsLoadedItems.flatMap((item) => item.nodeJs).map(Number).filter(Number.isFinite);
-    return vals.length ? Math.max(...vals, 1e-9) : 1;
+    return finiteMaxFromNested(jsLoadedItems, (item) => item.nodeJs, 1);
   }, [jsLoadedItems]);
 
   const globalEdgeJsMax = useMemo(() => {
-    const vals = jsLoadedItems.flatMap((item) => item.edgeJs).map(Number).filter(Number.isFinite);
-    return vals.length ? Math.max(...vals, 1e-9) : 1;
+    return finiteMaxFromNested(jsLoadedItems, (item) => item.edgeJs, 1);
   }, [jsLoadedItems]);
 
   const multiNodePlot = useMemo(() => {
@@ -1168,9 +1194,7 @@ export default function SamplingVizPage() {
   ]);
 
   const globalEnergyRange = useMemo(() => {
-    const vals = energyGraphs.flatMap((graph) => graph.series.flatMap((series) => series.values || [])).map(Number).filter(Number.isFinite);
-    if (!vals.length) return null;
-    return [Math.min(...vals), Math.max(...vals)];
+    return finiteRangeFromEnergyGraphs(energyGraphs);
   }, [energyGraphs]);
 
   if (loadingSystem) return <Loader message="Loading sampling explorer..." />;

@@ -249,8 +249,11 @@ export function buildEnergyDistributionPlot({
     if (hasProvidedRange) break;
     const values = finiteValues(s.values || s.energies);
     if (values.length) {
-      globalMin = Math.min(globalMin, ...values);
-      globalMax = Math.max(globalMax, ...values);
+      for (let i = 0; i < values.length; i += 1) {
+        const value = values[i];
+        if (value < globalMin) globalMin = value;
+        if (value > globalMax) globalMax = value;
+      }
     }
     const bins = Array.isArray(s.bins) ? s.bins.map(Number).filter(Number.isFinite) : [];
     if (bins.length) {
