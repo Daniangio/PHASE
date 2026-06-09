@@ -34,7 +34,7 @@ async def get_system_detail(project_id: str, system_id: str):
 
 @router.post(
     "/projects/{project_id}/systems",
-    summary="Create a system with one or more PDB states",
+    summary="Create a system",
 )
 async def create_system_with_descriptors(
     project_id: str,
@@ -44,15 +44,14 @@ async def create_system_with_descriptors(
     residue_selections_text: Optional[str] = Form(None),
     residue_selections_json: Optional[str] = Form(None),
     use_slug_ids: Optional[bool] = Form(False),
-    pdb_files: List[UploadFile] = File(...),
+    pdb_files: Optional[List[UploadFile]] = File(None),
 ):
     try:
         project_store.get_project(project_id)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found.")
 
-    if not pdb_files:
-        raise HTTPException(status_code=400, detail="At least one PDB file is required.")
+    pdb_files = [upload for upload in (pdb_files or []) if upload and upload.filename]
 
     try:
         parsed_names = json.loads(state_names) if state_names else []
@@ -90,6 +89,11 @@ async def create_system_with_descriptors(
 
     dirs = project_store.ensure_directories(project_id, system_meta.system_id)
     system_dir = dirs["system_dir"]
+    if not pdb_files:
+        refresh_system_metadata(system_meta)
+        project_store.save_system(system_meta)
+        return serialize_system(system_meta)
+
     print(f"[system-create] Uploading {len(pdb_files)} states for project={project_id} system={system_meta.system_id}")
     for idx, upload in enumerate(pdb_files):
         state_id = str(uuid.uuid4())

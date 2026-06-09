@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
-import { CircleHelp, Play, RefreshCw } from 'lucide-react';
+import { CircleHelp, Play, RefreshCw, Trash2 } from 'lucide-react';
 import Plot from 'react-plotly.js';
 
 import Loader from '../components/common/Loader';
@@ -11,7 +11,7 @@ import EnergyDistributionPlot, {
   buildEnergyDistributionPlot,
   useEnergySeriesSelection,
 } from '../components/common/EnergyDistributionPlot';
-import { fetchClusterAnalyses, fetchClusterAnalysisData, fetchPottsClusterInfo, fetchSystem } from '../api/projects';
+import { deleteClusterAnalysis, fetchClusterAnalyses, fetchClusterAnalysisData, fetchPottsClusterInfo, fetchSystem } from '../api/projects';
 import { fetchJobStatus, submitDeltaEnergyJob, submitEndpointFrustrationJob } from '../api/jobs';
 
 function clamp01(x) {
@@ -204,6 +204,7 @@ export default function DeltaEvalPage() {
   const [analysisData, setAnalysisData] = useState(null);
   const [analysisDataError, setAnalysisDataError] = useState(null);
   const [analysisDataLoading, setAnalysisDataLoading] = useState(false);
+  const [deletingAnalysisId, setDeletingAnalysisId] = useState('');
   const analysisDataCacheRef = useRef({});
 
   const [job, setJob] = useState(null);
@@ -412,6 +413,34 @@ export default function DeltaEvalPage() {
       clearInterval(timer);
     };
   }, [job, loadAnalyses]);
+
+
+  const handleDeleteAnalysis = useCallback(async (analysis) => {
+    const analysisId = String(analysis?.analysis_id || '');
+    const analysisType = String(analysis?.analysis_type || activeAnalysisType);
+    if (!selectedClusterId || !analysisId || !analysisType) return;
+    const label = `${analysis.model_a_name || analysis.model_a_id || 'model A'} vs ${analysis.model_b_name || analysis.model_b_id || 'model B'}`;
+    if (!window.confirm(`Delete ${analysisType.replace('_', ' ')} analysis "${label}"? This removes the stored analysis folder.`)) {
+      return;
+    }
+    setDeletingAnalysisId(analysisId);
+    setAnalysesError(null);
+    try {
+      await deleteClusterAnalysis(projectId, systemId, selectedClusterId, analysisType, analysisId);
+      analysisDataCacheRef.current = {};
+      setAnalyses((prev) => prev.filter((item) => !(String(item?.analysis_type || '') === analysisType && String(item?.analysis_id || '') === analysisId)));
+      if (String(selectedAnalysisId) === analysisId) {
+        setSelectedAnalysisId('');
+        setSelectedSampleId('');
+        setAnalysisData(null);
+      }
+      await loadAnalyses();
+    } catch (err) {
+      setAnalysesError(err.message || 'Failed to delete analysis.');
+    } finally {
+      setDeletingAnalysisId('');
+    }
+  }, [activeAnalysisType, loadAnalyses, projectId, selectedAnalysisId, selectedClusterId, systemId]);
 
   const handleRun = useCallback(async () => {
     setJobError(null);
@@ -1056,24 +1085,43 @@ export default function DeltaEvalPage() {
             <h3 className="text-sm font-semibold text-white">Available analyses</h3>
             {analysesError ? <ErrorMessage message={analysesError} /> : null}
             <div className="space-y-2 max-h-72 overflow-auto pr-1">
-              {matchingAnalyses.map((analysis) => (
-                <button
-                  key={analysis.analysis_id}
-                  type="button"
-                  onClick={() => setSelectedAnalysisId(String(analysis.analysis_id))}
-                  className={`w-full text-left rounded-md border px-3 py-2 ${
-                    String(selectedAnalysisMeta?.analysis_id) === String(analysis.analysis_id)
-                      ? 'border-cyan-500 bg-cyan-500/10'
-                      : 'border-gray-700 bg-gray-900/40 hover:bg-gray-900/70'
-                  }`}
-                >
-                  <div className="text-sm text-gray-100">{analysis.model_a_name || analysis.model_a_id} vs {analysis.model_b_name || analysis.model_b_id}</div>
-                  <div className="text-xs text-gray-400 mt-1">
-                    {analysis.analysis_type || activeAnalysisType} · samples: {analysis?.summary?.n_samples ?? 0}
-                    {analysis?.summary?.n_selected_edges || analysis?.top_k_edges ? ` · edges: ${analysis?.summary?.n_selected_edges ?? analysis?.top_k_edges}` : ''}
+              {matchingAnalyses.map((analysis) => {
+                const isSelected = String(selectedAnalysisMeta?.analysis_id) === String(analysis.analysis_id);
+                const isDeleting = String(deletingAnalysisId) === String(analysis.analysis_id);
+                return (
+                  <div
+                    key={analysis.analysis_id}
+                    className={`rounded-md border px-3 py-2 ${
+                      isSelected
+                        ? 'border-cyan-500 bg-cyan-500/10'
+                        : 'border-gray-700 bg-gray-900/40 hover:bg-gray-900/70'
+                    }`}
+                  >
+                    <button
+                      type="button"
+                      onClick={() => setSelectedAnalysisId(String(analysis.analysis_id))}
+                      className="w-full text-left"
+                    >
+                      <div className="text-sm text-gray-100">{analysis.model_a_name || analysis.model_a_id} vs {analysis.model_b_name || analysis.model_b_id}</div>
+                      <div className="text-xs text-gray-400 mt-1">
+                        {analysis.analysis_type || activeAnalysisType} · samples: {analysis?.summary?.n_samples ?? 0}
+                        {analysis?.summary?.n_selected_edges || analysis?.top_k_edges ? ` · edges: ${analysis?.summary?.n_selected_edges ?? analysis?.top_k_edges}` : ''}
+                      </div>
+                    </button>
+                    <div className="mt-2 flex justify-end">
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteAnalysis(analysis)}
+                        disabled={isDeleting}
+                        className="inline-flex items-center gap-1 rounded border border-red-500/60 px-2 py-1 text-xs text-red-300 hover:bg-red-500/10 disabled:opacity-50"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                        {isDeleting ? 'Deleting...' : 'Delete'}
+                      </button>
+                    </div>
                   </div>
-                </button>
-              ))}
+                );
+              })}
               {!matchingAnalyses.length ? <p className="text-xs text-gray-500">No {activeAnalysisType.replace('_', ' ')} analyses yet.</p> : null}
             </div>
           </div>

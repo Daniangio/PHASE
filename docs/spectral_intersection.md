@@ -117,11 +117,11 @@ The 2D page shows:
 
 The 3D page shows:
 
-- A monochrome base protein.
-- Only allosteric piston residues highlighted with categorical colors.
-- A side panel for isolating one piston at a time.
+- A monochrome opaque base protein.
+- Toggleable residue classes: allosteric pistons, structural scaffolds, transient switches, subthreshold core overlaps, and thermodynamic bulk.
+- A side panel for isolating one piston at a time while still allowing the other residue classes to be shown.
 
-Colors are categorical labels. They do not encode piston strength or eigenvector magnitude.
+Piston colors are categorical labels. Scaffold/switch/bulk colors are fixed class labels. They do not encode piston strength or eigenvector magnitude.
 
 ## Output Files
 
