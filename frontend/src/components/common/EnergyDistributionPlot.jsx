@@ -232,6 +232,7 @@ export function buildEnergyDistributionPlot({
   xTitle = 'Energy',
   height = 300,
   background = 'white',
+  xRange = null,
 } = {}) {
   const valid = (Array.isArray(series) ? series : []).filter((s) => {
     const values = finiteValues(s.values || s.energies);
@@ -241,9 +242,11 @@ export function buildEnergyDistributionPlot({
   });
   if (!valid.length) return null;
 
-  let globalMin = Infinity;
-  let globalMax = -Infinity;
+  let globalMin = Array.isArray(xRange) && Number.isFinite(Number(xRange[0])) ? Number(xRange[0]) : Infinity;
+  let globalMax = Array.isArray(xRange) && Number.isFinite(Number(xRange[1])) ? Number(xRange[1]) : -Infinity;
+  const hasProvidedRange = Array.isArray(xRange) && Number.isFinite(Number(xRange[0])) && Number.isFinite(Number(xRange[1]));
   for (const s of valid) {
+    if (hasProvidedRange) break;
     const values = finiteValues(s.values || s.energies);
     if (values.length) {
       globalMin = Math.min(globalMin, ...values);
@@ -383,7 +386,7 @@ export function buildEnergyDistributionPlot({
       plot_bgcolor: dark ? 'rgba(0,0,0,0)' : '#ffffff',
       font: { color: dark ? '#d1d5db' : '#111827' },
       barmode: 'overlay',
-      xaxis: { title: xTitle, color: dark ? '#d1d5db' : '#111827', zeroline: true },
+      xaxis: { title: xTitle, color: dark ? '#d1d5db' : '#111827', zeroline: true, range: [x0, x1] },
       yaxis: { title: 'Density', color: dark ? '#d1d5db' : '#111827', rangemode: 'tozero' },
       shapes,
       annotations,

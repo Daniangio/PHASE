@@ -7,9 +7,7 @@ import Loader from '../components/common/Loader';
 import ErrorMessage from '../components/common/ErrorMessage';
 import HelpDrawer from '../components/common/HelpDrawer';
 import EnergyDistributionPlot, {
-  EnergySeriesSelectorButton,
   buildEnergyDistributionPlot,
-  useEnergySeriesSelection,
 } from '../components/common/EnergyDistributionPlot';
 import {
   deleteClusterAnalysis,
@@ -32,12 +30,6 @@ function buildEdgeMatrix(n, edges, values) {
     matrix[s][r] = value;
   });
   return matrix;
-}
-
-function topK(values, labels, k = 10) {
-  const pairs = values.map((v, i) => [v, labels[i] ?? String(i), i]);
-  pairs.sort((a, b) => b[0] - a[0]);
-  return pairs.slice(0, k);
 }
 
 function PlotOverlay({ overlay, onClose }) {
@@ -177,6 +169,39 @@ function SampleInfoPanel({ sample, stats, onClose }) {
   );
 }
 
+function AnalysisInfoPanel({ group, analyses, onClose }) {
+  if (!group) return null;
+  const rows = (analyses || []).filter((analysis) => analysis.model_id === group.modelId);
+  return (
+    <div className="rounded-md border border-gray-800 bg-gray-950/70 p-3 text-[11px] text-gray-300 space-y-2">
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <p className="text-xs font-semibold text-white break-words">{group.modelName || group.modelId}</p>
+          <p className="text-[10px] text-gray-500 break-all">{group.modelId}</p>
+        </div>
+        <button type="button" onClick={onClose} className="text-gray-400 hover:text-gray-100" aria-label="Close analysis info">
+          <X className="h-3.5 w-3.5" />
+        </button>
+      </div>
+      <div className="grid grid-cols-2 gap-2">
+        <div><span className="text-gray-500">MD/sample:</span> {group.mdVsCount}</div>
+        <div><span className="text-gray-500">Energies:</span> {group.energyCount}</div>
+        <div className="col-span-2"><span className="text-gray-500">latest:</span> {group.latestCreatedAt || 'unknown'}</div>
+      </div>
+      <details>
+        <summary className="cursor-pointer text-gray-200">Stored analysis metadata</summary>
+        <div className="mt-2 max-h-72 overflow-auto space-y-2">
+          {rows.map((analysis) => (
+            <pre key={`${analysis.analysis_type}:${analysis.analysis_id}`} className="rounded bg-gray-900 p-2 text-[10px] text-gray-300">
+              {JSON.stringify(analysis, null, 2)}
+            </pre>
+          ))}
+        </div>
+      </details>
+    </div>
+  );
+}
+
 export default function SamplingVizPage() {
   const { projectId, systemId } = useParams();
   const navigate = useNavigate();
@@ -226,6 +251,13 @@ export default function SamplingVizPage() {
 
   const [overlayPlot, setOverlayPlot] = useState(null);
   const [helpOpen, setHelpOpen] = useState(false);
+  const [runPanelOpen, setRunPanelOpen] = useState(false);
+  const [activeExplorerTab, setActiveExplorerTab] = useState('js');
+  const [activeJsSubtab, setActiveJsSubtab] = useState('nodes');
+  const [selectedAnalysisModelIds, setSelectedAnalysisModelIds] = useState([]);
+  const [analysisInfoModelId, setAnalysisInfoModelId] = useState('');
+  const [pairSelections, setPairSelections] = useState({});
+  const [comparisonDataMap, setComparisonDataMap] = useState({});
 
   const clusterOptions = useMemo(
     () => (system?.metastable_clusters || []).filter((run) => run.path && run.status !== 'failed'),
@@ -310,19 +342,6 @@ export default function SamplingVizPage() {
 
   const infoSample = useMemo(() => sampleEntries.find((s) => s.sample_id === infoSampleId) || null, [sampleEntries, infoSampleId]);
   const infoSampleStats = useMemo(() => (infoSampleId ? sampleStatsCache[infoSampleId] : null), [sampleStatsCache, infoSampleId]);
-  const selectedSampleEntry = useMemo(
-    () => sampleEntries.find((s) => s.sample_id === selectedSampleId) || null,
-    [sampleEntries, selectedSampleId]
-  );
-  const selectedSampleStats = useMemo(
-    () => (selectedSampleId ? sampleStatsCache[selectedSampleId] : null),
-    [sampleStatsCache, selectedSampleId]
-  );
-  const selectedSampleAllInvalid = useMemo(() => {
-    if (!selectedSampleEntry || selectedSampleEntry.method !== 'sa') return false;
-    if (!selectedSampleStats) return false;
-    return selectedSampleStats.n_frames > 0 && selectedSampleStats.invalid_count >= selectedSampleStats.n_frames;
-  }, [selectedSampleEntry, selectedSampleStats]);
   const analysisSummary = analysisJobStatus?.result?.results?.summary || analysisJobStatus?.meta?.summary || null;
   const analysisSkippedSamples = useMemo(
     () => (Array.isArray(analysisSummary?.skipped_samples) ? analysisSummary.skipped_samples : []),
@@ -506,15 +525,37 @@ export default function SamplingVizPage() {
     };
   }, [analysisGroups, analysisJob, analysisJobStatus, pottsModels, selectedClusterId]);
 
+  const analysisGroupMap = useMemo(() => {
+    const map = new Map();
+    analysisGroups.forEach((group) => map.set(group.modelId, group));
+    return map;
+  }, [analysisGroups]);
+
+  const selectedAnalysisGroups = useMemo(
+    () => selectedAnalysisModelIds.map((id) => analysisGroupMap.get(id)).filter(Boolean),
+    [analysisGroupMap, selectedAnalysisModelIds]
+  );
+
   useEffect(() => {
     if (!analysisGroups.length) {
       setSelectedAnalysisModelId('');
+      setSelectedAnalysisModelIds([]);
       return;
     }
+    setSelectedAnalysisModelIds((prev) => {
+      const allowed = new Set(analysisGroups.map((g) => g.modelId));
+      const retained = prev.filter((id) => allowed.has(id));
+      return retained.length ? retained : [analysisGroups[0].modelId];
+    });
     if (!selectedAnalysisModelId || !analysisGroups.some((g) => g.modelId === selectedAnalysisModelId)) {
       setSelectedAnalysisModelId(analysisGroups[0].modelId);
     }
   }, [analysisGroups, selectedAnalysisModelId]);
+
+  useEffect(() => {
+    const first = selectedAnalysisModelIds[0] || '';
+    if (first && first !== selectedAnalysisModelId) setSelectedAnalysisModelId(first);
+  }, [selectedAnalysisModelIds, selectedAnalysisModelId]);
 
   useEffect(() => {
     if (!poseEligibleStates.length) {
@@ -547,6 +588,82 @@ export default function SamplingVizPage() {
     }
     return candidates[0];
   }, [mdVsSampleAnalyses, selectedMdSampleId, selectedSampleId, selectedAnalysisModelId, mdLabelMode, dropInvalid]);
+
+  const findMdVsMeta = useCallback(
+    (modelId, mdSampleId, sampleId) => {
+      if (!modelId || !mdSampleId || !sampleId) return null;
+      return mdVsSampleAnalyses.find((a) => {
+        const mode = (a.md_label_mode || 'assigned').toLowerCase();
+        return (
+          a.model_id === modelId &&
+          a.md_sample_id === mdSampleId &&
+          a.sample_id === sampleId &&
+          mode === mdLabelMode &&
+          Boolean(a.drop_invalid) === Boolean(dropInvalid)
+        );
+      }) || null;
+    },
+    [mdVsSampleAnalyses, mdLabelMode, dropInvalid]
+  );
+
+  const makeDefaultPair = useCallback(
+    (modelId) => {
+      const modelAnalyses = mdVsSampleAnalyses.filter((a) => a.model_id === modelId);
+      const first = modelAnalyses[0];
+      return {
+        id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        mdSampleId: first?.md_sample_id || mdSamples[0]?.sample_id || '',
+        sampleId: first?.sample_id || selectableSamples[0]?.sample_id || '',
+      };
+    },
+    [mdSamples, mdVsSampleAnalyses, selectableSamples]
+  );
+
+  useEffect(() => {
+    setPairSelections((prev) => {
+      const selected = new Set(selectedAnalysisModelIds);
+      const next = {};
+      selectedAnalysisModelIds.forEach((modelId) => {
+        const retained = Array.isArray(prev[modelId]) ? prev[modelId].filter((pair) => {
+          const mdOk = mdSamples.some((s) => s.sample_id === pair.mdSampleId);
+          const sampleOk = selectableSamples.some((s) => s.sample_id === pair.sampleId);
+          return mdOk && sampleOk;
+        }) : [];
+        next[modelId] = retained.length ? retained : [makeDefaultPair(modelId)];
+      });
+      Object.keys(prev).forEach((modelId) => {
+        if (!selected.has(modelId)) return;
+        if (!next[modelId]?.length) next[modelId] = [makeDefaultPair(modelId)];
+      });
+      return next;
+    });
+  }, [selectedAnalysisModelIds, mdSamples, selectableSamples, makeDefaultPair]);
+
+  const jsComparisonItems = useMemo(() => {
+    const items = [];
+    selectedAnalysisModelIds.forEach((modelId) => {
+      const group = analysisGroupMap.get(modelId);
+      const pairs = Array.isArray(pairSelections[modelId]) ? pairSelections[modelId] : [];
+      pairs.forEach((pair, pairIndex) => {
+        const meta = findMdVsMeta(modelId, pair.mdSampleId, pair.sampleId);
+        const md = mdSamples.find((s) => s.sample_id === pair.mdSampleId);
+        const sample = sampleEntries.find((s) => s.sample_id === pair.sampleId);
+        const label = `${group?.modelName || modelId}: ${md?.name || pair.mdSampleId} vs ${sample?.name || pair.sampleId}`;
+        items.push({
+          key: `${modelId}:${pair.id || pairIndex}`,
+          modelId,
+          modelName: group?.modelName || modelId,
+          pair,
+          pairIndex,
+          meta,
+          mdName: md?.name || pair.mdSampleId,
+          sampleName: sample?.name || pair.sampleId,
+          label,
+        });
+      });
+    });
+    return items;
+  }, [analysisGroupMap, findMdVsMeta, mdSamples, pairSelections, sampleEntries, selectedAnalysisModelIds]);
 
   const loadAnalysisData = useCallback(
     async (analysisType, analysisId, options = {}) => {
@@ -600,6 +717,32 @@ export default function SamplingVizPage() {
     run();
   }, [selectedMdVsMeta, loadAnalysisData]);
 
+  useEffect(() => {
+    const run = async () => {
+      const loadable = jsComparisonItems.filter((item) => item.meta?.analysis_id);
+      if (!loadable.length) {
+        setComparisonDataMap({});
+        return;
+      }
+      setComparisonLoading(true);
+      setComparisonError(null);
+      try {
+        const entries = await Promise.all(
+          loadable.map(async (item) => {
+            const payload = await loadAnalysisData('md_vs_sample', item.meta.analysis_id);
+            return [item.key, payload];
+          })
+        );
+        setComparisonDataMap(Object.fromEntries(entries));
+      } catch (err) {
+        setComparisonError(err.message || 'Failed to load selected JS analyses.');
+      } finally {
+        setComparisonLoading(false);
+      }
+    };
+    run();
+  }, [jsComparisonItems, loadAnalysisData]);
+
   const residueLabels = useMemo(() => {
     const keys = clusterInfo?.residue_keys || [];
     if (Array.isArray(keys) && keys.length) return keys;
@@ -612,15 +755,6 @@ export default function SamplingVizPage() {
     if (Array.isArray(fromAnalysis) && fromAnalysis.length) return fromAnalysis;
     return Array.isArray(clusterInfo?.edges) ? clusterInfo.edges : [];
   }, [clusterInfo, comparisonData]);
-
-  const nodeJs = useMemo(() => {
-    const arr = comparisonData?.data?.node_js || [];
-    return Array.isArray(arr) ? arr : [];
-  }, [comparisonData]);
-  const edgeJs = useMemo(() => {
-    const arr = comparisonData?.data?.edge_js || [];
-    return Array.isArray(arr) ? arr : [];
-  }, [comparisonData]);
 
   const modelEdgeSet = useMemo(() => {
     const out = new Set();
@@ -636,43 +770,108 @@ export default function SamplingVizPage() {
     return out;
   }, [clusterInfo]);
 
-  const filteredEdgePayload = useMemo(() => {
-    if (!edges.length || !edgeJs.length) return { edges: [], edgeJs: [] };
-    const mode = edgeDisplayMode || 'all';
-    if (mode === 'all') return { edges, edgeJs };
-    const nextEdges = [];
-    const nextVals = [];
-    edges.forEach((edge, idx) => {
-      if (!Array.isArray(edge) || edge.length < 2) return;
-      const a = Number(edge[0]);
-      const b = Number(edge[1]);
-      const key = `${Math.min(a, b)}-${Math.max(a, b)}`;
-      const isInModel = modelEdgeSet.has(key);
-      if ((mode === 'within_model' && isInModel) || (mode === 'over_model' && !isInModel)) {
-        nextEdges.push(edge);
-        nextVals.push(edgeJs[idx]);
-      }
+  const jsLoadedItems = useMemo(() => {
+    return jsComparisonItems
+      .map((item, idx) => {
+        const payload = comparisonDataMap[item.key];
+        const data = payload?.data || {};
+        const rawEdges = Array.isArray(data.edges) && data.edges.length ? data.edges : edges;
+        const itemNodeJs = Array.isArray(data.node_js) ? data.node_js : [];
+        const rawEdgeJs = Array.isArray(data.edge_js) ? data.edge_js : [];
+        const itemEdges = [];
+        const itemEdgeJs = [];
+        rawEdges.forEach((edge, edgeIdx) => {
+          if (!Array.isArray(edge) || edge.length < 2) return;
+          const a = Number(edge[0]);
+          const b = Number(edge[1]);
+          const key = `${Math.min(a, b)}-${Math.max(a, b)}`;
+          const isInModel = modelEdgeSet.has(key);
+          if (
+            edgeDisplayMode === 'all' ||
+            (edgeDisplayMode === 'within_model' && isInModel) ||
+            (edgeDisplayMode === 'over_model' && !isInModel)
+          ) {
+            itemEdges.push(edge);
+            itemEdgeJs.push(rawEdgeJs[edgeIdx]);
+          }
+        });
+        return {
+          ...item,
+          color: ['#0891b2', '#dc2626', '#16a34a', '#9333ea', '#ea580c', '#4f46e5', '#be123c'][idx % 7],
+          data,
+          edges: itemEdges,
+          nodeJs: itemNodeJs,
+          edgeJs: itemEdgeJs,
+          edgeMatrix: buildEdgeMatrix(residueLabels.length, itemEdges, itemEdgeJs),
+        };
+      })
+      .filter((item) => item.meta?.analysis_id && (item.nodeJs.length || item.edgeJs.length));
+  }, [comparisonDataMap, edgeDisplayMode, edges, jsComparisonItems, modelEdgeSet, residueLabels.length]);
+
+  const globalNodeJsMax = useMemo(() => {
+    const vals = jsLoadedItems.flatMap((item) => item.nodeJs).map(Number).filter(Number.isFinite);
+    return vals.length ? Math.max(...vals, 1e-9) : 1;
+  }, [jsLoadedItems]);
+
+  const globalEdgeJsMax = useMemo(() => {
+    const vals = jsLoadedItems.flatMap((item) => item.edgeJs).map(Number).filter(Number.isFinite);
+    return vals.length ? Math.max(...vals, 1e-9) : 1;
+  }, [jsLoadedItems]);
+
+  const multiNodePlot = useMemo(() => {
+    if (!jsLoadedItems.length) return null;
+    return {
+      data: jsLoadedItems.map((item) => ({
+        x: residueLabels,
+        y: item.nodeJs,
+        type: 'bar',
+        name: item.label,
+        marker: { color: item.color },
+        hovertemplate: `${item.label}<br>%{x}<br>JS: %{y:.4f}<extra></extra>`,
+      })),
+      layout: {
+        barmode: 'group',
+        margin: { l: 55, r: 20, t: 20, b: 100 },
+        paper_bgcolor: '#ffffff',
+        plot_bgcolor: '#ffffff',
+        font: { color: '#111827' },
+        xaxis: { tickangle: -45, automargin: true, tickfont: { size: 9 } },
+        yaxis: { title: 'Node JS', range: [0, globalNodeJsMax * 1.05], color: '#111827' },
+        legend: { orientation: 'h', y: -0.28 },
+      },
+      config: { displayModeBar: false, responsive: true },
+    };
+  }, [globalNodeJsMax, jsLoadedItems, residueLabels]);
+
+  const multiTopResidues = useMemo(() => {
+    const rows = [];
+    jsLoadedItems.forEach((item) => {
+      item.nodeJs.forEach((value, idx) => {
+        if (Number.isFinite(Number(value))) {
+          rows.push({ label: residueLabels[idx] || String(idx), value: Number(value), item: item.label });
+        }
+      });
     });
-    return { edges: nextEdges, edgeJs: nextVals };
-  }, [edges, edgeJs, edgeDisplayMode, modelEdgeSet]);
+    rows.sort((a, b) => b.value - a.value);
+    return rows.slice(0, 20);
+  }, [jsLoadedItems, residueLabels]);
 
-  const topResidues = useMemo(() => topK(nodeJs, residueLabels, 10), [nodeJs, residueLabels]);
-  const topEdges = useMemo(() => {
-    const currentEdges = filteredEdgePayload.edges;
-    const currentEdgeJs = filteredEdgePayload.edgeJs;
-    if (!currentEdges.length || !currentEdgeJs.length) return [];
-    const labels = currentEdges.map((e) => `${residueLabels[e[0]] ?? e[0]} — ${residueLabels[e[1]] ?? e[1]}`);
-    return topK(currentEdgeJs, labels, 10);
-  }, [filteredEdgePayload, residueLabels]);
-
-  const edgeMatrix = useMemo(
-    () => buildEdgeMatrix(residueLabels.length, filteredEdgePayload.edges, filteredEdgePayload.edgeJs),
-    [residueLabels, filteredEdgePayload]
-  );
-  const edgeMatrixHasValues = useMemo(
-    () => edgeMatrix?.some((row) => row?.some((val) => Number.isFinite(val))),
-    [edgeMatrix]
-  );
+  const multiTopEdges = useMemo(() => {
+    const rows = [];
+    jsLoadedItems.forEach((item) => {
+      item.edges.forEach((edge, idx) => {
+        const value = Number(item.edgeJs[idx]);
+        if (!Number.isFinite(value)) return;
+        rows.push({
+          label: `${residueLabels[edge[0]] ?? edge[0]} — ${residueLabels[edge[1]] ?? edge[1]}`,
+          value,
+          item: item.label,
+        });
+      });
+    });
+    rows.sort((a, b) => b.value - a.value);
+    return rows.slice(0, 20);
+  }, [jsLoadedItems, residueLabels]);
 
   const handleRunAnalysis = useCallback(async () => {
     if (!selectedClusterId) return;
@@ -890,29 +1089,6 @@ export default function SamplingVizPage() {
     load();
   }, [selectedSampleId, sampleStatsCache, projectId, systemId, selectedClusterId]);
 
-  const energyAnalysesForModel = useMemo(() => {
-    if (!selectedAnalysisModelId) return [];
-    // Dedupe: repeated runs create multiple analysis entries per sample_id.
-    // Analyses are already sorted newest-first by the backend, so keep the first per sample_id.
-    const out = [];
-    const seen = new Set();
-    for (const a of modelEnergyAnalyses) {
-      if (a.model_id !== selectedAnalysisModelId) continue;
-      const sampleType = String(a.sample_type || '').toLowerCase();
-      const isStateDerived = sampleType === 'state_pose' || sampleType === 'state_eval';
-      if (!isStateDerived) {
-        if ((a.md_label_mode || 'assigned') !== mdLabelMode) continue;
-        if (Boolean(a.drop_invalid) !== Boolean(dropInvalid)) continue;
-      }
-      const sid = a.sample_id || '';
-      if (!sid) continue;
-      if (seen.has(sid)) continue;
-      seen.add(sid);
-      out.push(a);
-    }
-    return out;
-  }, [modelEnergyAnalyses, selectedAnalysisModelId, mdLabelMode, dropInvalid]);
-
   const baseEnergyAnalysesForModel = useMemo(() => {
     if (!selectedAnalysisModelId) return [];
     return modelEnergyAnalyses.filter(
@@ -923,90 +1099,82 @@ export default function SamplingVizPage() {
     );
   }, [modelEnergyAnalyses, selectedAnalysisModelId]);
 
-  const [energySeries, setEnergySeries] = useState([]);
+  const [energyGraphs, setEnergyGraphs] = useState([]);
   const [energyError, setEnergyError] = useState(null);
   const [energyLoading, setEnergyLoading] = useState(false);
 
   useEffect(() => {
     const run = async () => {
       setEnergyError(null);
-      setEnergySeries([]);
-      if (!selectedAnalysisModelId) return;
-      const metas = energyAnalysesForModel;
-      if (!metas.length) return;
+      setEnergyGraphs([]);
+      if (!selectedAnalysisModelIds.length) return;
       setEnergyLoading(true);
       try {
-        const series = [];
-        // Load energies for all samples (MD + Potts) that have an analysis for this model.
-        for (let idx = 0; idx < metas.length; idx += 1) {
-          const meta = metas[idx];
-          const payload = await loadAnalysisData('model_energy', meta.analysis_id, {
-            maxRows: energyLoadLimit > 0 ? energyLoadLimit : undefined,
-            sampleSeed: 0,
-          });
-          const energies = payload?.data?.energies || [];
-          if (!Array.isArray(energies) || !energies.length) continue;
-          const sample = sampleEntries.find((s) => s.sample_id === meta.sample_id);
-          const sampleType = String(meta.sample_type || sample?.type || '').toLowerCase();
-          series.push({
-            id: meta.sample_id,
-            sample_id: meta.sample_id,
-            label: sample?.name || meta.sample_name || meta.sample_id,
-            kind: sampleType === 'state_pose' ? 'state_pose' : sampleType || 'sample',
-            type: sampleType || 'sample',
-            energies,
-          });
+        const graphs = [];
+        for (const group of selectedAnalysisGroups) {
+          const metas = [];
+          const seen = new Set();
+          for (const a of modelEnergyAnalyses) {
+            if (a.model_id !== group.modelId) continue;
+            const sampleType = String(a.sample_type || '').toLowerCase();
+            const isStateDerived = sampleType === 'state_pose' || sampleType === 'state_eval';
+            if (!isStateDerived) {
+              if ((a.md_label_mode || 'assigned') !== mdLabelMode) continue;
+              if (Boolean(a.drop_invalid) !== Boolean(dropInvalid)) continue;
+            }
+            const sid = a.sample_id || '';
+            if (!sid || seen.has(sid)) continue;
+            seen.add(sid);
+            metas.push(a);
+          }
+          const series = [];
+          for (const meta of metas) {
+            const payload = await loadAnalysisData('model_energy', meta.analysis_id, {
+              maxRows: energyLoadLimit > 0 ? energyLoadLimit : undefined,
+              sampleSeed: 0,
+            });
+            const energies = payload?.data?.energies || [];
+            if (!Array.isArray(energies) || !energies.length) continue;
+            const sample = sampleEntries.find((s) => s.sample_id === meta.sample_id);
+            const sampleType = String(meta.sample_type || sample?.type || '').toLowerCase();
+            series.push({
+              id: `${group.modelId}:${meta.sample_id}`,
+              sample_id: meta.sample_id,
+              label: sample?.name || meta.sample_name || meta.sample_id,
+              kind: sampleType === 'state_pose' ? 'state_pose' : sampleType || 'sample',
+              type: sampleType || 'sample',
+              values: energies,
+            });
+          }
+          graphs.push({ modelId: group.modelId, modelName: group.modelName, series });
         }
-        setEnergySeries(series);
+        setEnergyGraphs(graphs);
       } catch (err) {
-        setEnergyError(err.message || 'Failed to load energies.');
+        setEnergyError(err.message || 'Failed to load selected model energies.');
       } finally {
         setEnergyLoading(false);
       }
     };
     run();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedAnalysisModelId, energyAnalysesForModel, energyLoadLimit, loadAnalysisData]);
+  }, [
+    selectedAnalysisModelIds,
+    selectedAnalysisGroups,
+    modelEnergyAnalyses,
+    mdLabelMode,
+    dropInvalid,
+    loadAnalysisData,
+    energyLoadLimit,
+    sampleEntries,
+  ]);
 
-  const energyPlotSeries = useMemo(
-    () =>
-      energySeries.map((s) => ({
-        id: s.id || s.sample_id,
-        sample_id: s.sample_id,
-        label: s.label,
-        kind: s.kind,
-        type: s.type,
-        values: s.energies,
-      })),
-    [energySeries]
-  );
-  const {
-    selectedIds: selectedEnergySeriesIds,
-    setSelectedIds: setSelectedEnergySeriesIds,
-    selectedSeries: visibleEnergyPlotSeries,
-  } = useEnergySeriesSelection(energyPlotSeries);
-
-  const energyPlot = useMemo(() => buildEnergyDistributionPlot({
-    series: visibleEnergyPlotSeries.map((s) => ({
-      id: s.id,
-      label: s.label,
-      kind: s.kind,
-      type: s.type,
-      values: s.values,
-    })),
-    mode: energyGraphMode,
-    title: energyGraphMode === 'curves' ? 'Energy fitted curves' : 'Energy distributions',
-    xTitle: 'Energy',
-    height: 260,
-    background: 'white',
-  }), [visibleEnergyPlotSeries, energyGraphMode]);
-
+  const globalEnergyRange = useMemo(() => {
+    const vals = energyGraphs.flatMap((graph) => graph.series.flatMap((series) => series.values || [])).map(Number).filter(Number.isFinite);
+    if (!vals.length) return null;
+    return [Math.min(...vals), Math.max(...vals)];
+  }, [energyGraphs]);
 
   if (loadingSystem) return <Loader message="Loading sampling explorer..." />;
   if (systemError) return <ErrorMessage message={systemError} />;
-
-  const canCompare = Boolean(selectedMdSampleId && selectedSampleId);
-  const comparisonMissing = canCompare && !selectedMdVsMeta;
 
   return (
     <div className="space-y-4">
@@ -1017,9 +1185,88 @@ export default function SamplingVizPage() {
         docPath="/docs/sampling_viz_help.md"
         onClose={() => setHelpOpen(false)}
       />
+      {runPanelOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
+          <div className="max-h-[90vh] w-full max-w-3xl overflow-y-auto rounded-lg border border-gray-700 bg-gray-950 p-4 shadow-xl">
+            <div className="flex items-start justify-between gap-3 border-b border-gray-800 pb-3">
+              <div>
+                <h2 className="text-lg font-semibold text-white">Run Sampling Explorer analysis</h2>
+                <p className="mt-1 text-xs text-gray-400">Computes MD-vs-sample JS metrics and model-energy distributions for the selected Potts model.</p>
+              </div>
+              <button type="button" onClick={() => setRunPanelOpen(false)} className="text-sm text-gray-400 hover:text-gray-100">Close</button>
+            </div>
+            <div className="space-y-3 pt-4">
+              <div className="space-y-1">
+                <label className="block text-xs text-gray-400">Potts model</label>
+                <select
+                  value={runAnalysisModelId}
+                  onChange={(e) => setRunAnalysisModelId(e.target.value)}
+                  disabled={!pottsModels.length}
+                  className="w-full bg-gray-900 border border-gray-700 rounded-md px-3 py-2 text-white disabled:opacity-60"
+                >
+                  {!pottsModels.length && <option value="">No models</option>}
+                  {pottsModels.map((m) => (
+                    <option key={m.model_id} value={m.model_id}>{m.name || m.model_id}</option>
+                  ))}
+                </select>
+              </div>
+              <div className="space-y-1">
+                <label className="block text-xs text-gray-400">Metric edge set</label>
+                <select
+                  value={analysisEdgeMode}
+                  onChange={(e) => setAnalysisEdgeMode(e.target.value)}
+                  className="w-full bg-gray-900 border border-gray-700 rounded-md px-3 py-2 text-white"
+                >
+                  <option value="model">Potts model edges</option>
+                  <option value="cluster">Cluster edges</option>
+                  <option value="contact">Contact edges (custom cutoff)</option>
+                  <option value="all_vs_all">All residue pairs</option>
+                </select>
+              </div>
+              {analysisEdgeMode === 'contact' && (
+                <div className="grid grid-cols-2 gap-2">
+                  <div className="space-y-1">
+                    <label className="block text-xs text-gray-400">Contact cutoff (A)</label>
+                    <input value={analysisContactCutoff} onChange={(e) => setAnalysisContactCutoff(e.target.value)} className="w-full bg-gray-900 border border-gray-700 rounded-md px-3 py-2 text-white" />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="block text-xs text-gray-400">Atom mode</label>
+                    <select value={analysisContactAtomMode} onChange={(e) => setAnalysisContactAtomMode(e.target.value)} className="w-full bg-gray-900 border border-gray-700 rounded-md px-3 py-2 text-white">
+                      <option value="CA">CA</option>
+                      <option value="CM">CM</option>
+                    </select>
+                  </div>
+                </div>
+              )}
+              <div className="rounded-md border border-gray-800 bg-gray-900/60 p-3 text-[11px] text-gray-400">
+                MD label mode is fixed to assigned labels and invalid SA frames are dropped.
+              </div>
+              <button
+                type="button"
+                onClick={async () => {
+                  await handleRunAnalysis();
+                  setRunPanelOpen(false);
+                }}
+                disabled={!runAnalysisModelId}
+                className="inline-flex items-center gap-2 px-3 py-2 rounded-md bg-cyan-600 hover:bg-cyan-500 text-white text-sm disabled:opacity-60 disabled:cursor-not-allowed"
+              >
+                <Play className="h-4 w-4" />
+                Run analysis
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="flex items-start justify-between gap-3">
         <div>
+          <button
+            type="button"
+            onClick={() => navigate(`/projects/${projectId}/systems/${systemId}`)}
+            className="mb-3 inline-flex items-center gap-2 text-xs px-3 py-2 rounded-md border border-gray-700 text-gray-200 hover:border-gray-500"
+          >
+            Back to system
+          </button>
           <h1 className="text-2xl font-semibold text-white">Sampling Explorer</h1>
           <p className="text-sm text-gray-400">
             Sampling runs save only <code>sample.npz</code>. Use the analysis job to generate derived metrics under{' '}
@@ -1034,6 +1281,14 @@ export default function SamplingVizPage() {
           >
             <CircleHelp className="h-4 w-4" />
             Help
+          </button>
+          <button
+            type="button"
+            onClick={() => setRunPanelOpen(true)}
+            className="text-xs px-3 py-2 rounded-md bg-cyan-600 text-white hover:bg-cyan-500 inline-flex items-center gap-2"
+          >
+            <Play className="h-4 w-4" />
+            New analysis
           </button>
           <button
             type="button"
@@ -1063,17 +1318,10 @@ export default function SamplingVizPage() {
           >
             Nearest neighbours
           </button>
-          <button
-            type="button"
-            onClick={() => navigate(`/projects/${projectId}/systems/${systemId}`)}
-            className="text-xs px-3 py-2 rounded-md border border-gray-700 text-gray-200 hover:border-gray-500"
-          >
-            Back to system
-          </button>
         </div>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-[360px_1fr] gap-4">
+      <div className="grid grid-cols-1 xl:grid-cols-[340px_320px_minmax(0,1fr)] gap-4">
         <aside className="space-y-3">
           <div className="rounded-lg border border-gray-800 bg-gray-900/40 p-3 space-y-3">
             <div className="space-y-1">
@@ -1107,6 +1355,7 @@ export default function SamplingVizPage() {
             <div className="space-y-2">
               <div className="flex items-center justify-between gap-2">
                 <p className="text-xs font-semibold text-gray-300">Analyses</p>
+                {analysesLoading && <span className="text-[11px] text-gray-500">Loading...</span>}
                 <button
                   type="button"
                   onClick={async () => {
@@ -1124,7 +1373,7 @@ export default function SamplingVizPage() {
                   <p className="text-[11px] text-gray-500">No Potts analyses yet.</p>
                 )}
                 {analysisGroups.map((group) => {
-                  const isSelected = group.modelId === selectedAnalysisModelId;
+                  const isSelected = selectedAnalysisModelIds.includes(group.modelId);
                   const isPending = pendingAnalysisEntry?.modelId === group.modelId;
                   const progress = isPending ? pendingAnalysisEntry.progress : null;
                   const status = isPending ? pendingAnalysisEntry.status : null;
@@ -1140,11 +1389,25 @@ export default function SamplingVizPage() {
                       <div className="flex items-start justify-between gap-2">
                         <button
                           type="button"
-                          onClick={() => setSelectedAnalysisModelId(group.modelId)}
+                          onClick={() => {
+                            setSelectedAnalysisModelIds((prev) => (
+                              prev.includes(group.modelId)
+                                ? prev.filter((id) => id !== group.modelId)
+                                : [...prev, group.modelId]
+                            ));
+                          }}
                           className="min-w-0 flex-1 text-left"
                         >
                           <div className="flex items-center justify-between gap-2">
-                            <span className="text-sm text-white truncate">{group.modelName}</span>
+                            <span className="text-sm text-white truncate">
+                              <input
+                                type="checkbox"
+                                readOnly
+                                checked={selectedAnalysisModelIds.includes(group.modelId)}
+                                className="mr-2 align-middle"
+                              />
+                              {group.modelName}
+                            </span>
                             <span className="text-[10px] text-gray-500 whitespace-nowrap">
                               {group.mdVsCount} compare · {group.energyCount} energy
                             </span>
@@ -1152,6 +1415,15 @@ export default function SamplingVizPage() {
                           <div className="text-[10px] text-gray-500 mt-0.5 font-mono">
                             {String(group.modelId || '').slice(0, 8)}
                           </div>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setAnalysisInfoModelId((prev) => (prev === group.modelId ? '' : group.modelId))}
+                          className="text-gray-400 hover:text-cyan-200"
+                          title="Show analysis metadata"
+                          aria-label={`Show metadata for ${group.modelName}`}
+                        >
+                          <Info className="h-4 w-4" />
                         </button>
                         <button
                           type="button"
@@ -1176,6 +1448,15 @@ export default function SamplingVizPage() {
                           </p>
                         </div>
                       )}
+                      {analysisInfoModelId === group.modelId && (
+                        <div className="mt-2">
+                          <AnalysisInfoPanel
+                            group={group}
+                            analyses={analyses}
+                            onClose={() => setAnalysisInfoModelId('')}
+                          />
+                        </div>
+                      )}
                     </div>
                   );
                 })}
@@ -1194,71 +1475,6 @@ export default function SamplingVizPage() {
                   </div>
                 )}
               </div>
-            </div>
-
-            <div className="space-y-2 rounded-md border border-gray-800 bg-gray-950/40 p-3">
-              <p className="text-xs font-semibold text-gray-300">Run new analysis</p>
-              <div className="space-y-1">
-                <label className="block text-xs text-gray-400">Potts model</label>
-                <select
-                  value={runAnalysisModelId}
-                  onChange={(e) => setRunAnalysisModelId(e.target.value)}
-                  disabled={!pottsModels.length}
-                  className="w-full bg-gray-900 border border-gray-700 rounded-md px-3 py-2 text-white disabled:opacity-60"
-                >
-                  {!pottsModels.length && <option value="">No models</option>}
-                  {pottsModels.map((m) => (
-                    <option key={m.model_id} value={m.model_id}>
-                      {m.name || m.model_id}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <div className="space-y-1">
-                <label className="block text-xs text-gray-400">Metric edge set</label>
-                <select
-                  value={analysisEdgeMode}
-                  onChange={(e) => setAnalysisEdgeMode(e.target.value)}
-                  className="w-full bg-gray-900 border border-gray-700 rounded-md px-3 py-2 text-white"
-                >
-                  <option value="model">Potts model edges</option>
-                  <option value="cluster">Cluster edges</option>
-                  <option value="contact">Contact edges (custom cutoff)</option>
-                  <option value="all_vs_all">All residue pairs</option>
-                </select>
-              </div>
-              {analysisEdgeMode === 'contact' && (
-                <div className="grid grid-cols-2 gap-2">
-                  <div className="space-y-1">
-                    <label className="block text-xs text-gray-400">Contact cutoff (A)</label>
-                    <input
-                      value={analysisContactCutoff}
-                      onChange={(e) => setAnalysisContactCutoff(e.target.value)}
-                      className="w-full bg-gray-900 border border-gray-700 rounded-md px-3 py-2 text-white"
-                    />
-                  </div>
-                  <div className="space-y-1">
-                    <label className="block text-xs text-gray-400">Atom mode</label>
-                    <select
-                      value={analysisContactAtomMode}
-                      onChange={(e) => setAnalysisContactAtomMode(e.target.value)}
-                      className="w-full bg-gray-900 border border-gray-700 rounded-md px-3 py-2 text-white"
-                    >
-                      <option value="CA">CA</option>
-                      <option value="CM">CM</option>
-                    </select>
-                  </div>
-                </div>
-              )}
-              <button
-                type="button"
-                onClick={handleRunAnalysis}
-                disabled={!runAnalysisModelId}
-                className="inline-flex items-center gap-2 px-3 py-2 rounded-md bg-cyan-600 hover:bg-cyan-500 text-white text-sm disabled:opacity-60 disabled:cursor-not-allowed"
-              >
-                <Play className="h-4 w-4" />
-                Run analysis
-              </button>
             </div>
 
             <div className="space-y-2 rounded-md border border-gray-800 bg-gray-950/40 p-3">
@@ -1503,60 +1719,129 @@ export default function SamplingVizPage() {
           </div>
         </aside>
 
+        <aside className="space-y-3">
+          <div className="rounded-lg border border-gray-800 bg-gray-900/40 p-3 space-y-3">
+            <div>
+              <p className="text-xs font-semibold text-gray-300">JS pairs</p>
+              <p className="mt-1 text-[11px] text-gray-500">
+                For each selected model, choose one or more MD/sample pairs to display in the Node or Edge JS tab.
+              </p>
+            </div>
+            {!selectedAnalysisGroups.length && (
+              <p className="text-[11px] text-gray-500">Select at least one analysis on the left.</p>
+            )}
+            {selectedAnalysisGroups.map((group) => {
+              const pairs = Array.isArray(pairSelections[group.modelId]) ? pairSelections[group.modelId] : [];
+              return (
+                <div key={`pairs:${group.modelId}`} className="rounded-md border border-gray-800 bg-gray-950/40 p-2 space-y-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="min-w-0 truncate text-xs font-semibold text-gray-100">{group.modelName}</p>
+                    <button
+                      type="button"
+                      onClick={() => setPairSelections((prev) => ({
+                        ...prev,
+                        [group.modelId]: [...(prev[group.modelId] || []), makeDefaultPair(group.modelId)],
+                      }))}
+                      className="rounded border border-gray-700 px-2 py-1 text-[11px] text-gray-200 hover:border-cyan-500"
+                    >
+                      Add pair
+                    </button>
+                  </div>
+                  {pairs.map((pair, idx) => {
+                    const meta = findMdVsMeta(group.modelId, pair.mdSampleId, pair.sampleId);
+                    return (
+                      <div key={pair.id || idx} className="space-y-1 rounded border border-gray-800 bg-gray-900/50 p-2">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-[10px] uppercase tracking-wide text-gray-500">Pair {idx + 1}</span>
+                          <button
+                            type="button"
+                            onClick={() => setPairSelections((prev) => ({
+                              ...prev,
+                              [group.modelId]: (prev[group.modelId] || []).filter((_, row) => row !== idx),
+                            }))}
+                            className="text-gray-500 hover:text-red-300"
+                            disabled={pairs.length <= 1}
+                          >
+                            Remove
+                          </button>
+                        </div>
+                        <select
+                          value={pair.mdSampleId}
+                          onChange={(e) => setPairSelections((prev) => ({
+                            ...prev,
+                            [group.modelId]: (prev[group.modelId] || []).map((row, rowIdx) => rowIdx === idx ? { ...row, mdSampleId: e.target.value } : row),
+                          }))}
+                          className="w-full bg-gray-950 border border-gray-700 rounded px-2 py-1.5 text-xs text-white"
+                        >
+                          {mdSamples.map((sample) => <option key={sample.sample_id} value={sample.sample_id}>{sample.name || sample.sample_id}</option>)}
+                        </select>
+                        <select
+                          value={pair.sampleId}
+                          onChange={(e) => setPairSelections((prev) => ({
+                            ...prev,
+                            [group.modelId]: (prev[group.modelId] || []).map((row, rowIdx) => rowIdx === idx ? { ...row, sampleId: e.target.value } : row),
+                          }))}
+                          className="w-full bg-gray-950 border border-gray-700 rounded px-2 py-1.5 text-xs text-white"
+                        >
+                          {selectableSamples.map((sample) => <option key={sample.sample_id} value={sample.sample_id}>{sample.name || sample.sample_id}</option>)}
+                        </select>
+                        {!meta && (
+                          <p className="text-[10px] text-amber-300">No stored JS analysis for this pair/model.</p>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              );
+            })}
+          </div>
+        </aside>
+
         <main className="space-y-4">
+          <div className="flex flex-wrap items-center gap-2 rounded-lg border border-gray-800 bg-gray-900/40 p-2">
+            <button
+              type="button"
+              onClick={() => setActiveExplorerTab('js')}
+              className={`rounded-md px-3 py-2 text-sm ${activeExplorerTab === 'js' ? 'bg-cyan-600 text-white' : 'text-gray-300 hover:bg-gray-800'}`}
+            >
+              Node/Edge JS
+            </button>
+            <button
+              type="button"
+              onClick={() => setActiveExplorerTab('energies')}
+              className={`rounded-md px-3 py-2 text-sm ${activeExplorerTab === 'energies' ? 'bg-cyan-600 text-white' : 'text-gray-300 hover:bg-gray-800'}`}
+            >
+              Energies
+            </button>
+          </div>
+
+          {activeExplorerTab === 'js' && (
           <section className="rounded-lg border border-gray-800 bg-gray-900/40 p-4 space-y-4">
-            <div className="flex items-start justify-between gap-3">
+            <div className="flex flex-wrap items-start justify-between gap-3">
               <div>
-                <h2 className="text-sm font-semibold text-gray-200">MD vs sample</h2>
+                <h2 className="text-sm font-semibold text-gray-200">Node/Edge JS</h2>
                 <p className="text-[11px] text-gray-500">
-                  Shows JS divergence on nodes/edges for the selected MD sample and Potts sample.
+                  Select analyses on the left and MD/sample pairs in the middle panel. Each pair becomes one item in the plots.
                 </p>
               </div>
-              {analysesLoading && <p className="text-[11px] text-gray-500">Loading analyses…</p>}
-            </div>
-
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-              <div>
-                <label className="block text-xs text-gray-400 mb-1">MD sample</label>
-                <select
-                  value={selectedMdSampleId}
-                  onChange={(e) => setSelectedMdSampleId(e.target.value)}
-                  className="w-full bg-gray-900 border border-gray-700 rounded-md px-3 py-2 text-white"
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setActiveJsSubtab('nodes')}
+                  className={`rounded-md px-3 py-1.5 text-xs ${activeJsSubtab === 'nodes' ? 'bg-cyan-600 text-white' : 'border border-gray-700 text-gray-300 hover:bg-gray-800'}`}
                 >
-                  {mdSamples.map((s) => (
-                    <option key={s.sample_id} value={s.sample_id}>
-                      {s.name || s.sample_id}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <div>
-                <label className="block text-xs text-gray-400 mb-1">Sample</label>
-                <select
-                  value={selectedSampleId}
-                  onChange={(e) => setSelectedSampleId(e.target.value)}
-                  className="w-full bg-gray-900 border border-gray-700 rounded-md px-3 py-2 text-white"
+                  Nodes
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setActiveJsSubtab('edges')}
+                  className={`rounded-md px-3 py-1.5 text-xs ${activeJsSubtab === 'edges' ? 'bg-cyan-600 text-white' : 'border border-gray-700 text-gray-300 hover:bg-gray-800'}`}
                 >
-                  {selectableSamples.map((s) => (
-                    <option key={s.sample_id} value={s.sample_id}>
-                      {s.name || s.sample_id}
-                    </option>
-                  ))}
-                </select>
+                  Edges
+                </button>
               </div>
             </div>
 
-            {comparisonMissing && (
-              <div className="rounded-md border border-yellow-800 bg-yellow-950/30 p-3 text-sm text-yellow-200">
-                No analysis found for this pair/settings. Click <span className="font-semibold">Run analysis</span> to compute it.
-              </div>
-            )}
-            {selectedSampleAllInvalid && (
-              <div className="rounded-md border border-yellow-800 bg-yellow-950/30 p-3 text-sm text-yellow-200">
-                This SA sample has no valid frames after invalid-frame filtering. Enable <span className="font-semibold">Keep invalid SA</span>{' '}
-                to analyze decoded labels anyway, or adjust the SA settings to improve validity.
-              </div>
-            )}
             {analysisJobStatus?.status === 'finished' && analysisSummary && (
               <div className="rounded-md border border-cyan-800 bg-cyan-950/20 p-3 text-[12px] text-cyan-100 space-y-1">
                 <div>
@@ -1575,252 +1860,210 @@ export default function SamplingVizPage() {
               </div>
             )}
             {comparisonError && <ErrorMessage message={comparisonError} />}
-            {comparisonLoading && <p className="text-sm text-gray-400">Loading…</p>}
+            {comparisonLoading && <p className="text-sm text-gray-400">Loading selected JS analyses...</p>}
+            {!selectedAnalysisGroups.length && (
+              <div className="rounded-md border border-yellow-800 bg-yellow-950/30 p-3 text-sm text-yellow-200">
+                Select one or more analyses in the left panel.
+              </div>
+            )}
+            {!!selectedAnalysisGroups.length && !jsLoadedItems.length && !comparisonLoading && (
+              <div className="rounded-md border border-yellow-800 bg-yellow-950/30 p-3 text-sm text-yellow-200">
+                No matching MD-vs-sample analysis is available for the selected pair setup.
+              </div>
+            )}
 
-            {comparisonData && (
-              <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+            {activeJsSubtab === 'nodes' && !!multiNodePlot && (
+              <>
                 <div className="rounded-md border border-gray-800 bg-white p-3">
                   <div className="flex items-center justify-between gap-2 mb-2">
-                    <p className="text-xs font-semibold text-gray-800">Node JS</p>
+                    <p className="text-xs font-semibold text-gray-800">Node JS by residue and selected pair</p>
                     <button
                       type="button"
                       className="text-[11px] text-gray-600 hover:text-gray-800"
-                      onClick={() =>
-                        setOverlayPlot({
-                          title: 'Node JS',
-                          data: [
-                            {
-                              x: residueLabels,
-                              y: nodeJs,
-                              type: 'bar',
-                              marker: { color: '#22d3ee' },
-                            },
-                          ],
-                          layout: {
-                            margin: { l: 40, r: 10, t: 20, b: 80 },
-                            paper_bgcolor: '#ffffff',
-                            plot_bgcolor: '#ffffff',
-                            font: { color: '#111827' },
-                            xaxis: { tickfont: { size: 9 }, color: '#111827' },
-                            yaxis: { title: 'JS divergence', color: '#111827' },
-                          },
-                        })
-                      }
+                      onClick={() => setOverlayPlot({ ...multiNodePlot, title: 'Node JS by residue and selected pair' })}
                     >
                       Maximize
                     </button>
                   </div>
                   <Plot
-                    data={[
-                      {
-                        x: residueLabels,
-                        y: nodeJs,
-                        type: 'bar',
-                        marker: { color: '#22d3ee' },
-                      },
-                    ]}
-                    layout={{
-                      margin: { l: 40, r: 10, t: 10, b: 60 },
-                      paper_bgcolor: '#ffffff',
-                      plot_bgcolor: '#ffffff',
-                      font: { color: '#111827' },
-                      xaxis: { tickfont: { size: 9 }, color: '#111827' },
-                      yaxis: { title: 'JS', color: '#111827' },
-                    }}
-                    config={{ displayModeBar: false, responsive: true }}
+                    data={multiNodePlot.data}
+                    layout={multiNodePlot.layout}
+                    config={multiNodePlot.config}
                     useResizeHandler
-                    style={{ width: '100%', height: '220px' }}
+                    style={{ width: '100%', height: 'min(68vw, 620px)' }}
                   />
-                  <div className="mt-2 text-[11px] text-gray-700">
-                    <p className="font-semibold">Top residues</p>
-                    <div className="grid grid-cols-2 gap-x-4 gap-y-1 mt-1">
-                      {topResidues.map(([v, label]) => (
-                        <div key={label} className="flex items-center justify-between gap-2">
-                          <span className="truncate">{label}</span>
-                          <span className="font-mono">{Number(v).toFixed(4)}</span>
-                        </div>
-                      ))}
-                    </div>
+                </div>
+                <div className="rounded-md border border-gray-800 bg-gray-950/40 p-3">
+                  <p className="text-xs font-semibold text-gray-200">Top residues</p>
+                  <div className="mt-2 grid grid-cols-1 lg:grid-cols-2 gap-x-6 gap-y-1 text-[11px] text-gray-300">
+                    {multiTopResidues.map((row) => (
+                      <div key={`${row.item}:${row.label}`} className="flex items-center justify-between gap-3">
+                        <span className="min-w-0 truncate">{row.label} · {row.item}</span>
+                        <span className="font-mono text-gray-100">{row.value.toFixed(4)}</span>
+                      </div>
+                    ))}
                   </div>
                 </div>
+              </>
+            )}
 
-                <div className="rounded-md border border-gray-800 bg-white p-3">
-                  <div className="flex items-center justify-between gap-2 mb-2">
-                    <p className="text-xs font-semibold text-gray-800">Edge JS</p>
-                    {edgeMatrixHasValues && (
-                      <button
-                        type="button"
-                        className="text-[11px] text-gray-600 hover:text-gray-800"
-                        onClick={() =>
-                          setOverlayPlot({
-                            title: 'Edge JS heatmap',
-                          data: [
-                              {
-                                z: edgeMatrix,
-                                x: residueLabels,
-                                y: residueLabels,
-                                type: 'heatmap',
-                                colorscale: 'Viridis',
-                                zmin: 0,
-                                hovertemplate: 'x: %{x}<br>y: %{y}<br>JS: %{z:.4f}<extra></extra>',
-                              },
-                            ],
-                            layout: {
-                              margin: { l: 80, r: 20, t: 20, b: 120 },
+            {activeJsSubtab === 'edges' && !!jsLoadedItems.length && (
+              <>
+                <div className="grid grid-cols-1 2xl:grid-cols-2 gap-4">
+                  {jsLoadedItems.map((item) => {
+                    const hasValues = item.edgeMatrix?.some((row) => row?.some((val) => Number.isFinite(val)));
+                    return (
+                      <div key={`edge-matrix:${item.key}`} className="rounded-md border border-gray-800 bg-white p-3">
+                        <div className="mb-2 flex items-center justify-between gap-2">
+                          <p className="min-w-0 truncate text-xs font-semibold text-gray-800">{item.label}</p>
+                          {hasValues && (
+                            <button
+                              type="button"
+                              className="text-[11px] text-gray-600 hover:text-gray-800"
+                              onClick={() => setOverlayPlot({
+                                title: item.label,
+                                data: [{
+                                  z: item.edgeMatrix,
+                                  x: residueLabels,
+                                  y: residueLabels,
+                                  type: 'heatmap',
+                                  colorscale: 'Viridis',
+                                  zmin: 0,
+                                  zmax: globalEdgeJsMax,
+                                  hovertemplate: 'x: %{x}<br>y: %{y}<br>JS: %{z:.4f}<extra></extra>',
+                                }],
+                                layout: {
+                                  margin: { l: 80, r: 20, t: 20, b: 120 },
+                                  paper_bgcolor: '#ffffff',
+                                  plot_bgcolor: '#ffffff',
+                                  font: { color: '#111827' },
+                                  xaxis: { tickangle: -45, automargin: true, tickfont: { size: 9 } },
+                                  yaxis: { automargin: true, scaleanchor: 'x', scaleratio: 1, tickfont: { size: 9 } },
+                                },
+                              })}
+                            >
+                              Maximize
+                            </button>
+                          )}
+                        </div>
+                        {!hasValues ? (
+                          <p className="py-12 text-center text-sm text-gray-500">No edge JS values.</p>
+                        ) : (
+                          <Plot
+                            data={[{
+                              z: item.edgeMatrix,
+                              x: residueLabels,
+                              y: residueLabels,
+                              type: 'heatmap',
+                              colorscale: 'Viridis',
+                              zmin: 0,
+                              zmax: globalEdgeJsMax,
+                              colorbar: { title: 'JS' },
+                              hovertemplate: 'x: %{x}<br>y: %{y}<br>JS: %{z:.4f}<extra></extra>',
+                            }]}
+                            layout={{
+                              margin: { l: 70, r: 20, t: 10, b: 105 },
                               paper_bgcolor: '#ffffff',
                               plot_bgcolor: '#ffffff',
                               font: { color: '#111827' },
-                              xaxis: {
-                                title: 'Residue',
-                                color: '#111827',
-                                tickangle: -45,
-                                automargin: true,
-                                tickfont: { size: 10 },
-                              },
-                              yaxis: {
-                                title: 'Residue',
-                                color: '#111827',
-                                automargin: true,
-                                tickfont: { size: 10 },
-                              },
-                            },
-                          })
-                        }
-                      >
-                        Maximize
-                      </button>
-                    )}
-                  </div>
-
-                  {!edgeMatrixHasValues && (
-                    <p className="text-[11px] text-gray-600">
-                      {!selectedAnalysisModelId
-                        ? 'Select an analysis in the sidebar to load edge metrics.'
-                        : !edges.length
-                          ? 'Selected Potts model has no edges.'
-                          : 'No edge JS available yet for the selected analysis.'}
-                    </p>
-                  )}
-                  {edgeMatrixHasValues && (
-                    <Plot
-                      data={[
-                        {
-                          z: edgeMatrix,
-                          x: residueLabels,
-                          y: residueLabels,
-                          type: 'heatmap',
-                          colorscale: 'Viridis',
-                          zmin: 0,
-                          hovertemplate: 'x: %{x}<br>y: %{y}<br>JS: %{z:.4f}<extra></extra>',
-                        },
-                      ]}
-                      layout={{
-                        margin: { l: 70, r: 20, t: 10, b: 110 },
-                        paper_bgcolor: '#ffffff',
-                        plot_bgcolor: '#ffffff',
-                        font: { color: '#111827' },
-                        xaxis: {
-                          tickangle: -45,
-                          automargin: true,
-                          tickfont: { size: 9 },
-                        },
-                        yaxis: {
-                          automargin: true,
-                          tickfont: { size: 9 },
-                        },
-                      }}
-                      config={{ displayModeBar: false, responsive: true }}
-                      useResizeHandler
-                      style={{ width: '100%', height: '300px' }}
-                    />
-                  )}
-                  {!!topEdges.length && (
-                    <div className="mt-2 text-[11px] text-gray-700">
-                      <p className="font-semibold">Top edges</p>
-                      <div className="space-y-1 mt-1">
-                        {topEdges.map(([v, label]) => (
-                          <div key={label} className="flex items-center justify-between gap-2">
-                            <span className="truncate">{label}</span>
-                            <span className="font-mono">{Number(v).toFixed(4)}</span>
-                          </div>
-                        ))}
+                              xaxis: { tickangle: -45, automargin: true, tickfont: { size: 8 } },
+                              yaxis: { automargin: true, scaleanchor: 'x', scaleratio: 1, tickfont: { size: 8 } },
+                            }}
+                            config={{ displayModeBar: false, responsive: true }}
+                            useResizeHandler
+                            style={{ width: '100%', height: 'min(58vw, 520px)' }}
+                          />
+                        )}
                       </div>
-                    </div>
-                  )}
+                    );
+                  })}
                 </div>
-              </div>
+                <div className="rounded-md border border-gray-800 bg-gray-950/40 p-3">
+                  <p className="text-xs font-semibold text-gray-200">Top edges</p>
+                  <div className="mt-2 grid grid-cols-1 lg:grid-cols-2 gap-x-6 gap-y-1 text-[11px] text-gray-300">
+                    {multiTopEdges.map((row) => (
+                      <div key={`${row.item}:${row.label}`} className="flex items-center justify-between gap-3">
+                        <span className="min-w-0 truncate">{row.label} · {row.item}</span>
+                        <span className="font-mono text-gray-100">{row.value.toFixed(4)}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </>
             )}
           </section>
 
+          )}
+
+          {activeExplorerTab === 'energies' && (
           <section className="rounded-lg border border-gray-800 bg-gray-900/40 p-4 space-y-2">
-            <div className="flex items-start justify-between gap-3">
+            <div className="flex flex-wrap items-start justify-between gap-3">
               <div>
                 <h2 className="text-sm font-semibold text-gray-200">Energies</h2>
                 <p className="text-[11px] text-gray-500">
-                  Energy distributions are computed on-demand for all samples under the selected model. Single-PDB state poses are shown as vertical markers.
+                  One graph is shown for each selected Potts model. All graphs share the same x-axis energy range.
                 </p>
               </div>
-              <div className="text-[11px] text-gray-500">
-                {energyAnalysesForModel.length ? `${energyAnalysesForModel.length} analyses` : 'no analyses'}
+              <div className="flex items-center gap-2">
+                <select
+                  value={energyGraphMode}
+                  onChange={(e) => setEnergyGraphMode(e.target.value)}
+                  className="rounded border border-gray-700 bg-gray-950 px-2 py-1.5 text-xs text-gray-100"
+                >
+                  <option value="histogram">histograms + fitted curves</option>
+                  <option value="curves">fitted curves only</option>
+                </select>
+                <span className="text-[11px] text-gray-500">{energyGraphs.length} model graph(s)</span>
               </div>
             </div>
 
-            {!selectedAnalysisModelId && (
+            {!selectedAnalysisGroups.length && (
               <div className="rounded-md border border-yellow-800 bg-yellow-950/30 p-3 text-sm text-yellow-200">
-                Select an analysis in the sidebar to load energies.
-              </div>
-            )}
-            {!!selectedAnalysisModelId && !energyAnalysesForModel.length && (
-              <div className="rounded-md border border-yellow-800 bg-yellow-950/30 p-3 text-sm text-yellow-200">
-                No energy analyses found for this analysis/settings. Run a new analysis for this Potts model.
-              </div>
-            )}
-            {selectedSampleAllInvalid && (
-              <div className="rounded-md border border-yellow-800 bg-yellow-950/30 p-3 text-sm text-yellow-200">
-                The selected SA sample contributes no traces here because all frames are currently filtered out as invalid.
+                Select one or more analyses in the left panel to load energies.
               </div>
             )}
             {energyError && <ErrorMessage message={energyError} />}
-            {energyLoading && <p className="text-sm text-gray-400">Loading…</p>}
-
-            {!!energyPlotSeries.length && (
-              <div className="rounded-md border border-gray-800 bg-white p-3">
-                <div className="flex items-center justify-between gap-2 mb-2">
-                  <p className="text-xs font-semibold text-gray-800">
-                    {energyGraphMode === 'curves' ? 'Energy fitted curves' : 'Energy distributions'}
-                  </p>
-                  <div className="flex items-center gap-2">
-                    <select
-                      value={energyGraphMode}
-                      onChange={(e) => setEnergyGraphMode(e.target.value)}
-                      className="rounded border border-gray-300 bg-white px-2 py-1 text-[11px] text-gray-800"
-                    >
-                      <option value="histogram">histograms + fitted curves</option>
-                      <option value="curves">fitted curves only</option>
-                    </select>
-                    <EnergySeriesSelectorButton
-                      series={energyPlotSeries}
-                      selectedIds={selectedEnergySeriesIds}
-                      onChange={setSelectedEnergySeriesIds}
-                    />
-                    <button
-                      type="button"
-                      className="text-[11px] text-gray-600 hover:text-gray-800"
-                      disabled={!energyPlot}
-                      onClick={() => setOverlayPlot({ ...energyPlot, title: 'Energy distributions (overlay)' })}
-                    >
-                      Maximize
-                    </button>
-                  </div>
-                </div>
-                {energyPlot ? (
-                  <EnergyDistributionPlot plot={energyPlot} height={260} />
-                ) : (
-                  <p className="py-12 text-center text-sm text-gray-500">No selected trajectories.</p>
-                )}
+            {energyLoading && <p className="text-sm text-gray-400">Loading energies...</p>}
+            {!!selectedAnalysisGroups.length && !energyLoading && !energyGraphs.some((graph) => graph.series.length) && (
+              <div className="rounded-md border border-yellow-800 bg-yellow-950/30 p-3 text-sm text-yellow-200">
+                No energy analyses found for the selected models/settings. Run a new analysis first.
               </div>
             )}
+
+            <div className="space-y-4">
+              {energyGraphs.filter((graph) => graph.series.length).map((graph) => {
+                const plot = buildEnergyDistributionPlot({
+                  series: graph.series,
+                  mode: energyGraphMode,
+                  title: `${graph.modelName} · ${energyGraphMode === 'curves' ? 'energy fitted curves' : 'energy distributions'}`,
+                  xTitle: 'Energy',
+                  height: 300,
+                  background: 'white',
+                  xRange: globalEnergyRange,
+                });
+                return (
+                  <div key={`energy-graph:${graph.modelId}`} className="rounded-md border border-gray-800 bg-white p-3">
+                    <div className="mb-2 flex items-center justify-between gap-2">
+                      <div className="min-w-0">
+                        <p className="truncate text-xs font-semibold text-gray-800">{graph.modelName}</p>
+                        <p className="text-[11px] text-gray-500">{graph.series.length} trajectories · shared energy axis</p>
+                      </div>
+                      <button
+                        type="button"
+                        className="text-[11px] text-gray-600 hover:text-gray-800"
+                        disabled={!plot}
+                        onClick={() => setOverlayPlot({ ...plot, title: `${graph.modelName} energy distributions` })}
+                      >
+                        Maximize
+                      </button>
+                    </div>
+                    {plot ? <EnergyDistributionPlot plot={plot} height={300} /> : <p className="py-12 text-center text-sm text-gray-500">No energy data.</p>}
+                  </div>
+                );
+              })}
+            </div>
           </section>
+          )}
         </main>
       </div>
     </div>
