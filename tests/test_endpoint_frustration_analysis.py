@@ -184,6 +184,74 @@ def test_delta_energy_analysis_supports_random_frame_limits(monkeypatch, tmp_pat
         assert np.asarray(data["sample_frame_limits"]).tolist() == [3]
 
 
+def test_delta_energy_analysis_resolves_md_state_names(monkeypatch, tmp_path):
+    data_root = tmp_path / "data"
+    monkeypatch.setenv("PHASE_DATA_ROOT", str(data_root))
+
+    store = ProjectStore(base_dir=data_root / "projects")
+    store.create_project("Project", project_id="proj")
+    system = store.create_system("proj", name="System", system_id="sys")
+    store.save_system(system)
+
+    cluster_id = "cluster1"
+    cluster_dirs = store.ensure_cluster_directories("proj", "sys", cluster_id)
+    system_dir = data_root / "projects" / "proj" / "systems" / "sys"
+    np.savez_compressed(
+        cluster_dirs["cluster_dir"] / "cluster.npz",
+        residue_keys=np.asarray(["res_10"], dtype=str),
+        cluster_counts=np.asarray([2], dtype=np.int32),
+    )
+    _write_model(
+        cluster_dirs["potts_models_dir"],
+        system_dir,
+        "model-a",
+        "A",
+        h=[np.asarray([0.0, 1.0])],
+        J={},
+        edges=[],
+    )
+    _write_model(
+        cluster_dirs["potts_models_dir"],
+        system_dir,
+        "model-b",
+        "B",
+        h=[np.asarray([0.5, -0.2])],
+        J={},
+        edges=[],
+    )
+    _write_sample(
+        system_dir,
+        cluster_id,
+        "md-zma",
+        {"name": "MD zma", "type": "md_eval", "method": "md_eval"},
+        labels=np.asarray([[0], [1]], dtype=np.int32),
+    )
+    _write_sample(
+        system_dir,
+        cluster_id,
+        "md-fang",
+        {"name": "MD FANG", "type": "md_eval", "method": "md_eval"},
+        labels=np.asarray([[1], [1]], dtype=np.int32),
+    )
+
+    out = upsert_delta_energy_analysis(
+        project_id="proj",
+        system_id="sys",
+        cluster_id=cluster_id,
+        model_a_ref="model-a",
+        model_b_ref="model-b",
+        sample_ids=["zma", "FANG"],
+        frame_limits={"FANG": 1},
+        energy_bins=8,
+    )
+    assert out["metadata"]["summary"]["requested_sample_refs"] == ["zma", "FANG"]
+    assert out["metadata"]["summary"]["sample_ids"] == ["md-zma", "md-fang"]
+    with np.load(out["analysis_npz"], allow_pickle=False) as data:
+        assert np.asarray(data["sample_ids"]).tolist() == ["md-zma", "md-fang"]
+        assert np.asarray(data["requested_sample_refs"]).tolist() == ["zma", "FANG"]
+        assert np.asarray(data["sample_frame_counts"]).tolist() == [2, 1]
+
+
 def test_endpoint_frustration_analysis_drops_invalid_frames(monkeypatch, tmp_path):
     data_root = tmp_path / "data"
     monkeypatch.setenv("PHASE_DATA_ROOT", str(data_root))

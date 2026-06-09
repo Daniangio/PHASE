@@ -3408,13 +3408,75 @@ def upsert_delta_energy_analysis(
     if len(model_a.h) != len(model_b.h):
         raise ValueError("Model sizes do not match.")
 
+    samples = store.list_samples(project_id, system_id, cluster_id)
+    sample_by_id: dict[str, dict[str, Any]] = {str(s.get("sample_id")): s for s in samples if s.get("sample_id")}
+
+    sample_aliases: dict[str, str] = {}
+    for entry in samples:
+        sid = str(entry.get("sample_id") or "").strip()
+        if not sid:
+            continue
+        aliases = {
+            sid,
+            str(entry.get("name") or "").strip(),
+            str(entry.get("state_id") or "").strip(),
+            str(entry.get("state_name") or "").strip(),
+            str((entry.get("metadata") or {}).get("state_id") or "").strip() if isinstance(entry.get("metadata"), dict) else "",
+            str((entry.get("metadata") or {}).get("state_name") or "").strip() if isinstance(entry.get("metadata"), dict) else "",
+        }
+        name = str(entry.get("name") or "").strip()
+        sample_type = str(entry.get("type") or "").strip().lower()
+        if sample_type == "md_eval" and name.lower().startswith("md "):
+            aliases.add(name[3:].strip())
+        for alias in aliases:
+            key_alias = str(alias or "").strip().lower()
+            if key_alias and key_alias not in sample_aliases:
+                sample_aliases[key_alias] = sid
+
+    resolved_requested: list[str] = []
+    unknown_requested: list[str] = []
+    resolved_frame_limits: dict[str, int] = {}
+    for ref in requested:
+        sid = sample_by_id.get(ref) and ref
+        if not sid:
+            sid = sample_aliases.get(ref.strip().lower())
+        if not sid:
+            unknown_requested.append(ref)
+            continue
+        limit = int(frame_limits.get(ref, frame_limits.get(sid, 0)))
+        if sid not in resolved_requested:
+            resolved_requested.append(sid)
+            resolved_frame_limits[sid] = limit
+        elif limit > 0:
+            resolved_frame_limits[sid] = limit
+    if unknown_requested:
+        available = sorted(
+            {
+                str(entry.get("sample_id") or "")
+                for entry in samples
+                if entry.get("sample_id")
+            }
+            | {
+                str(entry.get("name") or "")
+                for entry in samples
+                if entry.get("name")
+            }
+        )
+        raise FileNotFoundError(
+            "Delta-energy sample/state reference(s) not found on this cluster: "
+            f"{unknown_requested}. Available sample ids/names include: {available[:40]}"
+            + (" ..." if len(available) > 40 else "")
+        )
+    if not resolved_requested:
+        raise ValueError("No valid samples selected.")
+
     key = json.dumps(
         {
             "analysis_type": "delta_energy",
             "model_a_id": model_a_id or model_a_path,
             "model_b_id": model_b_id or model_b_path,
-            "sample_ids": requested,
-            "frame_limits": {sid: int(frame_limits.get(sid, 0)) for sid in requested},
+            "sample_ids": resolved_requested,
+            "frame_limits": {sid: int(resolved_frame_limits.get(sid, 0)) for sid in resolved_requested},
             "seed": int(seed),
             "md_label_mode": md_label_mode,
             "drop_invalid": bool(drop_invalid),
@@ -3429,10 +3491,8 @@ def upsert_delta_energy_analysis(
     npz_path = analysis_dir / "analysis.npz"
     meta_path = analysis_dir / ANALYSIS_METADATA_FILENAME
 
-    samples = store.list_samples(project_id, system_id, cluster_id)
-    sample_by_id: dict[str, dict[str, Any]] = {str(s.get("sample_id")): s for s in samples if s.get("sample_id")}
     payloads: list[dict[str, Any]] = []
-    for sid in requested:
+    for sid in resolved_requested:
         entry = sample_by_id.get(sid)
         if not entry:
             raise FileNotFoundError(f"Sample not found on this cluster: {sid}")
@@ -3454,7 +3514,7 @@ def upsert_delta_energy_analysis(
                 ),
                 "md_label_mode": md_label_mode,
                 "drop_invalid": bool(drop_invalid),
-                "frame_limit": int(frame_limits.get(sid, 0)),
+                "frame_limit": int(resolved_frame_limits.get(sid, 0)),
                 "seed": int(seed),
             }
         )
@@ -3466,6 +3526,12 @@ def upsert_delta_energy_analysis(
         progress_callback=progress_callback,
         progress_label="Computing delta energies",
     )
+    computed_ids = [str(row.get("sample_id") or "") for row in out_rows]
+    if computed_ids != resolved_requested:
+        raise RuntimeError(
+            "Delta-energy worker outputs do not match requested samples: "
+            f"requested={resolved_requested}, computed={computed_ids}"
+        )
 
     sample_labels = [str(row["sample_label"]) for row in out_rows]
     sample_types = [str(row["sample_type"]) for row in out_rows]
@@ -3509,7 +3575,8 @@ def upsert_delta_energy_analysis(
     np.savez_compressed(
         npz_path,
         analysis_format_version=np.asarray([1], dtype=np.int32),
-        sample_ids=np.asarray(requested, dtype=str),
+        sample_ids=np.asarray(resolved_requested, dtype=str),
+        requested_sample_refs=np.asarray(requested, dtype=str),
         sample_labels=np.asarray(sample_labels, dtype=str),
         sample_types=np.asarray(sample_types, dtype=str),
         sample_frame_counts=used_counts,
@@ -3545,11 +3612,15 @@ def upsert_delta_energy_analysis(
         "drop_invalid": bool(drop_invalid),
         "seed": int(seed),
         "energy_bins": int(energy_bins),
-        "frame_limits": {sid: int(frame_limits.get(sid, 0)) for sid in requested},
+        "requested_sample_refs": requested,
+        "sample_ids": resolved_requested,
+        "frame_limits": {sid: int(resolved_frame_limits.get(sid, 0)) for sid in resolved_requested},
         "paths": {"analysis_npz": str(npz_path.relative_to(system_dir))},
         "summary": {
-            "n_samples": int(len(requested)),
-            "sample_ids": requested,
+            "n_requested_refs": int(len(requested)),
+            "n_samples": int(len(resolved_requested)),
+            "requested_sample_refs": requested,
+            "sample_ids": resolved_requested,
             "sample_frame_counts": used_counts.tolist(),
             "sample_available_frame_counts": available_counts.tolist(),
             "workers_used": int(workers_used),

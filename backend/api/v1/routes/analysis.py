@@ -1097,7 +1097,6 @@ async def submit_delta_energy_job(
         job_uuid = str(uuid.uuid4())
         job = task_queue.enqueue(
             run_delta_energy_job,
-    run_hamiltonian_spectral_job,
             args=(job_uuid, dataset_ref, params),
             job_timeout="2h",
             result_ttl=86400,

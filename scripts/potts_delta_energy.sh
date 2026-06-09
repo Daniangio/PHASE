@@ -111,6 +111,7 @@ while IFS= read -r row; do
 done <<< "$SAMPLE_ROWS"
 [ "${#SAMPLE_IDS_ARR[@]}" -eq 0 ] && echo "No samples selected." >&2 && exit 1
 SAMPLE_IDS="$(IFS=','; echo "${SAMPLE_IDS_ARR[*]}")"
+echo "Selected ${#SAMPLE_IDS_ARR[@]} sample(s): $SAMPLE_IDS"
 
 MD_LABEL_MODE="$(prompt "MD labels mode (assigned/halo)" "assigned")"
 MD_LABEL_MODE="$(printf "%s" "$MD_LABEL_MODE" | tr '[:upper:]' '[:lower:]')"

@@ -298,6 +298,24 @@ export default function DeltaEvalPage() {
     setSelectedSampleIds(md.length ? md : sampleEntries.slice(0, 3).map((s) => String(s.sample_id)));
   }, [sampleEntries, selectedSampleIds.length]);
 
+  useEffect(() => {
+    const valid = new Set(sampleEntries.map((s) => String(s?.sample_id || '')).filter(Boolean));
+    if (!valid.size) return;
+    setSelectedSampleIds((prev) => {
+      const next = prev.filter((sid) => valid.has(String(sid)));
+      return next.length === prev.length ? prev : next;
+    });
+  }, [sampleEntries]);
+
+  const selectMdSamplesForRun = useCallback(() => {
+    const md = sampleEntries.filter((s) => String(s?.type || '').toLowerCase() === 'md_eval').map((s) => String(s.sample_id));
+    setSelectedSampleIds(md);
+  }, [sampleEntries]);
+
+  const selectAllSamplesForRun = useCallback(() => {
+    setSelectedSampleIds(sampleEntries.map((s) => String(s.sample_id)).filter(Boolean));
+  }, [sampleEntries]);
+
   const loadClusterInfo = useCallback(async () => {
     if (!selectedClusterId) return;
     setClusterInfoError(null);
@@ -818,7 +836,15 @@ export default function DeltaEvalPage() {
                 </div>
               </div>
               <div>
-                <label className="block text-xs text-gray-400 mb-1">Samples to analyze</label>
+                <div className="flex flex-wrap items-center justify-between gap-2 mb-1">
+                  <label className="block text-xs text-gray-400">Samples to analyze</label>
+                  <div className="flex flex-wrap items-center gap-2 text-[11px]">
+                    <span className="text-gray-500">{selectedSampleIds.length} / {sampleEntries.length} selected</span>
+                    <button type="button" onClick={selectMdSamplesForRun} className="px-2 py-1 rounded border border-gray-700 text-gray-200 hover:border-cyan-500">Select MD</button>
+                    <button type="button" onClick={selectAllSamplesForRun} className="px-2 py-1 rounded border border-gray-700 text-gray-200 hover:border-cyan-500">Select all</button>
+                    <button type="button" onClick={() => setSelectedSampleIds([])} className="px-2 py-1 rounded border border-gray-700 text-gray-200 hover:border-red-500">Clear</button>
+                  </div>
+                </div>
                 <select multiple value={selectedSampleIds} onChange={(e) => setSelectedSampleIds(Array.from(e.target.selectedOptions).map((o) => String(o.value)))} className="w-full bg-gray-950 border border-gray-800 rounded-md px-2 py-2 text-sm text-gray-100 h-40">
                   {sampleEntries.map((sample) => (
                     <option key={`modal-s:${sample.sample_id}`} value={sample.sample_id}>
@@ -994,8 +1020,16 @@ export default function DeltaEvalPage() {
                 </select>
               </div>
             </div>
-            <div>
-              <label className="block text-xs text-gray-400 mb-1">Samples to analyze</label>
+              <div>
+              <div className="flex flex-wrap items-center justify-between gap-2 mb-1">
+                <label className="block text-xs text-gray-400">Samples to analyze</label>
+                <div className="flex flex-wrap items-center gap-2 text-[11px]">
+                  <span className="text-gray-500">{selectedSampleIds.length} / {sampleEntries.length} selected</span>
+                  <button type="button" onClick={selectMdSamplesForRun} className="px-2 py-1 rounded border border-gray-700 text-gray-200 hover:border-cyan-500">Select MD</button>
+                  <button type="button" onClick={selectAllSamplesForRun} className="px-2 py-1 rounded border border-gray-700 text-gray-200 hover:border-cyan-500">Select all</button>
+                  <button type="button" onClick={() => setSelectedSampleIds([])} className="px-2 py-1 rounded border border-gray-700 text-gray-200 hover:border-red-500">Clear</button>
+                </div>
+              </div>
               <select
                 multiple
                 value={selectedSampleIds}

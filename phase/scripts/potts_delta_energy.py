@@ -17,7 +17,7 @@ def _build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--cluster-id", required=True)
     ap.add_argument("--model-a-id", required=True)
     ap.add_argument("--model-b-id", required=True)
-    ap.add_argument("--sample-ids", required=True, help="Comma-separated sample ids to analyze.")
+    ap.add_argument("--sample-ids", required=True, help="Comma-separated sample ids, sample names, or MD state names to analyze.")
     ap.add_argument("--md-label-mode", default="assigned", choices=["assigned", "halo"])
     ap.add_argument("--keep-invalid", action="store_true", help="Keep invalid frames instead of dropping them.")
     ap.add_argument("--frame-limit", action="append", default=[], help="Per-sample random limit as sample_id:n_frames. Omit or 0 = all frames.")
@@ -103,7 +103,10 @@ def main(argv: list[str] | None = None) -> int:
     meta = out.get("metadata") or {}
     print(f"[delta_energy] analysis_id={meta.get('analysis_id')}")
     print(f"[delta_energy] analysis_npz={out.get('analysis_npz')}")
-    print(f"[delta_energy] samples={len(sample_ids)} workers={meta.get('summary', {}).get('workers_used')}")
+    summary = meta.get("summary", {}) if isinstance(meta.get("summary"), dict) else {}
+    print(f"[delta_energy] requested_refs={len(sample_ids)} resolved_samples={summary.get('n_samples', len(sample_ids))} workers={summary.get('workers_used')}")
+    if summary.get("sample_ids"):
+        print(f"[delta_energy] sample_ids={','.join(map(str, summary.get('sample_ids') or []))}")
     return 0
 
 
