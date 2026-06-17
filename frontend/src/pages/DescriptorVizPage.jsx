@@ -27,6 +27,10 @@ const colors = [
 ];
 const DEFAULT_DIHEDRAL_KEYS = ['phi', 'psi', 'omega', 'chi1', 'chi2'];
 
+function isFiniteNumber(value) {
+  return Number.isFinite(Number(value));
+}
+
 function pieColor(idx) {
   const hue = (idx * 137.507764) % 360;
   return `hsl(${hue} 70% 55%)`;
@@ -400,6 +404,12 @@ export default function DescriptorVizPage() {
           : null;
 
       const pick = (arr, indices) => indices.map((idx) => arr[idx]);
+      const finiteIndices = (indices) =>
+        indices.filter((idx) => {
+          if (!isFiniteNumber(xVals[idx]) || !isFiniteNumber(yVals[idx])) return false;
+          if (axes.zKey && !isFiniteNumber(zVals[idx])) return false;
+          return true;
+        });
       const groups = {};
       if (useMeta) {
         metaLabels.forEach((label, idx) => {
@@ -418,7 +428,8 @@ export default function DescriptorVizPage() {
         : Object.keys(groups);
 
       return groupKeys.map((groupKey, idx) => {
-        const indices = groups[groupKey];
+        const indices = finiteIndices(groups[groupKey] || []);
+        if (!indices.length) return null;
         const metaLabel =
           useMeta && groupKey !== -1
             ? metaLookup[groupKey] || `Metastable ${Number(groupKey) + 1}`
@@ -430,7 +441,7 @@ export default function DescriptorVizPage() {
         const metaHover = useMeta ? `<br>Metastable: ${metaLabel}` : '';
 
         return {
-          type: axes.zKey ? 'scatter3d' : 'scattergl',
+          type: axes.zKey ? 'scatter3d' : 'scatter',
           mode: 'markers',
           x: pick(xVals, indices),
           y: pick(yVals, indices),
@@ -454,7 +465,7 @@ export default function DescriptorVizPage() {
             (clusterHover ? '<br>Cluster: %{customdata}' : '') +
             '<extra></extra>',
         };
-      });
+      }).filter(Boolean);
     },
     [
       clusterColorMap,
@@ -870,11 +881,12 @@ export default function DescriptorVizPage() {
         traces.push({
           type: 'scatter3d',
           mode: 'markers',
-          x: [null],
-          y: [null],
-          z: [null],
+          x: [0],
+          y: [0],
+          z: [0],
           name: c.label,
           showlegend: true,
+          visible: 'legendonly',
           marker: { color: clusterColorMap[c.id] || '#9ca3af' },
           hoverinfo: 'none',
         });
