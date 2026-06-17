@@ -1367,9 +1367,6 @@ export default function SystemDetailPage() {
               >
                 <h3 className="text-md font-semibold text-white">Static Reporters</h3>
                 <p className="text-xs text-gray-500 mt-1">Compare two descriptor-ready states.</p>
-                <p className="text-xs text-gray-400 mt-3">
-                  Results: {staticResults.length || 0}
-                </p>
               </button>
               <button
                 type="button"
@@ -1400,9 +1397,6 @@ export default function SystemDetailPage() {
                   </span>
                 </div>
                 <p className="text-xs text-gray-500 mt-1">Fit a model or reuse an uploaded one.</p>
-                <p className="text-xs text-gray-400 mt-3">
-                  Sampling runs: {simulationResults.length || 0}
-                </p>
               </button>
             </div>
           )}

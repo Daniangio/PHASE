@@ -80,8 +80,10 @@ def build_cluster_entry(
 
 # Residues whose descriptor symmetry can split equivalent rotamers if chi2 is
 # clustered literally. The current descriptor order is phi, psi, omega, chi1, chi2.
-# VAL is included as requested; it is normally a no-op here because VAL has no chi2
-# in the current MDAnalysis-style descriptor extraction.
+#
+# For aromatic ring flips, chi2 and chi2 + 180 degrees are physically equivalent
+# for the coarse cluster assignment. Raw descriptors remain untouched; only the
+# coordinate used by density-peak clustering and later prediction is folded.
 SYMMETRIC_CHI2_RESNAMES = frozenset({"PHE", "TYR", "LEU", "ASP"})
 CHI2_DESCRIPTOR_INDEX = 4
 
@@ -102,7 +104,7 @@ def _chi2_symmetry_metadata(residue_key: str | None) -> Dict[str, Any]:
     enabled = bool(resname in SYMMETRIC_CHI2_RESNAMES)
     return {
         "enabled": enabled,
-        "version": "chi2_abs_signed_v1",
+        "version": "chi2_double_angle_v2",
         "residue_key": str(residue_key or ""),
         "resname": resname,
         "descriptor": "chi2",
@@ -112,11 +114,11 @@ def _chi2_symmetry_metadata(residue_key: str | None) -> Dict[str, Any]:
 
 
 def _fold_symmetric_chi2_for_clustering(samples: np.ndarray, residue_key: str | None = None) -> tuple[np.ndarray, Dict[str, Any]]:
-    """Return a clustering-only copy with equivalent chi2 signs folded together.
+    """Return a clustering-only copy with equivalent chi2 ring flips folded.
 
     Raw descriptors are left untouched. For symmetric residues, chi2 is mapped
-    from signed angle space [-pi, pi) to abs(signed angle), so +90 and -90
-    degrees become the same clustering coordinate.
+    to the doubled-angle coordinate 2*chi2 modulo 2*pi, so angles separated by
+    180 degrees become the same periodic clustering coordinate.
     """
     arr = np.asarray(samples, dtype=np.float64)
     if arr.ndim == 1:
@@ -125,9 +127,10 @@ def _fold_symmetric_chi2_for_clustering(samples: np.ndarray, residue_key: str | 
     if not meta["enabled"] or arr.shape[1] <= CHI2_DESCRIPTOR_INDEX:
         return arr, meta
     folded = arr.copy()
-    two_pi = 2.0 * np.pi
-    signed = np.mod(folded[:, CHI2_DESCRIPTOR_INDEX] + np.pi, two_pi) - np.pi
-    folded[:, CHI2_DESCRIPTOR_INDEX] = np.abs(signed)
+    # Ring-flip equivalence: chi2 == chi2 + pi. The downstream DADApy embedding
+    # is 2*pi-periodic, so using the doubled angle preserves circular continuity
+    # while merging 180-degree-separated ring-flip states.
+    folded[:, CHI2_DESCRIPTOR_INDEX] = np.mod(2.0 * folded[:, CHI2_DESCRIPTOR_INDEX], 2.0 * np.pi)
     meta["applied"] = True
     return folded, meta
 
@@ -143,8 +146,8 @@ def _fold_samples_for_model_symmetry(samples: np.ndarray, model: Any) -> np.ndar
 def _descriptor_symmetry_summary(residue_keys: Sequence[str]) -> Dict[str, Any]:
     candidates = [str(k) for k in residue_keys if _chi2_symmetry_metadata(str(k)).get("enabled")]
     return {
-        "version": "chi2_abs_signed_v1",
-        "description": "For selected symmetric residues, chi2 is folded as abs(signed chi2) only for density-peak clustering and prediction; raw descriptor values are unchanged. Residues without a chi2 descriptor are unaffected.",
+        "version": "chi2_double_angle_v2",
+        "description": "For selected symmetric residues, chi2 is represented as 2*chi2 modulo 2*pi only for density-peak clustering and prediction, making 180-degree ring flips equivalent; raw descriptor values are unchanged. Residues without a chi2 descriptor are unaffected.",
         "descriptor": "chi2",
         "descriptor_index": CHI2_DESCRIPTOR_INDEX,
         "symmetric_resnames": sorted(SYMMETRIC_CHI2_RESNAMES),

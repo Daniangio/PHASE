@@ -82,9 +82,9 @@ See `backend/services/metastable_clusters.py` (`assign_cluster_labels_to_states`
 
 Some sidechains have equivalent torsional states that differ only by a symmetric flip. For DADApy density-peak clustering, PHASE folds `chi2` for selected symmetric residue types before fitting or predicting cluster labels:
 
-- `PHE`, `TYR`, `LEU`, `ASP`, `VAL`
+- `PHE`, `TYR`, `LEU`, `ASP`
 
-The rule maps `chi2` from signed angle space to `abs(signed chi2)`, so states such as `+90` and `-90` degrees are treated as the same clustering coordinate. This is only applied to the clustering/prediction copy of the descriptor matrix. Stored descriptor NPZ files and descriptor visualizations keep the original physical `chi2` values.
+The rule maps `chi2` to a doubled-angle periodic coordinate, `2 * chi2 mod 2π`, so states separated by a 180 degree ring flip are treated as the same clustering coordinate. This covers cases such as `+90`/`-90` degrees and also `0`/`180` degrees. This is only applied to the clustering/prediction copy of the descriptor matrix. Stored descriptor NPZ files and descriptor visualizations keep the original physical `chi2` values.
 
 The cluster metadata stores `descriptor_symmetry` with the rule version, descriptor index, symmetric residue names, and candidate residue keys for reproducibility. A listed candidate with no available `chi2` column is unaffected.
 

@@ -50,9 +50,7 @@ def _fold_samples_for_model_symmetry(samples: np.ndarray, model: Any) -> np.ndar
     if arr.shape[1] <= CHI2_DESCRIPTOR_INDEX:
         return arr
     folded = arr.copy()
-    two_pi = 2.0 * np.pi
-    signed = np.mod(folded[:, CHI2_DESCRIPTOR_INDEX] + np.pi, two_pi) - np.pi
-    folded[:, CHI2_DESCRIPTOR_INDEX] = np.abs(signed)
+    folded[:, CHI2_DESCRIPTOR_INDEX] = np.mod(2.0 * folded[:, CHI2_DESCRIPTOR_INDEX], 2.0 * np.pi)
     return folded
 
 def _effective_angle_columns(samples: np.ndarray) -> np.ndarray:

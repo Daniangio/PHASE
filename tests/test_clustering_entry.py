@@ -29,14 +29,19 @@ def test_symmetric_chi2_is_folded_for_clustering_copy_only():
         [0.0, 0.0, 0.0, 0.0, -np.pi / 2.0],
         [0.0, 0.0, 0.0, 0.0, np.pi / 2.0],
         [0.0, 0.0, 0.0, 0.0, 3.0 * np.pi / 2.0],
+        [0.0, 0.0, 0.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0, 0.0, np.pi],
+        [0.0, 0.0, 0.0, 0.0, np.pi / 3.0],
+        [0.0, 0.0, 0.0, 0.0, -2.0 * np.pi / 3.0],
     ], dtype=float)
 
     folded, meta = _fold_symmetric_chi2_for_clustering(samples, "res_88_PHE")
 
     assert meta["enabled"] is True
     assert meta["applied"] is True
-    assert np.allclose(folded[:, 4], np.pi / 2.0)
-    assert np.allclose(samples[:, 4], [-np.pi / 2.0, np.pi / 2.0, 3.0 * np.pi / 2.0])
+    assert meta["version"] == "chi2_double_angle_v2"
+    assert np.allclose(folded[:, 4], [np.pi, np.pi, np.pi, 0.0, 0.0, 2.0 * np.pi / 3.0, 2.0 * np.pi / 3.0])
+    assert np.allclose(samples[:, 4], [-np.pi / 2.0, np.pi / 2.0, 3.0 * np.pi / 2.0, 0.0, np.pi, np.pi / 3.0, -2.0 * np.pi / 3.0])
 
 
 def test_symmetric_chi2_folding_is_not_applied_to_non_symmetric_residue():
@@ -55,7 +60,7 @@ def test_predict_cluster_adp_applies_saved_symmetric_chi2_metadata():
         phase_descriptor_symmetry = {"enabled": True, "residue_key": "res_88_TYR"}
 
         def predict_cluster_ADP(self, emb, *, maxk, density_est, n_jobs):
-            assert np.isclose(emb[0, 4], np.pi / 2.0)
+            assert np.isclose(emb[0, 4], np.pi)
             return np.asarray([[2], [2]], dtype=np.int32), np.asarray([[2], [2]], dtype=np.int32)
 
     assigned, halo = _predict_cluster_adp(
