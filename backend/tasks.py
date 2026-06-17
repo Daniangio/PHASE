@@ -5134,6 +5134,7 @@ def run_cluster_job(
                 "samples": assignments.get("samples", []),
                 "generated_at": meta.get("generated_at") if isinstance(meta, dict) else None,
                 "contact_edge_count": meta.get("contact_edge_count") if isinstance(meta, dict) else None,
+                "descriptor_symmetry": meta.get("descriptor_symmetry") if isinstance(meta, dict) else None,
                 "error": None,
                 "completed_at": datetime.utcnow().isoformat(),
             },

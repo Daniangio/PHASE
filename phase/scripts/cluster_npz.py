@@ -180,6 +180,7 @@ def main(argv: list[str] | None = None) -> int:
                     "path": rel_path,
                     "generated_at": metadata.get("generated_at") if isinstance(metadata, dict) else None,
                     "contact_edge_count": metadata.get("contact_edge_count") if isinstance(metadata, dict) else None,
+                    "descriptor_symmetry": metadata.get("descriptor_symmetry") if isinstance(metadata, dict) else None,
                     "samples": assignments.get("samples", []),
                 }
             )

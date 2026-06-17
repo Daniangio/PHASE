@@ -86,6 +86,8 @@ Some sidechains have equivalent torsional states that differ only by a symmetric
 
 The rule maps `chi2` to a doubled-angle periodic coordinate, `2 * chi2 mod 2π`, so states separated by a 180 degree ring flip are treated as the same clustering coordinate. This covers cases such as `+90`/`-90` degrees and also `0`/`180` degrees. This is only applied to the clustering/prediction copy of the descriptor matrix. Stored descriptor NPZ files and descriptor visualizations keep the original physical `chi2` values.
 
+If descriptor keys are numeric-only, for example `res_54`, clustering resolves residue names from a representative state structure before deciding whether the chi2 symmetry rule applies. The saved `residue_keys` remain unchanged for UI/API compatibility, while the internal clustering key becomes effectively `res_54_LEU` for symmetry detection and model metadata.
+
 The cluster metadata stores `descriptor_symmetry` with the rule version, descriptor index, symmetric residue names, and candidate residue keys for reproducibility. A listed candidate with no available `chi2` column is unaffected.
 
 ## Worker Configuration

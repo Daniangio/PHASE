@@ -93,10 +93,90 @@ def _resname_from_residue_key(residue_key: str | None) -> str:
     tokens = [tok for tok in re.split(r"[^A-Z0-9]+", text) if tok]
     for token in reversed(tokens):
         letters = "".join(ch for ch in token if ch.isalpha())
-        if len(letters) == 3:
+        if len(letters) == 3 and letters != "RES":
             return letters
     m = re.search(r"([A-Z]{3})", text)
-    return m.group(1) if m else ""
+    if m and m.group(1) != "RES":
+        return m.group(1)
+    return ""
+
+
+def _resid_from_residue_key_or_selection(residue_key: str, selection: str | None = None) -> Optional[int]:
+    """Infer a numeric resid from PHASE keys such as res_54 or MDAnalysis selections."""
+    for text in (str(residue_key or ""), str(selection or "")):
+        m = re.search(r"(?:^|[^A-Za-z])resid\s+(-?\d+)(?:\b|$)", text, flags=re.IGNORECASE)
+        if m:
+            return int(m.group(1))
+        m = re.search(r"(-?\d+)(?!.*\d)", text)
+        if m:
+            return int(m.group(1))
+    return None
+
+
+def _extract_residue_resnames(
+    pdb_path: Path | None,
+    residue_keys: Sequence[str],
+    residue_mapping: Optional[Dict[str, str]] = None,
+) -> Dict[str, str]:
+    """Map stored residue keys to residue names using a representative structure."""
+    if pdb_path is None:
+        return {}
+    path = Path(pdb_path)
+    if not path.exists():
+        return {}
+    try:
+        universe = mda.Universe(str(path))
+    except Exception:
+        return {}
+    try:
+        protein_residues = universe.select_atoms("protein").residues
+    except Exception:
+        protein_residues = universe.residues
+    if len(protein_residues) == 0:
+        protein_residues = universe.residues
+
+    residue_mapping = residue_mapping or {}
+    result: Dict[str, str] = {}
+    for key in residue_keys:
+        key_str = str(key)
+        selection = residue_mapping.get(key_str)
+        resnames: List[str] = []
+        if selection:
+            try:
+                atoms = universe.select_atoms(str(selection))
+                resnames = [str(res.resname).upper() for res in atoms.residues if getattr(res, "resname", None)]
+            except Exception:
+                resnames = []
+        if not resnames:
+            resid = _resid_from_residue_key_or_selection(key_str, selection)
+            if resid is not None:
+                resnames = [
+                    str(res.resname).upper()
+                    for res in protein_residues
+                    if int(getattr(res, "resid", 10**12)) == int(resid) and getattr(res, "resname", None)
+                ]
+        unique = [name for name in sorted(set(resnames)) if len(name) == 3]
+        if len(unique) == 1:
+            result[key_str] = unique[0]
+    return result
+
+
+def _build_residue_symmetry_keys(
+    residue_keys: Sequence[str],
+    *,
+    residue_resnames: Optional[Dict[str, str]] = None,
+) -> List[str]:
+    """Return residue identifiers augmented with resnames when keys are numeric-only."""
+    residue_resnames = {str(k): str(v).upper() for k, v in (residue_resnames or {}).items() if v}
+    symmetry_keys: List[str] = []
+    for key in residue_keys:
+        key_str = str(key)
+        if _resname_from_residue_key(key_str):
+            symmetry_keys.append(key_str)
+            continue
+        resname = residue_resnames.get(key_str)
+        symmetry_keys.append(f"{key_str}_{resname}" if resname else key_str)
+    return symmetry_keys
 
 
 def _chi2_symmetry_metadata(residue_key: str | None) -> Dict[str, Any]:
@@ -143,8 +223,22 @@ def _fold_samples_for_model_symmetry(samples: np.ndarray, model: Any) -> np.ndar
     return folded
 
 
-def _descriptor_symmetry_summary(residue_keys: Sequence[str]) -> Dict[str, Any]:
-    candidates = [str(k) for k in residue_keys if _chi2_symmetry_metadata(str(k)).get("enabled")]
+def _descriptor_symmetry_summary(
+    residue_keys: Sequence[str],
+    symmetry_keys: Optional[Sequence[str]] = None,
+) -> Dict[str, Any]:
+    symmetry_key_list = [str(k) for k in (symmetry_keys or residue_keys)]
+    display_keys = [str(k) for k in residue_keys]
+    candidates = [
+        display_keys[idx] if idx < len(display_keys) else key
+        for idx, key in enumerate(symmetry_key_list)
+        if _chi2_symmetry_metadata(key).get("enabled")
+    ]
+    residue_resnames = {
+        display_keys[idx]: _resname_from_residue_key(key)
+        for idx, key in enumerate(symmetry_key_list)
+        if idx < len(display_keys) and _resname_from_residue_key(key)
+    }
     return {
         "version": "chi2_double_angle_v2",
         "description": "For selected symmetric residues, chi2 is represented as 2*chi2 modulo 2*pi only for density-peak clustering and prediction, making 180-degree ring flips equivalent; raw descriptor values are unchanged. Residues without a chi2 descriptor are unaffected.",
@@ -152,6 +246,7 @@ def _descriptor_symmetry_summary(residue_keys: Sequence[str]) -> Dict[str, Any]:
         "descriptor_index": CHI2_DESCRIPTOR_INDEX,
         "symmetric_resnames": sorted(SYMMETRIC_CHI2_RESNAMES),
         "candidate_residue_keys": candidates,
+        "residue_resnames": residue_resnames,
     }
 
 
@@ -2236,6 +2331,7 @@ def _collect_cluster_inputs(
     merged_frame_indices: List[int] = []
     contact_edges: set = set()
     contact_sources: List[str] = []
+    residue_reference_pdb: Optional[Path] = None
 
     for meta_id in unique_meta_ids:
         meta = metastable_lookup.get(meta_id)
@@ -2254,6 +2350,13 @@ def _collect_cluster_inputs(
         for state in candidate_states:
             if not state.descriptor_file:
                 continue
+            if residue_reference_pdb is None and state.pdb_file:
+                try:
+                    candidate_pdb = store.resolve_path(project_id, system_id, state.pdb_file)
+                    if candidate_pdb.exists():
+                        residue_reference_pdb = candidate_pdb
+                except Exception:
+                    residue_reference_pdb = None
             desc_path = store.resolve_path(project_id, system_id, state.descriptor_file)
             features = load_descriptor_npz(desc_path)
             if is_macro:
@@ -2303,9 +2406,14 @@ def _collect_cluster_inputs(
         if matched_frames == 0:
             raise ValueError(f"No frames matched metastable '{meta_id}'.")
 
+    residue_resnames = _extract_residue_resnames(residue_reference_pdb, residue_keys, residue_mapping)
+    residue_symmetry_keys = _build_residue_symmetry_keys(residue_keys, residue_resnames=residue_resnames)
+
     return {
         "unique_meta_ids": unique_meta_ids,
         "residue_keys": residue_keys,
+        "residue_symmetry_keys": residue_symmetry_keys,
+        "residue_resnames": residue_resnames,
         "residue_mapping": residue_mapping,
         "merged_angles_per_residue": merged_angles_per_residue,
         "merged_frame_state_ids": merged_frame_state_ids,
@@ -2676,6 +2784,7 @@ def generate_metastable_cluster_npz(
     inputs = _collect_cluster_inputs(project_id, system_id, metastable_ids)
     unique_meta_ids = inputs["unique_meta_ids"]
     residue_keys = inputs["residue_keys"]
+    residue_symmetry_keys = inputs.get("residue_symmetry_keys") or residue_keys
     residue_mapping = inputs["residue_mapping"]
     merged_angles_per_residue = inputs["merged_angles_per_residue"]
     merged_frame_state_ids = inputs["merged_frame_state_ids"]
@@ -2726,7 +2835,7 @@ def generate_metastable_cluster_npz(
                         density_z_val,
                         max_cluster_frames_val,
                         merged_subsample_indices,
-                        residue_keys[col],
+                        residue_symmetry_keys[col] if col < len(residue_symmetry_keys) else residue_keys[col],
                     )
                 )
             for fut in as_completed(futures):
@@ -2760,7 +2869,7 @@ def generate_metastable_cluster_npz(
                 density_z=density_z_val,
                 max_cluster_frames=max_cluster_frames_val,
                 subsample_indices=merged_subsample_indices,
-                residue_key=residue_keys[col],
+                residue_key=residue_symmetry_keys[col] if col < len(residue_symmetry_keys) else residue_keys[col],
             )
             if labels_halo.size == 0:
                 merged_labels_halo[:, col] = -1
@@ -2812,7 +2921,7 @@ def generate_metastable_cluster_npz(
         },
         "residue_keys": residue_keys,
         "residue_mapping": residue_mapping,
-        "descriptor_symmetry": _descriptor_symmetry_summary(residue_keys),
+        "descriptor_symmetry": _descriptor_symmetry_summary(residue_keys, residue_symmetry_keys),
         "random_state": random_state,
         "contact_sources": contact_sources,
         "merged": {
@@ -3159,6 +3268,7 @@ def prepare_cluster_workspace(
 
     inputs = _collect_cluster_inputs(project_id, system_id, metastable_ids)
     residue_keys = inputs["residue_keys"]
+    residue_symmetry_keys = inputs.get("residue_symmetry_keys") or residue_keys
     merged_angles_per_residue = inputs["merged_angles_per_residue"]
     merged_frame_state_ids = inputs["merged_frame_state_ids"]
     merged_frame_meta_ids = inputs["merged_frame_meta_ids"]
@@ -3195,6 +3305,7 @@ def prepare_cluster_workspace(
         "selected_state_ids": unique_meta_ids,
         "selected_metastable_ids": unique_meta_ids,
         "residue_keys": residue_keys,
+        "residue_symmetry_keys": residue_symmetry_keys,
         "residue_mapping": residue_mapping,
         "n_frames": n_frames,
         "n_residues": n_residues,
@@ -3233,7 +3344,12 @@ def run_cluster_chunk(
 
     params = manifest.get("cluster_params", {})
     residue_keys = [str(v) for v in (manifest.get("residue_keys") or [])]
-    residue_key = residue_keys[residue_index] if residue_index < len(residue_keys) else None
+    residue_symmetry_keys = [str(v) for v in (manifest.get("residue_symmetry_keys") or [])] or residue_keys
+    residue_key = (
+        residue_symmetry_keys[residue_index]
+        if residue_index < len(residue_symmetry_keys)
+        else (residue_keys[residue_index] if residue_index < len(residue_keys) else None)
+    )
     sample_arr = np.asarray(angles[:, residue_index, :], dtype=float)
     labels_halo, labels_assigned, k, diag, _, _ = _cluster_with_subsample(
         sample_arr,
@@ -3260,6 +3376,7 @@ def reduce_cluster_workspace(work_dir: Path) -> Tuple[Path, Dict[str, Any]]:
     project_id = manifest["project_id"]
     system_id = manifest["system_id"]
     residue_keys = manifest["residue_keys"]
+    residue_symmetry_keys = manifest.get("residue_symmetry_keys") or residue_keys
     residue_mapping = manifest.get("residue_mapping") or {}
     n_frames = int(manifest.get("n_frames", 0))
     n_residues = int(manifest.get("n_residues", len(residue_keys)))
@@ -3295,7 +3412,7 @@ def reduce_cluster_workspace(work_dir: Path) -> Tuple[Path, Dict[str, Any]]:
             density_z=density_z_val,
             max_cluster_frames=max_cluster_frames_val,
             subsample_indices=merged_subsample_indices,
-            residue_key=residue_keys[idx],
+            residue_key=residue_symmetry_keys[idx] if idx < len(residue_symmetry_keys) else residue_keys[idx],
         )
         if labels_halo.size == 0:
             merged_labels_halo[:, idx] = -1
@@ -3341,7 +3458,7 @@ def reduce_cluster_workspace(work_dir: Path) -> Tuple[Path, Dict[str, Any]]:
         "cluster_params": cluster_params,
         "residue_keys": residue_keys,
         "residue_mapping": residue_mapping,
-        "descriptor_symmetry": _descriptor_symmetry_summary(residue_keys),
+        "descriptor_symmetry": _descriptor_symmetry_summary(residue_keys, residue_symmetry_keys),
         "random_state": cluster_params.get("random_state"),
         "contact_sources": contact_sources,
         "merged": {
