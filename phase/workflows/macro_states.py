@@ -199,8 +199,6 @@ def build_state_descriptors(
     resid_shift: Optional[int] = None,
     traj_path_override: Optional[Path] = None,
 ) -> SystemMetadata:
-    if not state_meta.trajectory_file and traj_path_override is None:
-        raise ValueError("No trajectory stored for this state.")
     if not state_meta.pdb_file:
         raise ValueError("No PDB stored for this state.")
 
@@ -214,16 +212,19 @@ def build_state_descriptors(
     )
     state_dir = state_dirs["state_dir"]
 
+    pdb_path = store.resolve_path(project_id, system_meta.system_id, state_meta.pdb_file)
     if traj_path_override is not None:
         traj_path = traj_path_override
-    else:
+    elif state_meta.trajectory_file:
         traj_path = store.resolve_path(project_id, system_meta.system_id, state_meta.trajectory_file)
-    pdb_path = store.resolve_path(project_id, system_meta.system_id, state_meta.pdb_file)
+    else:
+        # PDB-only state: treat the structure as a one-frame trajectory.
+        traj_path = pdb_path
 
-    if not traj_path.exists():
-        raise FileNotFoundError("Stored trajectory file missing on disk.")
     if not pdb_path.exists():
         raise FileNotFoundError("Stored PDB file missing on disk.")
+    if not traj_path.exists():
+        raise FileNotFoundError("Stored trajectory file missing on disk.")
 
     selection_used, selections_config = _resolve_selection_config(system_meta, residue_filter)
     preprocessor = DescriptorPreprocessor(residue_selections=selections_config)
@@ -263,7 +264,7 @@ def add_state(
     state_id: str,
     name: Optional[str],
     pdb_path: Path,
-    traj_path: Path,
+    traj_path: Optional[Path],
     residue_selection: Optional[str],
     copy_traj: bool,
     build_descriptors: bool,
@@ -279,7 +280,7 @@ def add_state(
     storage_key = allocate_state_storage_key(system, state_name, state_id)
     dirs = store.ensure_state_directories(project_id, system_id, state_id, storage_key=storage_key)
     pdb_ext = pdb_path.suffix or ".pdb"
-    traj_ext = traj_path.suffix or ".xtc"
+    traj_ext = traj_path.suffix if traj_path is not None else ".xtc"
 
     pdb_dest = dirs["state_dir"] / f"structure{pdb_ext}"
     traj_dest = dirs["state_dir"] / f"trajectory{traj_ext}"
@@ -289,10 +290,12 @@ def add_state(
 
     try:
         shutil.copy2(pdb_path, pdb_dest)
-        traj_value = str(traj_path)
-        if copy_traj:
-            shutil.copy2(traj_path, traj_dest)
-            traj_value = str(traj_dest.relative_to(dirs["system_dir"]))
+        traj_value = None
+        if traj_path is not None:
+            traj_value = str(traj_path)
+            if copy_traj:
+                shutil.copy2(traj_path, traj_dest)
+                traj_value = str(traj_dest.relative_to(dirs["system_dir"]))
 
         slice_value = slice_spec.strip() if slice_spec else None
         stride_val = 1

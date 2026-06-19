@@ -3261,6 +3261,38 @@ def upsert_endpoint_frustration_analysis(
     return {"metadata": _convert_nan_to_none(meta), "analysis_npz": str(npz_path), "analysis_dir": str(analysis_dir)}
 
 
+def _compute_delta_energy_components(
+    labels: np.ndarray,
+    model_a: PottsModel,
+    model_b: PottsModel,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return per-frame node and edge contributions for E_A - E_B."""
+    X = np.asarray(labels, dtype=np.int64)
+    if X.ndim != 2:
+        raise ValueError("labels must be 2D.")
+    n_frames, n_residues = X.shape
+    node = np.zeros((n_frames, n_residues), dtype=np.float32)
+    for r in range(n_residues):
+        node[:, r] = np.asarray(model_a.h[r][X[:, r]] - model_b.h[r][X[:, r]], dtype=np.float32)
+
+    edge_set = {
+        tuple(sorted((int(r), int(s))))
+        for r, s in list(model_a.edges or []) + list(model_b.edges or [])
+        if int(r) != int(s)
+    }
+    edges = np.asarray(sorted(edge_set), dtype=np.int32)
+    edge = np.zeros((n_frames, int(edges.shape[0])), dtype=np.float32)
+    for col, (r_raw, s_raw) in enumerate(edges.tolist()):
+        r, s = int(r_raw), int(s_raw)
+        vals = np.zeros((n_frames,), dtype=np.float32)
+        if (r, s) in model_a.J:
+            vals += np.asarray(model_a.J[(r, s)][X[:, r], X[:, s]], dtype=np.float32)
+        if (r, s) in model_b.J:
+            vals -= np.asarray(model_b.J[(r, s)][X[:, r], X[:, s]], dtype=np.float32)
+        edge[:, col] = vals
+    return node, edge, edges
+
+
 def _delta_energy_sample_worker(payload: dict[str, Any]) -> dict[str, Any]:
     model_a_path = Path(str(payload["model_a_path"]))
     model_b_path = Path(str(payload["model_b_path"]))
@@ -3300,7 +3332,8 @@ def _delta_energy_sample_worker(payload: dict[str, Any]) -> dict[str, Any]:
         selected_indices = np.sort(rng.choice(available_frames, size=frame_limit, replace=False)).astype(np.int32)
         labels = labels[selected_indices]
 
-    delta_energy = np.asarray(model_a.energy_batch(labels) - model_b.energy_batch(labels), dtype=np.float32)
+    node_delta, edge_delta, edge_index = _compute_delta_energy_components(labels, model_a, model_b)
+    delta_energy = np.asarray(node_delta.sum(axis=1) + edge_delta.sum(axis=1), dtype=np.float32)
     return {
         "sample_id": sample_id,
         "sample_label": sample_label,
@@ -3311,6 +3344,9 @@ def _delta_energy_sample_worker(payload: dict[str, Any]) -> dict[str, Any]:
         "frame_limit": int(frame_limit),
         "selected_frame_indices": np.asarray(selected_indices, dtype=np.int32),
         "delta_energy": delta_energy,
+        "delta_node_energy": node_delta,
+        "delta_edge_energy": edge_delta,
+        "edge_index": edge_index,
     }
 
 
@@ -3541,6 +3577,34 @@ def upsert_delta_energy_analysis(
     limits = np.asarray([int(row["frame_limit"]) for row in out_rows], dtype=np.int32)
     delta_energy_all = [np.asarray(row["delta_energy"], dtype=np.float32) for row in out_rows]
 
+    component_dir = analysis_dir / "samples"
+    component_dir.mkdir(parents=True, exist_ok=True)
+    component_paths: list[str] = []
+    edge_index = np.asarray(out_rows[0].get("edge_index", np.zeros((0, 2), dtype=np.int32)), dtype=np.int32) if out_rows else np.zeros((0, 2), dtype=np.int32)
+    for row in out_rows:
+        sid = str(row.get("sample_id") or "sample")
+        component_path = component_dir / f"{sid}.npz"
+        np.savez_compressed(
+            component_path,
+            sample_id=np.asarray([sid], dtype=str),
+            selected_frame_indices=np.asarray(row.get("selected_frame_indices", np.zeros((0,), dtype=np.int32)), dtype=np.int32),
+            delta_energy=np.asarray(row["delta_energy"], dtype=np.float32),
+            delta_node_energy=np.asarray(row.get("delta_node_energy", np.zeros((0, 0), dtype=np.float32)), dtype=np.float32),
+            delta_edge_energy=np.asarray(row.get("delta_edge_energy", np.zeros((0, 0), dtype=np.float32)), dtype=np.float32),
+            edge_index=np.asarray(row.get("edge_index", edge_index), dtype=np.int32),
+        )
+        component_paths.append(str(component_path.relative_to(system_dir)))
+
+    cluster_npz_path = cluster_dir / "cluster.npz"
+    residue_keys_for_output = np.asarray([], dtype=str)
+    if cluster_npz_path.exists():
+        try:
+            with np.load(cluster_npz_path, allow_pickle=False) as cluster_npz:
+                if "residue_keys" in cluster_npz.files:
+                    residue_keys_for_output = np.asarray(cluster_npz["residue_keys"], dtype=str)
+        except Exception:
+            residue_keys_for_output = np.asarray([], dtype=str)
+
     de_concat = np.concatenate(delta_energy_all, axis=0) if delta_energy_all else np.zeros((0,), dtype=np.float32)
     if de_concat.size:
         lo = float(np.nanmin(de_concat))
@@ -3583,6 +3647,9 @@ def upsert_delta_energy_analysis(
         sample_available_frame_counts=available_counts,
         sample_invalid_counts=invalid_counts,
         sample_frame_limits=limits,
+        component_sample_paths=np.asarray(component_paths, dtype=str),
+        residue_keys=residue_keys_for_output,
+        edge_index=np.asarray(edge_index, dtype=np.int32),
         delta_energy_bins=np.asarray(bins, dtype=np.float32),
         delta_energy_hist=np.asarray(hist, dtype=np.float32),
         delta_energy_mean=means,
@@ -3615,6 +3682,7 @@ def upsert_delta_energy_analysis(
         "requested_sample_refs": requested,
         "sample_ids": resolved_requested,
         "frame_limits": {sid: int(resolved_frame_limits.get(sid, 0)) for sid in resolved_requested},
+        "component_sample_paths": {sid: component_paths[i] for i, sid in enumerate(resolved_requested) if i < len(component_paths)},
         "paths": {"analysis_npz": str(npz_path.relative_to(system_dir))},
         "summary": {
             "n_requested_refs": int(len(requested)),

@@ -11,6 +11,7 @@ import DescriptorVizPage from './pages/DescriptorVizPage';
 import MetastableVizPage from './pages/MetastableVizPage';
 import SamplingVizPage from './pages/SamplingVizPage';
 import DeltaEvalPage from './pages/DeltaEvalPage';
+import ResidueSelectionPage from './pages/ResidueSelectionPage';
 import DeltaCommitment3DPage from './pages/DeltaCommitment3DPage';
 import DeltaJsEvalPage from './pages/DeltaJsEvalPage';
 import DeltaJs3DPage from './pages/DeltaJs3DPage';
@@ -56,6 +57,10 @@ export default function App() {
           <Route
             path="/projects/:projectId/systems/:systemId/sampling/delta_eval"
             element={<DeltaEvalPage />}
+          />
+          <Route
+            path="/projects/:projectId/systems/:systemId/residue_selections"
+            element={<ResidueSelectionPage />}
           />
           <Route
             path="/projects/:projectId/systems/:systemId/sampling/delta_js"

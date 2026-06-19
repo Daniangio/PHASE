@@ -285,6 +285,171 @@ def _ui_setups_dir(project_id: str, system_id: str, cluster_id: str) -> Path:
     return setup_dir
 
 
+def _resid_from_key(key: str) -> int | None:
+    match = re.search(r"(-?\d+)(?!.*\d)", str(key or ""))
+    return int(match.group(1)) if match else None
+
+
+def _load_residue_selection_setup(project_id: str, system_id: str, cluster_id: str, setup_id: str) -> dict[str, Any]:
+    sid = str(setup_id or "").strip()
+    if not sid:
+        return {}
+    path = _ui_setups_dir(project_id, system_id, cluster_id) / f"{sid}.json"
+    if not path.exists():
+        raise HTTPException(status_code=404, detail=f"Residue selection setup '{sid}' not found.")
+    try:
+        obj = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to read residue selection setup: {exc}") from exc
+    payload = obj.get("payload") if isinstance(obj, dict) else None
+    return payload if isinstance(payload, dict) else {}
+
+
+def _selected_residue_indices_from_setup(payload: dict[str, Any], residue_keys: list[str]) -> set[int]:
+    key_to_idx = {str(k): i for i, k in enumerate(residue_keys)}
+    resid_to_idx: dict[int, int] = {}
+    for i, key in enumerate(residue_keys):
+        resid = _resid_from_key(str(key))
+        if resid is not None and resid not in resid_to_idx:
+            resid_to_idx[resid] = i
+    selected: set[int] = set()
+    blocks = payload.get("blocks") if isinstance(payload.get("blocks"), list) else []
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        for raw in block.get("residue_indices") or []:
+            try:
+                idx = int(raw)
+            except Exception:
+                continue
+            if 0 <= idx < len(residue_keys):
+                selected.add(idx)
+        for raw in block.get("residue_keys") or []:
+            idx = key_to_idx.get(str(raw))
+            if idx is not None:
+                selected.add(idx)
+        for raw in block.get("residues") or []:
+            try:
+                resid = int(raw)
+            except Exception:
+                continue
+            idx = resid_to_idx.get(resid)
+            if idx is not None:
+                selected.add(idx)
+        start = block.get("start")
+        end = block.get("end")
+        if start is not None and end is not None:
+            try:
+                a, b = int(start), int(end)
+            except Exception:
+                continue
+            if a > b:
+                a, b = b, a
+            for resid in range(a, b + 1):
+                idx = resid_to_idx.get(resid)
+                if idx is not None:
+                    selected.add(idx)
+    return selected
+
+
+def _apply_delta_energy_residue_selection(
+    *,
+    project_id: str,
+    system_id: str,
+    cluster_id: str,
+    setup_id: str,
+    meta: dict[str, Any],
+    payload: dict[str, Any],
+    energy_bins: int = 80,
+) -> dict[str, Any]:
+    selection_payload = _load_residue_selection_setup(project_id, system_id, cluster_id, setup_id)
+    residue_keys = [str(v) for v in payload.get("residue_keys") or []]
+    if not residue_keys:
+        raise HTTPException(status_code=400, detail="This delta-energy analysis has no residue component metadata. Rerun delta-energy analysis to enable residue-selection filtering.")
+    selected = _selected_residue_indices_from_setup(selection_payload, residue_keys)
+    if not selected:
+        raise HTTPException(status_code=400, detail="Residue selection did not match any residue in this cluster.")
+
+    sample_ids = [str(v) for v in payload.get("sample_ids") or []]
+    sample_labels = [str(v) for v in payload.get("sample_labels") or []]
+    sample_types = [str(v) for v in payload.get("sample_types") or []]
+    component_paths = [str(v) for v in payload.get("component_sample_paths") or []]
+    if not component_paths:
+        component_map = meta.get("component_sample_paths") if isinstance(meta.get("component_sample_paths"), dict) else {}
+        component_paths = [str(component_map.get(sid) or "") for sid in sample_ids]
+    if len(component_paths) < len(sample_ids):
+        raise HTTPException(status_code=400, detail="Delta-energy component files are incomplete. Rerun the analysis.")
+
+    system_dir = project_store.ensure_cluster_directories(project_id, system_id, cluster_id)["system_dir"]
+    selected_energy: list[np.ndarray] = []
+    edge_index_common = np.asarray(payload.get("edge_index") or [], dtype=np.int32)
+    for i, sid in enumerate(sample_ids):
+        rel = component_paths[i]
+        if not rel:
+            raise HTTPException(status_code=400, detail=f"Missing component path for sample {sid}.")
+        path = Path(rel)
+        if not path.is_absolute():
+            path = system_dir / rel
+        if not path.exists():
+            raise HTTPException(status_code=404, detail=f"Missing component file for sample {sid}.")
+        with np.load(path, allow_pickle=False) as data:
+            node = np.asarray(data["delta_node_energy"], dtype=np.float32)
+            edge = np.asarray(data["delta_edge_energy"], dtype=np.float32)
+            edge_index = np.asarray(data["edge_index"], dtype=np.int32) if "edge_index" in data.files else edge_index_common
+        if node.ndim != 2:
+            raise HTTPException(status_code=400, detail=f"Invalid node component array for sample {sid}.")
+        node_cols = sorted(idx for idx in selected if 0 <= idx < node.shape[1])
+        values = np.sum(node[:, node_cols], axis=1) if node_cols else np.zeros((node.shape[0],), dtype=np.float32)
+        if edge.ndim == 2 and edge_index.ndim == 2 and edge_index.shape[1] == 2 and edge.shape[1] == edge_index.shape[0]:
+            mask = np.asarray([(int(r) in selected) or (int(s) in selected) for r, s in edge_index.tolist()], dtype=bool)
+            if np.any(mask):
+                values = values + np.sum(edge[:, mask], axis=1)
+        selected_energy.append(np.asarray(values, dtype=np.float32))
+
+    concat = np.concatenate(selected_energy, axis=0) if selected_energy else np.zeros((0,), dtype=np.float32)
+    hist_rows = payload.get("delta_energy_hist") if isinstance(payload.get("delta_energy_hist"), list) else []
+    inferred_bins = len(hist_rows[0]) if hist_rows and isinstance(hist_rows[0], list) else 80
+    bins_n = max(5, int(energy_bins or inferred_bins or 80))
+    if concat.size:
+        lo, hi = float(np.nanmin(concat)), float(np.nanmax(concat))
+        if not np.isfinite(lo) or not np.isfinite(hi):
+            lo, hi = -1.0, 1.0
+        if hi <= lo:
+            hi = lo + 1.0
+        pad = 1e-6 * (hi - lo)
+        bins = np.linspace(lo - pad, hi + pad, bins_n + 1, dtype=np.float32)
+    else:
+        bins = np.linspace(-1.0, 1.0, bins_n + 1, dtype=np.float32)
+    hist = np.zeros((len(selected_energy), bins_n), dtype=np.float32)
+    means = np.zeros((len(selected_energy),), dtype=np.float32)
+    stds = np.zeros((len(selected_energy),), dtype=np.float32)
+    medians = np.zeros((len(selected_energy),), dtype=np.float32)
+    mins = np.zeros((len(selected_energy),), dtype=np.float32)
+    maxs = np.zeros((len(selected_energy),), dtype=np.float32)
+    for row, values in enumerate(selected_energy):
+        if values.size:
+            h, _ = np.histogram(values.astype(float), bins=bins.astype(float), density=True)
+            hist[row] = h.astype(np.float32)
+            means[row] = float(np.mean(values)); stds[row] = float(np.std(values)); medians[row] = float(np.median(values)); mins[row] = float(np.min(values)); maxs[row] = float(np.max(values))
+        else:
+            means[row] = stds[row] = medians[row] = mins[row] = maxs[row] = np.nan
+    payload = dict(payload)
+    payload.update({
+        "delta_energy_bins": bins.tolist(),
+        "delta_energy_hist": hist.tolist(),
+        "delta_energy_mean": means.tolist(),
+        "delta_energy_std": stds.tolist(),
+        "delta_energy_median": medians.tolist(),
+        "delta_energy_min": mins.tolist(),
+        "delta_energy_max": maxs.tolist(),
+        "residue_selection_applied": True,
+        "residue_selection_setup_id": setup_id,
+        "residue_selection_name": selection_payload.get("name") or selection_payload.get("selection_name") or setup_id,
+        "residue_selection_indices": sorted(selected),
+    })
+    return payload
+
+
 @router.get(
     "/projects/{project_id}/systems/{system_id}/metastable/clusters/{cluster_id}/ui_setups",
     summary="List persisted UI setups for a cluster",
@@ -910,6 +1075,7 @@ async def get_cluster_analysis_data(
     max_rows: int | None = None,
     sample_seed: int = 0,
     summary_only: bool = False,
+    residue_selection_setup_id: str | None = None,
 ):
     try:
         project_store.get_system(project_id, system_id)
@@ -944,6 +1110,18 @@ async def get_cluster_analysis_data(
                     payload[key] = value.tolist()
                 else:
                     payload[key] = value
+            if str(analysis_type or "").strip().lower() == "delta_energy" and str(residue_selection_setup_id or "").strip():
+                payload = _apply_delta_energy_residue_selection(
+                    project_id=project_id,
+                    system_id=system_id,
+                    cluster_id=cluster_id,
+                    setup_id=str(residue_selection_setup_id).strip(),
+                    meta=meta,
+                    payload=payload,
+                    energy_bins=int(meta.get("energy_bins") or 80),
+                )
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to load analysis NPZ: {exc}") from exc
 

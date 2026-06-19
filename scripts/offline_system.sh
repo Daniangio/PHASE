@@ -19,7 +19,7 @@ prompt_bool() {
 
 offline_prompt_root "${ROOT_DIR}/data"
 
-ACTION_LINES=$'init-project|Initialize a new project\ncreate-system|Create a new system\nadd-state|Add a state (PDB+trajectory)\ndelete-state|Delete a state\nlist|List projects/systems'
+ACTION_LINES=$'init-project|Initialize a new project\ncreate-system|Create a new system\nadd-state|Add a state (PDB, optional trajectory)\ndelete-state|Delete a state\nlist|List projects/systems'
 ACTION_ROW="$(offline_choose_one "Select action:" "$ACTION_LINES")"
 MODE="$(printf "%s" "$ACTION_ROW" | awk -F'|' '{print $1}')"
 MODE="$(printf "%s" "$MODE" | tr '[:upper:]' '[:lower:]')"
@@ -55,13 +55,17 @@ if [ "$MODE" = "add-state" ]; then
   STATE_ID="$(prompt "State ID" "state_1")"
   STATE_NAME="$(prompt "State name" "$STATE_ID")"
   PDB_PATH="$(prompt "PDB path" "")"
-  TRAJ_PATH="$(prompt "Trajectory path" "")"
+  TRAJ_PATH="$(prompt "Trajectory path (optional; blank = PDB-only single frame)" "")"
   SLICE_SPEC="$(prompt "Frame slice start:stop:step (blank = full; number = step)" "")"
   RESID_SHIFT="$(prompt "Residue shift offset (integer)" "0")"
   RES_SEL="$(prompt "Residue selection (optional)" "")"
   COPY_TRAJ_ARGS=()
-  if prompt_bool "Copy trajectory into system folder? (y/N)" "N"; then
-    COPY_TRAJ_ARGS+=(--copy-traj)
+  TRAJ_ARGS=()
+  if [ -n "$TRAJ_PATH" ]; then
+    TRAJ_ARGS+=(--traj "$TRAJ_PATH")
+    if prompt_bool "Copy trajectory into system folder? (y/N)" "N"; then
+      COPY_TRAJ_ARGS+=(--copy-traj)
+    fi
   fi
   python -m phase.scripts.offline_system --root "$OFFLINE_ROOT" add-state \
   --project-id "$OFFLINE_PROJECT_ID" \
@@ -69,7 +73,7 @@ if [ "$MODE" = "add-state" ]; then
   --state-id "$STATE_ID" \
   --name "$STATE_NAME" \
   --pdb "$PDB_PATH" \
-  --traj "$TRAJ_PATH" \
+  "${TRAJ_ARGS[@]}" \
   ${RES_SEL:+--residue-selection "$RES_SEL"} \
   ${SLICE_SPEC:+--slice-spec "$SLICE_SPEC"} \
   --resid-shift "$RESID_SHIFT" \

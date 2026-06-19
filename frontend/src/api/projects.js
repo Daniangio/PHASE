@@ -172,6 +172,7 @@ export function fetchClusterAnalysisData(projectId, systemId, clusterId, analysi
   if (options?.maxRows != null && Number(options.maxRows) > 0) params.set('max_rows', String(Number(options.maxRows)));
   if (options?.sampleSeed != null) params.set('sample_seed', String(Number(options.sampleSeed)));
   if (options?.summaryOnly) params.set('summary_only', '1');
+  if (options?.residueSelectionSetupId) params.set('residue_selection_setup_id', String(options.residueSelectionSetupId));
   const q = params.toString();
   return requestJSON(
     `/projects/${projectId}/systems/${systemId}/metastable/clusters/${clusterId}/analyses/${analysisType}/${analysisId}/data${q ? `?${q}` : ''}`

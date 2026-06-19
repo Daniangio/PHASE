@@ -11,7 +11,7 @@ import EnergyDistributionPlot, {
   buildEnergyDistributionPlot,
   useEnergySeriesSelection,
 } from '../components/common/EnergyDistributionPlot';
-import { deleteClusterAnalysis, fetchClusterAnalyses, fetchClusterAnalysisData, fetchPottsClusterInfo, fetchSystem } from '../api/projects';
+import { deleteClusterAnalysis, fetchClusterAnalyses, fetchClusterAnalysisData, fetchClusterUiSetups, fetchPottsClusterInfo, fetchSystem } from '../api/projects';
 import { fetchJobStatus, submitDeltaEnergyJob, submitEndpointFrustrationJob } from '../api/jobs';
 
 function clamp01(x) {
@@ -195,6 +195,8 @@ export default function DeltaEvalPage() {
   const [runPanelOpen, setRunPanelOpen] = useState(false);
   const [deltaEnergySeed, setDeltaEnergySeed] = useState(0);
   const [deltaEnergyBins, setDeltaEnergyBins] = useState(80);
+  const [residueSelectionSetups, setResidueSelectionSetups] = useState([]);
+  const [selectedResidueSelectionId, setSelectedResidueSelectionId] = useState('');
   const [sampleFrameModes, setSampleFrameModes] = useState({});
   const [sampleFrameLimits, setSampleFrameLimits] = useState({});
   const [helpOpen, setHelpOpen] = useState(false);
@@ -346,9 +348,14 @@ export default function DeltaEvalPage() {
     setAnalysisData(null);
     setSelectedAnalysisId('');
     setSelectedSampleId('');
+    setResidueSelectionSetups([]);
+    setSelectedResidueSelectionId('');
     loadClusterInfo();
     loadAnalyses();
-  }, [selectedClusterId, loadClusterInfo, loadAnalyses]);
+    fetchClusterUiSetups(projectId, systemId, selectedClusterId, { setupType: 'residue_selection' })
+      .then((res) => setResidueSelectionSetups(Array.isArray(res?.setups) ? res.setups : []))
+      .catch(() => setResidueSelectionSetups([]));
+  }, [selectedClusterId, loadClusterInfo, loadAnalyses, projectId, systemId]);
 
   const activeAnalysisType = activeTab === 'delta_energy' ? 'delta_energy' : 'endpoint_frustration';
 
@@ -380,15 +387,18 @@ export default function DeltaEvalPage() {
   const loadAnalysisData = useCallback(
     async (analysisId) => {
       if (!analysisId) return null;
-      const cacheKey = `${activeAnalysisType}:${analysisId}`;
+      const selectionId = activeAnalysisType === 'delta_energy' ? String(selectedResidueSelectionId || '') : '';
+      const cacheKey = `${activeAnalysisType}:${analysisId}:selection=${selectionId}`;
       if (Object.prototype.hasOwnProperty.call(analysisDataCacheRef.current, cacheKey)) {
         return analysisDataCacheRef.current[cacheKey];
       }
-      const payload = await fetchClusterAnalysisData(projectId, systemId, selectedClusterId, activeAnalysisType, analysisId);
+      const payload = await fetchClusterAnalysisData(projectId, systemId, selectedClusterId, activeAnalysisType, analysisId, {
+        residueSelectionSetupId: selectionId || undefined,
+      });
       analysisDataCacheRef.current = { ...analysisDataCacheRef.current, [cacheKey]: payload };
       return payload;
     },
-    [projectId, systemId, selectedClusterId, activeAnalysisType]
+    [projectId, systemId, selectedClusterId, activeAnalysisType, selectedResidueSelectionId]
   );
 
   useEffect(() => {
@@ -1342,7 +1352,9 @@ export default function DeltaEvalPage() {
                     <div>
                       <h2 className="text-sm font-semibold text-gray-100">Delta energy distributions</h2>
                       <p className="text-xs text-gray-400">
-                        Global endpoint score per frame: ΔE = E_model_A - E_model_B. Negative values favor model A.
+                        {selectedResidueSelectionId
+                          ? 'Selected-region endpoint score: node terms for selected residues plus edge terms touching selected residues.'
+                          : 'Global endpoint score per frame: ΔE = E_model_A - E_model_B. Negative values favor model A.'}
                       </p>
                     </div>
                     <select
@@ -1353,6 +1365,26 @@ export default function DeltaEvalPage() {
                       <option value="histogram">histograms + fitted curves</option>
                       <option value="curves">fitted curves only</option>
                     </select>
+                    <select
+                      value={selectedResidueSelectionId}
+                      onChange={(e) => setSelectedResidueSelectionId(e.target.value)}
+                      className="rounded-md border border-gray-700 bg-gray-950 px-2 py-1.5 text-xs text-gray-100"
+                      title="Show total delta energy or recompute the displayed distribution from saved per-frame node/edge components for a residue selection."
+                    >
+                      <option value="">Total protein energy</option>
+                      {residueSelectionSetups.map((setup) => (
+                        <option key={setup.setup_id} value={setup.setup_id}>
+                          Selection: {setup.name || setup.setup_id}
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      type="button"
+                      onClick={() => navigate(`/projects/${projectId}/systems/${systemId}/residue_selections${selectedClusterId ? `?cluster_id=${encodeURIComponent(selectedClusterId)}` : ''}`)}
+                      className="rounded-md border border-gray-700 bg-gray-950 px-2 py-1.5 text-xs text-gray-100 hover:border-gray-500"
+                    >
+                      Manage selections
+                    </button>
                     <EnergySeriesSelectorButton
                       series={deltaEnergySeries}
                       selectedIds={selectedDeltaEnergySeriesIds}

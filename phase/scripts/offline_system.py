@@ -72,7 +72,7 @@ def add_state(
     state_id: str,
     name: str | None,
     pdb_path: Path,
-    traj_path: Path,
+    traj_path: Path | None,
     residue_selection: str | None,
     copy_traj: bool,
     build_descriptors: bool,
@@ -156,7 +156,7 @@ def main(argv: list[str] | None = None) -> int:
     sp.add_argument("--state-id", required=True)
     sp.add_argument("--name")
     sp.add_argument("--pdb", required=True)
-    sp.add_argument("--traj", required=True)
+    sp.add_argument("--traj")
     sp.add_argument("--residue-selection")
     sp.add_argument("--copy-traj", action="store_true")
     sp.add_argument("--slice-spec")
@@ -183,7 +183,7 @@ def main(argv: list[str] | None = None) -> int:
             args.state_id,
             args.name,
             Path(args.pdb).expanduser().resolve(),
-            Path(args.traj).expanduser().resolve(),
+            Path(args.traj).expanduser().resolve() if args.traj else None,
             args.residue_selection,
             args.copy_traj,
             True,

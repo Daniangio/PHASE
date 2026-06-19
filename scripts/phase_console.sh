@@ -473,7 +473,7 @@ state_menu() {
     STATE_LINES="$(_offline_list list-states --project-id "$OFFLINE_PROJECT_ID" --system-id "$OFFLINE_SYSTEM_ID" || true)"
     print_state_summary "$STATE_LINES"
     echo ""
-    ACTION_LINES=$'open-cluster|Open cluster\nadd-state|Add state (PDB+trajectory)\ndelete-state|Delete state\nlist-clusters|List clusters\ncluster|Run clustering\nback|Back to systems'
+    ACTION_LINES=$'open-cluster|Open cluster\nadd-state|Add state (PDB, optional trajectory)\ndelete-state|Delete state\nlist-clusters|List clusters\ncluster|Run clustering\nback|Back to systems'
     ACTION_ROW="$(offline_choose_one "System actions:" "$ACTION_LINES")"
     ACTION="$(printf "%s" "$ACTION_ROW" | awk -F'|' '{print $1}')"
     case "$ACTION" in
@@ -493,12 +493,12 @@ state_menu() {
         STATE_ID="$(prompt "State ID" "state_1")"
         STATE_NAME="$(prompt "State name" "$STATE_ID")"
         PDB_PATH="$(prompt "PDB path" "")"
-        TRAJ_PATH="$(prompt "Trajectory path" "")"
+        TRAJ_PATH="$(prompt "Trajectory path (optional; blank = PDB-only single frame)" "")"
         SLICE_SPEC="$(prompt "Frame slice start:stop:step (blank = full; number = step)" "")"
         RESID_SHIFT="$(prompt "Residue shift offset (integer)" "0")"
         RES_SEL="$(prompt "Residue selection (optional)" "")"
         COPY_TRAJ="false"
-        if prompt_bool "Copy trajectory into system folder? (y/N)" "N"; then
+        if [ -n "$TRAJ_PATH" ] && prompt_bool "Copy trajectory into system folder? (y/N)" "N"; then
           COPY_TRAJ="true"
         fi
         ensure_env || return 0
@@ -507,8 +507,10 @@ state_menu() {
           --system-id "$OFFLINE_SYSTEM_ID" \
           --state-id "$STATE_ID" \
           --name "$STATE_NAME" \
-          --pdb "$PDB_PATH" \
-          --traj "$TRAJ_PATH")
+          --pdb "$PDB_PATH")
+        if [ -n "$TRAJ_PATH" ]; then
+          CMD+=(--traj "$TRAJ_PATH")
+        fi
         if [ "$COPY_TRAJ" = "true" ]; then
           CMD+=(--copy-traj)
         fi
