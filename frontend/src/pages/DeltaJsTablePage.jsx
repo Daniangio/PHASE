@@ -11,9 +11,11 @@ import JsRangeFilterBuilder, {
   passesAnyJsFilter,
 } from '../components/common/JsRangeFilterBuilder';
 import FilterSetupManager from '../components/common/FilterSetupManager';
+import { formatDeltaJsAnalysisDetails, formatDeltaJsAnalysisName, makeSampleNameById } from '../utils/deltaJsAnalysisLabels';
 import {
   fetchClusterAnalyses,
   fetchClusterAnalysisData,
+  deleteClusterAnalysis,
   fetchClusterUiSetups,
   saveClusterUiSetup,
   deleteClusterUiSetup,
@@ -97,13 +99,6 @@ function makeFilterPayload(rules) {
   };
 }
 
-function formatAnalysisShortMeta(entry) {
-  const ts = String(entry?.updated_at || entry?.created_at || '').slice(0, 19) || 'n/a';
-  const n = Number(entry?.summary?.n_samples || 0);
-  const md = String(entry?.md_label_mode || 'assigned');
-  const invalid = Boolean(entry?.drop_invalid) ? 'drop invalid' : 'keep invalid';
-  return `${ts} · n=${n} · ${md} · ${invalid}`;
-}
 
 function parseGroupResidues(text) {
   return String(text || '')
@@ -191,6 +186,8 @@ export default function DeltaJsTablePage() {
   const [analyses, setAnalyses] = useState([]);
   const [analysesError, setAnalysesError] = useState(null);
   const [selectedAnalysisId, setSelectedAnalysisId] = useState('');
+  const [deleteAnalysisBusy, setDeleteAnalysisBusy] = useState('');
+  const [deleteAnalysisError, setDeleteAnalysisError] = useState(null);
 
   const [data, setData] = useState(null);
   const [dataLoading, setDataLoading] = useState(false);
@@ -237,6 +234,12 @@ export default function DeltaJsTablePage() {
     () => (system?.metastable_clusters || []).filter((run) => run.path && run.status !== 'failed'),
     [system]
   );
+  const selectedCluster = useMemo(
+    () => clusterOptions.find((c) => String(c.cluster_id) === String(selectedClusterId)) || null,
+    [clusterOptions, selectedClusterId]
+  );
+  const sampleEntries = useMemo(() => selectedCluster?.samples || [], [selectedCluster]);
+  const sampleNameById = useMemo(() => makeSampleNameById(sampleEntries), [sampleEntries]);
 
   useEffect(() => {
     if (!clusterOptions.length) return;
@@ -275,6 +278,27 @@ export default function DeltaJsTablePage() {
       setAnalysesError(err.message || 'Failed to load analyses.');
     }
   }, [projectId, systemId, selectedClusterId]);
+
+
+  const handleDeleteAnalysis = useCallback(async (analysisId) => {
+    const aid = String(analysisId || '').trim();
+    if (!selectedClusterId || !aid) return;
+    if (!window.confirm('Delete this Delta JS analysis? This removes the stored analysis folder.')) return;
+    setDeleteAnalysisError(null);
+    setDeleteAnalysisBusy(aid);
+    try {
+      await deleteClusterAnalysis(projectId, systemId, selectedClusterId, 'delta_js', aid);
+      if (String(selectedAnalysisId) === aid) {
+        setSelectedAnalysisId('');
+      }
+      setData(null);
+      await loadAnalyses();
+    } catch (err) {
+      setDeleteAnalysisError(err.message || 'Failed to delete Delta JS analysis.');
+    } finally {
+      setDeleteAnalysisBusy('');
+    }
+  }, [projectId, systemId, selectedClusterId, selectedAnalysisId, loadAnalyses]);
 
   const loadFilterSetups = useCallback(async () => {
     if (!selectedClusterId) return;
@@ -739,17 +763,28 @@ export default function DeltaJsTablePage() {
             </div>
             <div>
               <label className="block text-xs text-gray-400 mb-1">Analysis</label>
-              <select
-                value={selectedAnalysisId}
-                onChange={(e) => setSelectedAnalysisId(e.target.value)}
-                className="w-full bg-gray-950 border border-gray-800 rounded-md px-2 py-2 text-sm text-gray-100"
-              >
-                {matchingAnalyses.map((a) => (
-                  <option key={a.analysis_id} value={a.analysis_id}>
-                    {(a.model_a_name || a.model_a_id || 'A')} vs {(a.model_b_name || a.model_b_id || 'B')} · {formatAnalysisShortMeta(a)}
-                  </option>
-                ))}
-              </select>
+              <div className="flex gap-2">
+                <select
+                  value={selectedAnalysisId}
+                  onChange={(e) => setSelectedAnalysisId(e.target.value)}
+                  className="min-w-0 flex-1 bg-gray-950 border border-gray-800 rounded-md px-2 py-2 text-sm text-gray-100"
+                >
+                  {matchingAnalyses.map((a) => (
+                    <option key={a.analysis_id} value={a.analysis_id}>
+                      {formatDeltaJsAnalysisName(a, sampleNameById)} · {formatDeltaJsAnalysisDetails(a)}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  onClick={() => handleDeleteAnalysis(selectedAnalysisId)}
+                  disabled={!selectedAnalysisId || deleteAnalysisBusy === selectedAnalysisId}
+                  className="shrink-0 px-2 py-1 rounded-md border border-red-900/60 text-xs text-red-300 hover:bg-red-950/40 disabled:opacity-50"
+                >
+                  {deleteAnalysisBusy === selectedAnalysisId ? 'Deleting...' : 'Delete'}
+                </button>
+              </div>
+              {deleteAnalysisError && <ErrorMessage message={deleteAnalysisError} />}
             </div>
             <div>
               <div className="flex items-center justify-between mb-1">

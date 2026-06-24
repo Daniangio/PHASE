@@ -13,9 +13,11 @@ import JsRangeFilterBuilder, {
   passesAnyJsFilter,
 } from '../components/common/JsRangeFilterBuilder';
 import FilterSetupManager from '../components/common/FilterSetupManager';
+import { formatDeltaJsAnalysisDetails, formatDeltaJsAnalysisName, makeSampleNameById } from '../utils/deltaJsAnalysisLabels';
 import {
   fetchClusterAnalyses,
   fetchClusterAnalysisData,
+  deleteClusterAnalysis,
   fetchClusterUiSetups,
   saveClusterUiSetup,
   deleteClusterUiSetup,
@@ -119,19 +121,6 @@ function aboLabel(dA, dB) {
   return arr[0][0];
 }
 
-function formatAnalysisShortMeta(entry) {
-  const ts = String(entry?.updated_at || entry?.created_at || '').slice(0, 19) || 'n/a';
-  const n = Number(entry?.summary?.n_samples || 0);
-  const md = String(entry?.md_label_mode || 'assigned');
-  const invalid = Boolean(entry?.drop_invalid) ? 'drop invalid' : 'keep invalid';
-  if (entry?.model_a_id || entry?.model_b_id) {
-    const a = String(entry?.model_a_name || entry?.model_a_id || 'A').slice(0, 18);
-    const b = String(entry?.model_b_name || entry?.model_b_id || 'B').slice(0, 18);
-    return `${ts} · n=${n} · ${a} vs ${b} · ${md} · ${invalid}`;
-  }
-  const edge = String(entry?.edge_source || entry?.edge_mode || 'cluster');
-  return `${ts} · n=${n} · edge=${edge} · ${md} · ${invalid}`;
-}
 
 export default function DeltaJsEvalPage() {
   const { projectId, systemId } = useParams();
@@ -189,6 +178,8 @@ export default function DeltaJsEvalPage() {
   const [newFilterSetupName, setNewFilterSetupName] = useState('');
   const [runPanelOpen, setRunPanelOpen] = useState(false);
   const [selectedAnalysisId, setSelectedAnalysisId] = useState('');
+  const [deleteAnalysisBusy, setDeleteAnalysisBusy] = useState('');
+  const [deleteAnalysisError, setDeleteAnalysisError] = useState(null);
 
   useEffect(() => {
     const loadSystem = async () => {
@@ -220,6 +211,7 @@ export default function DeltaJsEvalPage() {
     return s ? `?${s}` : '';
   }, [selectedClusterId]);
   const sampleEntries = useMemo(() => selectedCluster?.samples || [], [selectedCluster]);
+  const sampleNameById = useMemo(() => makeSampleNameById(sampleEntries), [sampleEntries]);
   const stateOptions = useMemo(() => {
     const raw = system?.states;
     if (!raw) return [];
@@ -340,6 +332,27 @@ export default function DeltaJsEvalPage() {
       setAnalyses([]);
     }
   }, [projectId, systemId, selectedClusterId]);
+
+
+  const handleDeleteAnalysis = useCallback(async (analysisId) => {
+    const aid = String(analysisId || '').trim();
+    if (!selectedClusterId || !aid) return;
+    if (!window.confirm('Delete this Delta JS analysis? This removes the stored analysis folder.')) return;
+    setDeleteAnalysisError(null);
+    setDeleteAnalysisBusy(aid);
+    try {
+      await deleteClusterAnalysis(projectId, systemId, selectedClusterId, 'delta_js', aid);
+      if (String(selectedAnalysisId) === aid) {
+        setSelectedAnalysisId('');
+      }
+      setData(null);
+      await loadAnalyses();
+    } catch (err) {
+      setDeleteAnalysisError(err.message || 'Failed to delete Delta JS analysis.');
+    } finally {
+      setDeleteAnalysisBusy('');
+    }
+  }, [projectId, systemId, selectedClusterId, selectedAnalysisId, loadAnalyses]);
 
   const loadFilterSetups = useCallback(async () => {
     if (!selectedClusterId) return;
@@ -1260,22 +1273,44 @@ export default function DeltaJsEvalPage() {
                     const aid = String(a.analysis_id);
                     const active = aid === String(selectedAnalysisId);
                     return (
-                      <button
+                      <div
                         key={aid}
-                        type="button"
+                        role="button"
+                        tabIndex={0}
                         onClick={() => setSelectedAnalysisId(aid)}
-                        className={`w-full text-left px-3 py-2 border-b border-gray-900 hover:bg-gray-800/40 ${
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' || e.key === ' ') setSelectedAnalysisId(aid);
+                        }}
+                        className={`w-full text-left px-3 py-2 border-b border-gray-900 hover:bg-gray-800/40 cursor-pointer ${
                           active ? 'bg-cyan-950/40 border-l-2 border-l-cyan-500' : ''
                         }`}
                       >
-                        <div className="text-xs text-gray-100">{aid}</div>
-                        <div className="text-[11px] text-gray-400">{formatAnalysisShortMeta(a)}</div>
-                      </button>
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="min-w-0">
+                            <div className="text-xs text-gray-100">{formatDeltaJsAnalysisName(a, sampleNameById)}</div>
+                            <div className="text-[11px] text-gray-400">{formatDeltaJsAnalysisDetails(a)}</div>
+                            <div className="text-[10px] text-gray-600">{aid}</div>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleDeleteAnalysis(aid);
+                            }}
+                            disabled={deleteAnalysisBusy === aid}
+                            className="shrink-0 text-[11px] px-2 py-1 rounded border border-red-900/60 text-red-300 hover:bg-red-950/40 disabled:opacity-50"
+                            title="Delete Delta JS analysis"
+                          >
+                            {deleteAnalysisBusy === aid ? 'Deleting...' : 'Delete'}
+                          </button>
+                        </div>
+                      </div>
                     );
                   })}
                 </div>
               )}
             </div>
+            {deleteAnalysisError && <ErrorMessage message={deleteAnalysisError} />}
             <JsRangeFilterBuilder
               rules={jsFilters}
               onChange={setJsFilters}
