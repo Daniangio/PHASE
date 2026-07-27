@@ -1,3 +1,5 @@
+![PHASE logo](logo.png?raw=true "PHASE")
+
 # PHASE
 
 PHASE (Protein Hamiltonian for Annealed Sampling of conformational Ensembles) is a modular framework for learning reduced Hamiltonians from molecular dynamics trajectories and generating novel protein conformations via calibrated annealed sampling. It bridges analysis and generation by combining trajectory preprocessing, descriptor extraction, metastable state discovery, residue-level clustering, and Potts-based sampling into a reproducible pipeline.
