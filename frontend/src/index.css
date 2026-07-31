@@ -42,3 +42,34 @@ body {
 
 .phase-light header,
 .phase-light footer { box-shadow: 0 1px 8px rgba(31, 54, 72, 0.08); }
+
+/* Plotly writes text colors inline in SVG. These selectors intentionally use
+   !important so energy-plot axes and legends stay legible on their surface. */
+.energy-distribution-plot--dark-foreground .gtitle,
+.energy-distribution-plot--dark-foreground .xtitle,
+.energy-distribution-plot--dark-foreground .ytitle,
+.energy-distribution-plot--dark-foreground .xtick text,
+.energy-distribution-plot--dark-foreground .ytick text,
+.energy-distribution-plot--dark-foreground .legendtext {
+  fill: #111827 !important;
+}
+
+.energy-distribution-plot--light-foreground .gtitle,
+.energy-distribution-plot--light-foreground .xtitle,
+.energy-distribution-plot--light-foreground .ytitle,
+.energy-distribution-plot--light-foreground .xtick text,
+.energy-distribution-plot--light-foreground .ytick text,
+.energy-distribution-plot--light-foreground .legendtext {
+  fill: #e5e7eb !important;
+}
+
+/* Transparent Plotly charts inherit the page surface. In PHASE light mode
+   they therefore need the same dark foreground as explicitly white charts. */
+.phase-light .energy-distribution-plot--light-foreground .gtitle,
+.phase-light .energy-distribution-plot--light-foreground .xtitle,
+.phase-light .energy-distribution-plot--light-foreground .ytitle,
+.phase-light .energy-distribution-plot--light-foreground .xtick text,
+.phase-light .energy-distribution-plot--light-foreground .ytick text,
+.phase-light .energy-distribution-plot--light-foreground .legendtext {
+  fill: #111827 !important;
+}

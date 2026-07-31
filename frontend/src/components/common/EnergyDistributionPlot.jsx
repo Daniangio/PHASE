@@ -379,6 +379,9 @@ export function buildEnergyDistributionPlot({
   });
 
   const dark = background === 'dark';
+  const textColor = dark ? '#e5e7eb' : '#111827';
+  const mutedTextColor = dark ? '#d1d5db' : '#374151';
+  const gridColor = dark ? '#374151' : '#d1d5db';
   return {
     data: traces,
     layout: {
@@ -387,27 +390,47 @@ export function buildEnergyDistributionPlot({
       margin: { l: 52, r: 18, t: title ? 34 : 12, b: 48 },
       paper_bgcolor: dark ? 'rgba(0,0,0,0)' : '#ffffff',
       plot_bgcolor: dark ? 'rgba(0,0,0,0)' : '#ffffff',
-      font: { color: dark ? '#d1d5db' : '#111827' },
+      font: { color: textColor },
       barmode: 'overlay',
-      xaxis: { title: xTitle, color: dark ? '#d1d5db' : '#111827', zeroline: true, range: [x0, x1] },
-      yaxis: { title: 'Density', color: dark ? '#d1d5db' : '#111827', rangemode: 'tozero' },
+      xaxis: {
+        title: { text: xTitle, font: { color: textColor } },
+        tickfont: { color: mutedTextColor },
+        color: textColor,
+        gridcolor: gridColor,
+        zerolinecolor: gridColor,
+        zeroline: true,
+        range: [x0, x1],
+      },
+      yaxis: {
+        title: { text: 'Density', font: { color: textColor } },
+        tickfont: { color: mutedTextColor },
+        color: textColor,
+        gridcolor: gridColor,
+        zerolinecolor: gridColor,
+        rangemode: 'tozero',
+      },
       shapes,
       annotations,
-      legend: { orientation: 'h', y: -0.22 },
+      legend: { orientation: 'h', y: -0.22, font: { color: textColor } },
+      hoverlabel: { bgcolor: dark ? '#111827' : '#ffffff', bordercolor: gridColor, font: { color: textColor } },
     },
     config: { displayModeBar: false, responsive: true },
   };
 }
 
-export default function EnergyDistributionPlot({ plot, height = 300 }) {
+export default function EnergyDistributionPlot({ plot, height = 300, foreground = 'auto' }) {
   if (!plot) return null;
+  const transparentOrDark = String(plot.layout?.paper_bgcolor || '').toLowerCase() !== '#ffffff';
+  const useDarkForeground = foreground === 'dark' || (foreground === 'auto' && !transparentOrDark);
   return (
-    <Plot
-      data={plot.data}
-      layout={{ ...plot.layout, height }}
-      config={plot.config || { displayModeBar: false, responsive: true }}
-      useResizeHandler
-      style={{ width: '100%', height: `${height}px` }}
-    />
+    <div className={`energy-distribution-plot ${useDarkForeground ? 'energy-distribution-plot--dark-foreground' : 'energy-distribution-plot--light-foreground'}`}>
+      <Plot
+        data={plot.data}
+        layout={{ ...plot.layout, height }}
+        config={plot.config || { displayModeBar: false, responsive: true }}
+        useResizeHandler
+        style={{ width: '100%', height: `${height}px` }}
+      />
+    </div>
   );
 }
