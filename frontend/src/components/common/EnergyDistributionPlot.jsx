@@ -36,6 +36,38 @@ function linspace(start, end, n) {
   return Array.from({ length: n }, (_, i) => start + i * step);
 }
 
+/** Build a normalized Gaussian KDE, optionally weighting repeated unique rows. */
+export function buildKdeCurve(values, { weights = null, points = 220, range = null } = {}) {
+  const rows = (Array.isArray(values) ? values : [])
+    .map((value, index) => ({
+      value: Number(value),
+      weight: Math.max(0, Number(Array.isArray(weights) ? weights[index] : 1)),
+    }))
+    .filter((row) => Number.isFinite(row.value) && row.weight > 0);
+  // A one-point distribution is still useful in a curves-only view. Render a
+  // narrow normalized Gaussian around it instead of leaving the plot empty.
+  if (!rows.length) return { x: [], y: [] };
+
+  const totalWeight = rows.reduce((sum, row) => sum + row.weight, 0);
+  const meanValue = rows.reduce((sum, row) => sum + row.weight * row.value, 0) / totalWeight;
+  const variance = rows.reduce((sum, row) => sum + row.weight * (row.value - meanValue) ** 2, 0) / totalWeight;
+  const deviation = Math.sqrt(Math.max(0, variance));
+  const minValue = Math.min(...rows.map((row) => row.value));
+  const maxValue = Math.max(...rows.map((row) => row.value));
+  const span = Math.max(maxValue - minValue, Math.abs(meanValue) * 0.02, 1e-6);
+  const effectiveN = (totalWeight ** 2) / rows.reduce((sum, row) => sum + row.weight ** 2, 0);
+  const bandwidth = Math.max(span * 1e-4, 1e-9, 1.06 * Math.max(deviation, span * 0.05) * effectiveN ** -0.2);
+  const start = Array.isArray(range) && Number.isFinite(Number(range[0])) ? Number(range[0]) : minValue - 0.04 * span;
+  const end = Array.isArray(range) && Number.isFinite(Number(range[1])) ? Number(range[1]) : maxValue + 0.04 * span;
+  const x = linspace(start, end > start ? end : start + span, points);
+  const normalizer = 1 / (Math.sqrt(2 * Math.PI) * bandwidth * totalWeight);
+  const y = x.map((coordinate) => rows.reduce((sum, row) => {
+    const z = (coordinate - row.value) / bandwidth;
+    return sum + row.weight * Math.exp(-0.5 * z * z);
+  }, 0) * normalizer);
+  return { x, y };
+}
+
 function kdeCurve(values, xs) {
   const arr = finiteValues(values);
   if (arr.length < 2) return [];

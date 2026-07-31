@@ -5,6 +5,7 @@ import { RefreshCw } from 'lucide-react';
 
 import Loader from '../components/common/Loader';
 import ErrorMessage from '../components/common/ErrorMessage';
+import { buildKdeCurve } from '../components/common/EnergyDistributionPlot';
 import { fetchClusterAnalyses, fetchClusterAnalysisData, fetchSystem } from '../api/projects';
 
 const palette = ['#22d3ee', '#f97316', '#10b981', '#f43f5e', '#60a5fa', '#f59e0b', '#a78bfa', '#facc15'];
@@ -24,6 +25,7 @@ export default function PottsNearestNeighborComparePage() {
   const [analysesLoading, setAnalysesLoading] = useState(false);
   const [selectedIds, setSelectedIds] = useState([]);
   const [rowCap, setRowCap] = useState('1500');
+  const [distanceGraphMode, setDistanceGraphMode] = useState('histogram');
 
   const [seriesById, setSeriesById] = useState({});
   const [seriesError, setSeriesError] = useState(null);
@@ -133,7 +135,8 @@ export default function PottsNearestNeighborComparePage() {
         const rows = await Promise.all(selectedIds.map(async (analysisId) => {
           const payload = await loadAnalysisData(analysisId);
           const distances = Array.isArray(payload?.data?.nn_dist_global) ? payload.data.nn_dist_global.map(Number) : [];
-          return [analysisId, { payload, distances }];
+          const counts = Array.isArray(payload?.data?.sample_unique_counts) ? payload.data.sample_unique_counts.map(Number) : [];
+          return [analysisId, { payload, distances, counts }];
         }));
         if (cancelled) return;
         setSeriesById(Object.fromEntries(rows));
@@ -150,43 +153,51 @@ export default function PottsNearestNeighborComparePage() {
   }, [selectedIds, loadAnalysisData]);
 
   const histogram = useMemo(() => {
-    try {
-      if (!selectedIds.length) return null;
-      const availableIds = selectedIds.filter((analysisId) => seriesById && Object.prototype.hasOwnProperty.call(seriesById, analysisId));
-      if (!availableIds.length) return null;
-      const data = availableIds.map((analysisId, idx) => {
-        const item = seriesById?.[analysisId];
-        const meta = analyses.find((row) => row.analysis_id === analysisId);
-        const name = meta ? `${meta.sample_name || meta.sample_id} → ${meta.md_sample_name || meta.md_sample_id}` : analysisId;
-        const distances = Array.isArray(item?.distances) ? item.distances : [];
-        return {
+    if (!selectedIds.length) return null;
+    const availableIds = selectedIds.filter((analysisId) => seriesById && Object.prototype.hasOwnProperty.call(seriesById, analysisId));
+    if (!availableIds.length) return null;
+    const data = availableIds.reduce((allTraces, analysisId, idx) => {
+      const item = seriesById?.[analysisId];
+      const meta = analyses.find((row) => row.analysis_id === analysisId);
+      const name = meta ? `${meta.sample_name || meta.sample_id} → ${meta.md_sample_name || meta.md_sample_id}` : analysisId;
+      const distances = Array.isArray(item?.distances) ? item.distances : [];
+      const counts = Array.isArray(item?.counts) ? item.counts : [];
+      const color = palette[idx % palette.length];
+      const traces = [];
+      if (distanceGraphMode === 'histogram') {
+        traces.push({
           type: 'histogram',
-          histnorm: 'probability',
+          histnorm: 'probability density',
           x: distances,
-          opacity: 0.45,
-          marker: { color: palette[idx % palette.length] },
-          name,
-        };
-      });
-      return {
-        data,
-        layout: {
-          barmode: 'overlay',
-          paper_bgcolor: '#111827',
-          plot_bgcolor: '#111827',
-          font: { color: '#e5e7eb' },
-          margin: { t: 36, r: 16, b: 48, l: 54 },
-          title: 'Nearest-neighbor distance distributions (overlay)',
-          xaxis: { title: 'Distance' },
-          yaxis: { title: 'Probability' },
-          legend: { orientation: 'h', y: -0.2 },
-        },
-        config: { responsive: true, displaylogo: false },
-      };
-    } catch {
-      return null;
-    }
-  }, [selectedIds, seriesById, analyses]);
+          weights: counts.length === distances.length ? counts : undefined,
+          opacity: 0.42,
+          marker: { color },
+          name: `${name} histogram`,
+          showlegend: false,
+        });
+      }
+      const curve = buildKdeCurve(distances, { weights: counts.length === distances.length ? counts : null });
+      if (curve.x.length) {
+        traces.push({ type: 'scatter', mode: 'lines', x: curve.x, y: curve.y, line: { color, width: 2.5 }, name });
+      }
+      return [...allTraces, ...traces];
+    }, []);
+    return {
+      data,
+      layout: {
+        barmode: 'overlay',
+        paper_bgcolor: '#111827',
+        plot_bgcolor: '#111827',
+        font: { color: '#e5e7eb' },
+        margin: { t: 36, r: 16, b: 48, l: 54 },
+        title: distanceGraphMode === 'histogram' ? 'Nearest-neighbor distance distributions (overlay)' : 'Nearest-neighbor fitted distance curves',
+        xaxis: { title: 'Distance' },
+        yaxis: { title: 'Probability density' },
+        legend: { orientation: 'h', y: -0.2 },
+      },
+      config: { responsive: true, displaylogo: false },
+    };
+  }, [selectedIds, seriesById, analyses, distanceGraphMode]);
 
   const toggleSelection = (analysisId) => {
     setSelectedIds((prev) => (prev.includes(analysisId) ? prev.filter((id) => id !== analysisId) : [...prev, analysisId]));
@@ -280,6 +291,18 @@ export default function PottsNearestNeighborComparePage() {
           {seriesLoading && <Loader message="Loading selected experiments..." />}
           {histogram && (
             <div className="rounded-lg border border-gray-800 bg-gray-900/70 p-3">
+              <div className="mb-2 flex items-center justify-end gap-2">
+                <label className="text-xs text-gray-400" htmlFor="nn-compare-distance-graph-mode">Distance display</label>
+                <select
+                  id="nn-compare-distance-graph-mode"
+                  value={distanceGraphMode}
+                  onChange={(event) => setDistanceGraphMode(event.target.value)}
+                  className="rounded-md border border-gray-700 bg-gray-950 px-2 py-1 text-xs text-gray-100"
+                >
+                  <option value="histogram">Histogram + fitted curves</option>
+                  <option value="curves">Fitted curves only</option>
+                </select>
+              </div>
               <Plot data={histogram.data} layout={histogram.layout} config={histogram.config} useResizeHandler style={{ width: '100%', height: 520 }} />
             </div>
           )}

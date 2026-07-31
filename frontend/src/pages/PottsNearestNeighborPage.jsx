@@ -6,6 +6,7 @@ import Plot from 'react-plotly.js';
 import Loader from '../components/common/Loader';
 import ErrorMessage from '../components/common/ErrorMessage';
 import HelpDrawer from '../components/common/HelpDrawer';
+import { buildKdeCurve } from '../components/common/EnergyDistributionPlot';
 import { deleteClusterAnalysis, fetchClusterAnalyses, fetchClusterAnalysisData, fetchSystem } from '../api/projects';
 import { fetchJobStatus, submitPottsNearestNeighborJob } from '../api/jobs';
 
@@ -52,6 +53,7 @@ export default function PottsNearestNeighborPage() {
   const [workers, setWorkers] = useState(0);
   const [distanceThresholds, setDistanceThresholds] = useState('0.05,0.1,0.2');
   const [rowCap, setRowCap] = useState('1500');
+  const [distanceGraphMode, setDistanceGraphMode] = useState('histogram');
 
   const [analyses, setAnalyses] = useState([]);
   const [analysesLoading, setAnalysesLoading] = useState(false);
@@ -325,26 +327,41 @@ export default function PottsNearestNeighborPage() {
     if (!global.length) return null;
     const median = weightedQuantile(global, counts, 0.5);
     const q9 = weightedQuantile(global, counts, 0.9);
+    const curve = buildKdeCurve(global, { weights: counts.length === global.length ? counts : null });
+    const data = [];
+    if (distanceGraphMode === 'histogram') {
+      data.push({
+        type: 'histogram',
+        histnorm: 'probability density',
+        x: global,
+        weights: counts.length === global.length ? counts : undefined,
+        marker: { color: palette[0] },
+        autobinx: true,
+        opacity: 0.28,
+        name: 'Nearest MD distance histogram',
+        showlegend: false,
+      });
+    }
+    if (curve.x.length) {
+      data.push({
+        type: 'scatter',
+        mode: 'lines',
+        x: curve.x,
+        y: curve.y,
+        line: { color: palette[0], width: 2.5 },
+        name: 'Fitted distance curve',
+      });
+    }
     return {
-      data: [
-        {
-          type: 'histogram',
-          x: global,
-          weights: counts.length === global.length ? counts : undefined,
-          marker: { color: palette[0] },
-          autobinx: true,
-          opacity: 0.85,
-          name: 'Nearest MD distance',
-        },
-      ],
+      data,
       layout: {
         paper_bgcolor: '#111827',
         plot_bgcolor: '#111827',
         font: { color: '#e5e7eb' },
         margin: { t: 28, r: 16, b: 48, l: 48 },
-        title: 'Weighted nearest-neighbor distance histogram',
+        title: distanceGraphMode === 'histogram' ? 'Weighted nearest-neighbor distance distribution' : 'Weighted nearest-neighbor fitted distance curve',
         xaxis: { title: 'Distance' },
-        yaxis: { title: useUnique ? 'Weighted count' : 'Count' },
+        yaxis: { title: 'Probability density' },
         shapes: [
           median != null
             ? { type: 'line', x0: median, x1: median, y0: 0, y1: 1, yref: 'paper', line: { color: '#f97316', width: 2, dash: 'dash' } }
@@ -356,7 +373,7 @@ export default function PottsNearestNeighborPage() {
       },
       config: { responsive: true, displaylogo: false },
     };
-  }, [analysisData, useUnique]);
+  }, [analysisData, distanceGraphMode]);
 
   const thresholdRows = useMemo(() => {
     const global = Array.isArray(analysisData?.data?.nn_dist_global) ? analysisData.data.nn_dist_global.map(Number) : [];
@@ -718,6 +735,18 @@ export default function PottsNearestNeighborPage() {
 
               {histogram && (
                 <div className="rounded-lg border border-gray-800 bg-gray-900/70 p-3">
+                  <div className="mb-2 flex items-center justify-end gap-2">
+                    <label className="text-xs text-gray-400" htmlFor="nn-distance-graph-mode">Distance display</label>
+                    <select
+                      id="nn-distance-graph-mode"
+                      value={distanceGraphMode}
+                      onChange={(event) => setDistanceGraphMode(event.target.value)}
+                      className="rounded-md border border-gray-700 bg-gray-950 px-2 py-1 text-xs text-gray-100"
+                    >
+                      <option value="histogram">Histogram + fitted curve</option>
+                      <option value="curves">Fitted curve only</option>
+                    </select>
+                  </div>
                   <Plot data={histogram.data} layout={histogram.layout} config={histogram.config} className="w-full" useResizeHandler style={{ width: '100%', height: 360 }} />
                 </div>
               )}

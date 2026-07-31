@@ -20,10 +20,19 @@ body {
   color: #17212b;
 }
 
-.phase-light .bg-gray-950 { background-color: #e8edf1 !important; }
-.phase-light .bg-gray-900 { background-color: #f3f6f8 !important; }
-.phase-light .bg-gray-800 { background-color: #ffffff !important; }
-.phase-light .bg-gray-700 { background-color: #e5ebef !important; }
+/* Attribute selectors also cover Tailwind opacity variants such as
+   `bg-gray-900/60`, which are used by most sidebar and card panels. */
+.phase-light [class*="bg-gray-950"] { background-color: #e8edf1 !important; }
+.phase-light [class*="bg-gray-900"] { background-color: #f3f6f8 !important; }
+.phase-light [class*="bg-gray-800"] { background-color: #ffffff !important; }
+.phase-light [class*="bg-gray-700"] { background-color: #e5ebef !important; }
+.phase-light [class*="bg-gray-600"] { background-color: #dce5ea !important; }
+.phase-light [class*="bg-slate-950"],
+.phase-light [class*="bg-slate-900"],
+.phase-light [class*="bg-slate-800"] { background-color: #f3f6f8 !important; }
+.phase-light [class*="bg-cyan-950"] { background-color: #e0f6fa !important; }
+.phase-light [class*="bg-red-950"] { background-color: #fff0f0 !important; }
+.phase-light [class*="bg-yellow-950"] { background-color: #fff9e7 !important; }
 
 .phase-light .text-white,
 .phase-light .text-gray-50,
@@ -72,4 +81,30 @@ body {
 .phase-light .energy-distribution-plot--light-foreground .ytick text,
 .phase-light .energy-distribution-plot--light-foreground .legendtext {
   fill: #111827 !important;
+}
+
+/* Plotly backgrounds and labels are often supplied as inline SVG styles by
+   individual pages. A palette switch must override those values globally. */
+.phase-light .js-plotly-plot .svg-container > svg.main-svg:first-of-type {
+  background-color: #ffffff !important;
+}
+
+.phase-light .js-plotly-plot .main-svg .bglayer > rect.bg {
+  fill: #ffffff !important;
+}
+
+.phase-light .js-plotly-plot .main-svg .legend > rect.bg {
+  fill: #ffffff !important;
+  stroke: #cbd5dc !important;
+  stroke-width: 1px !important;
+}
+
+.phase-light .js-plotly-plot .main-svg text,
+.phase-light .js-plotly-plot .hoverlayer text {
+  fill: #111827 !important;
+}
+
+.phase-light .js-plotly-plot .gridlayer path,
+.phase-light .js-plotly-plot .zerolinelayer path {
+  stroke: #d1d5db !important;
 }
