@@ -1423,7 +1423,10 @@ export default function SamplingVizPage() {
                           className="min-w-0 flex-1 text-left"
                         >
                           <div className="flex items-center justify-between gap-2">
-                            <span className="text-sm text-white truncate">
+                            <span
+                              className="text-sm text-white truncate"
+                              title={group.modelName || group.modelId || 'Analysis'}
+                            >
                               <input
                                 type="checkbox"
                                 readOnly
