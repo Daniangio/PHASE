@@ -11,3 +11,34 @@ body,
 body {
   overflow-y: auto;
 }
+
+/* Most pages use Tailwind's dark gray utility classes directly. Keep that
+   existing markup, but provide a consistent light palette when requested. */
+.phase-light,
+.phase-light body {
+  background: #f3f6f8;
+  color: #17212b;
+}
+
+.phase-light .bg-gray-950 { background-color: #e8edf1 !important; }
+.phase-light .bg-gray-900 { background-color: #f3f6f8 !important; }
+.phase-light .bg-gray-800 { background-color: #ffffff !important; }
+.phase-light .bg-gray-700 { background-color: #e5ebef !important; }
+
+.phase-light .text-white,
+.phase-light .text-gray-50,
+.phase-light .text-gray-100,
+.phase-light .text-gray-200 { color: #17212b !important; }
+.phase-light .text-gray-300,
+.phase-light .text-gray-400 { color: #52616d !important; }
+.phase-light .text-gray-500 { color: #667784 !important; }
+
+.phase-light .border-gray-700,
+.phase-light .border-gray-800,
+.phase-light .border-gray-900 { border-color: #cbd5dc !important; }
+
+.phase-light .hover\:bg-gray-700:hover { background-color: #dce5ea !important; }
+.phase-light .hover\:text-white:hover { color: #17212b !important; }
+
+.phase-light header,
+.phase-light footer { box-shadow: 0 1px 8px rgba(31, 54, 72, 0.08); }

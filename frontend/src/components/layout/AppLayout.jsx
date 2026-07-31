@@ -1,5 +1,6 @@
-import { Upload, Database, Server } from 'lucide-react';
+import { Upload, Database, Server, Moon, Sun } from 'lucide-react';
 import { NavLink } from 'react-router-dom';
+import { useEffect, useState } from 'react';
 
 const navItems = [
   { to: '/projects', label: 'Projects', icon: Upload },
@@ -8,6 +9,24 @@ const navItems = [
 ];
 
 export default function AppLayout({ children }) {
+  const [lightMode, setLightMode] = useState(() => {
+    try {
+      return window.localStorage.getItem('phase-theme') === 'light';
+    } catch (error) {
+      return false;
+    }
+  });
+
+  useEffect(() => {
+    document.documentElement.classList.toggle('phase-light', lightMode);
+    document.body.classList.toggle('phase-light', lightMode);
+    try {
+      window.localStorage.setItem('phase-theme', lightMode ? 'light' : 'dark');
+    } catch (error) {
+      // Theme persistence is optional (for example in restricted browser contexts).
+    }
+  }, [lightMode]);
+
   return (
     <div className="flex flex-col min-h-screen bg-gray-900 text-gray-100 font-inter overflow-x-hidden">
       <header className="bg-gray-800 border-b border-gray-700 shadow-lg">
@@ -38,6 +57,16 @@ export default function AppLayout({ children }) {
                 <span>{label}</span>
               </NavLink>
             ))}
+            <button
+              type="button"
+              onClick={() => setLightMode((enabled) => !enabled)}
+              className="flex items-center space-x-2 px-3 py-2 rounded-md font-medium text-gray-300 hover:bg-gray-700 hover:text-white transition-colors"
+              title={lightMode ? 'Switch to dark mode' : 'Switch to light mode'}
+              aria-label={lightMode ? 'Switch to dark mode' : 'Switch to light mode'}
+            >
+              {lightMode ? <Moon className="h-4 w-4" /> : <Sun className="h-4 w-4" />}
+              <span>{lightMode ? 'Dark' : 'Light'}</span>
+            </button>
           </nav>
         </div>
       </header>
