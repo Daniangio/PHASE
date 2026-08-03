@@ -104,6 +104,15 @@ function parseResidueId(label) {
   return Number.isFinite(v) ? v : null;
 }
 
+function formatResidueRankingLabel(displayLabel, fallbackLabel) {
+  const value = String(displayLabel || fallbackLabel || '').trim();
+  let match = value.match(/^([A-Za-z]{3})[_-]?(-?\d+)$/);
+  if (match) return `${match[1].toUpperCase()}_${match[2]}`;
+  match = value.match(/^res_?(-?\d+)_([A-Za-z]{3})$/i);
+  if (match) return `${match[2].toUpperCase()}_${match[1]}`;
+  return value;
+}
+
 function jsABOWeights(dA, dB) {
   const cA = 1 - normJs(dA);
   const cB = 1 - normJs(dB);
@@ -246,6 +255,13 @@ export default function DeltaJs3DPage() {
     const n = clusterInfo?.n_residues || 0;
     return Array.from({ length: n }, (_, i) => `res_${i}`);
   }, [clusterInfo]);
+
+  const residueRankingLabels = useMemo(() => {
+    const display = Array.isArray(clusterInfo?.residue_display_labels)
+      ? clusterInfo.residue_display_labels
+      : [];
+    return residueLabels.map((label, index) => formatResidueRankingLabel(display[index], label));
+  }, [clusterInfo, residueLabels]);
 
   const singleClusterByResidue = useMemo(() => {
     const n = residueLabels.length;
@@ -649,7 +665,7 @@ export default function DeltaJs3DPage() {
       const score = termA + termB;
       out.push({
         residueIndex: i,
-        residueLabel: residueLabels[i] || String(i),
+        residueLabel: residueRankingLabels[i] || residueLabels[i] || String(i),
         jsA: jsForDisplay(dAraw, displayNormalizedJs),
         jsB: jsForDisplay(dBraw, displayNormalizedJs),
         score,
@@ -657,7 +673,7 @@ export default function DeltaJs3DPage() {
     }
     out.sort((a, b) => a.score - b.score);
     return out;
-  }, [rowDistances, residueLabels, jsFilters, hideSingleCluster, singleClusterByResidue, orderJsA, orderJsB, displayNormalizedJs]);
+  }, [rowDistances, residueLabels, residueRankingLabels, jsFilters, hideSingleCluster, singleClusterByResidue, orderJsA, orderJsB, displayNormalizedJs]);
 
   const handleSaveFilterSetup = useCallback(async () => {
     if (!selectedClusterId) return;

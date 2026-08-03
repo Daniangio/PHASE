@@ -104,6 +104,13 @@ body {
   fill: #111827 !important;
 }
 
+.phase-light .js-plotly-plot .hoverlayer .hovertext path,
+.phase-light .js-plotly-plot .hoverlayer .hovertext rect,
+.phase-light .js-plotly-plot .hoverlayer .hoverlayer-bg {
+  fill: #ffffff !important;
+  stroke: #cbd5dc !important;
+}
+
 .phase-light .js-plotly-plot .gridlayer path,
 .phase-light .js-plotly-plot .zerolinelayer path {
   stroke: #d1d5db !important;
