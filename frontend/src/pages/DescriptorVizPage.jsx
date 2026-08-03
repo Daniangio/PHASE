@@ -1346,7 +1346,7 @@ export default function DescriptorVizPage() {
                       height: 500,
                       paper_bgcolor: '#111827',
                       plot_bgcolor: '#111827',
-                      font: { color: '#e5e7eb' },
+                      font: { color: '#3f68b9' },
                       scene: {
                         xaxis: { title: `${axisLabel(axisX)} (°)`, range: [-180, 180] },
                         yaxis: { title: `${axisLabel(axisY)} (°)`, range: [-180, 180] },
@@ -1375,7 +1375,7 @@ export default function DescriptorVizPage() {
                           height: 350,
                           paper_bgcolor: '#111827',
                           plot_bgcolor: '#111827',
-                          font: { color: '#e5e7eb' },
+                          font: { color: '#3f68b9' },
                           margin: { l: 40, r: 10, t: 30, b: 40 },
                           xaxis: { title: `${axisLabel(axes.x)} (°)`, range: [-180, 180] },
                           yaxis: { title: `${axisLabel(axes.y)} (°)`, range: [-180, 180] },
