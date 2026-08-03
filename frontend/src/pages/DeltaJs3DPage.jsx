@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
-import { CircleHelp, RefreshCw } from 'lucide-react';
+import { CircleHelp, RefreshCw, X } from 'lucide-react';
 import { createPluginUI } from 'molstar/lib/mol-plugin-ui/index';
 import { renderReact18 } from 'molstar/lib/mol-plugin-ui/react18';
 import { Asset } from 'molstar/lib/mol-util/assets';
@@ -20,12 +20,14 @@ import JsRangeFilterBuilder, {
   passesAnyJsFilter,
 } from '../components/common/JsRangeFilterBuilder';
 import FilterSetupManager from '../components/common/FilterSetupManager';
+import ClusterPieChart, { clusterPieColor } from '../components/common/ClusterPieChart';
 import { formatDeltaJsAnalysisDetails, formatDeltaJsAnalysisName, makeSampleNameById } from '../utils/deltaJsAnalysisLabels';
 import {
   fetchClusterAnalyses,
   fetchClusterAnalysisData,
   deleteClusterAnalysis,
   fetchClusterUiSetups,
+  fetchSampleResidueProfile,
   saveClusterUiSetup,
   deleteClusterUiSetup,
   fetchPottsClusterInfo,
@@ -113,6 +115,66 @@ function formatResidueRankingLabel(displayLabel, fallbackLabel) {
   return value;
 }
 
+function distributionSlices(values, clusterCount) {
+  const count = Math.max(0, Number(clusterCount) || 0);
+  const raw = (Array.isArray(values) ? values : [])
+    .slice(0, count || undefined)
+    .map((value) => Math.max(0, Number(value) || 0));
+  const total = raw.reduce((sum, value) => sum + value, 0);
+  if (!(total > 0)) return [];
+  return raw
+    .map((value, clusterId) => ({
+      clusterId,
+      label: `c${clusterId}`,
+      value: value / total,
+      color: clusterPieColor(clusterId),
+      tooltip: `cluster c${clusterId}`,
+    }))
+    .filter((slice) => slice.value > 0);
+}
+
+function aggregateResidueProfiles(profiles, clusterCount) {
+  const count = Math.max(0, Number(clusterCount) || 0);
+  const totals = new Array(count).fill(0);
+  let totalWeight = 0;
+  (Array.isArray(profiles) ? profiles : []).forEach((profile) => {
+    const weight = Math.max(0, Number(profile?.node_valid_count) || 0);
+    const probabilities = Array.isArray(profile?.node_probs) ? profile.node_probs : [];
+    if (!(weight > 0)) return;
+    totalWeight += weight;
+    for (let clusterId = 0; clusterId < Math.min(count, probabilities.length); clusterId += 1) {
+      totals[clusterId] += Math.max(0, Number(probabilities[clusterId]) || 0) * weight;
+    }
+  });
+  if (!(totalWeight > 0)) return [];
+  return distributionSlices(totals.map((value) => value / totalWeight), count);
+}
+
+function DistributionPiePanel({ title, subtitle, slices }) {
+  return (
+    <div className="rounded-lg border border-gray-800 bg-gray-900/60 p-4">
+      <h3 className="text-sm font-semibold text-gray-100">{title}</h3>
+      <p className="mt-1 min-h-8 text-[11px] text-gray-400">{subtitle}</p>
+      {!slices.length ? (
+        <p className="mt-6 text-center text-xs text-gray-500">No valid assigned-cluster labels are available.</p>
+      ) : (
+        <div className="mt-3 flex flex-col items-center gap-3">
+          <ClusterPieChart slices={slices} size={210} />
+          <div className="w-full space-y-1 text-xs">
+            {slices.map((slice) => (
+              <div key={`${title}:${slice.label}`} className="flex items-center gap-2 text-gray-300">
+                <span className="h-2.5 w-2.5 rounded-sm" style={{ backgroundColor: slice.color }} />
+                <span>{slice.label}</span>
+                <span className="ml-auto text-gray-400">{(100 * slice.value).toFixed(1)}%</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function jsABOWeights(dA, dB) {
   const cA = 1 - normJs(dA);
   const cB = 1 - normJs(dB);
@@ -198,6 +260,10 @@ export default function DeltaJs3DPage() {
 
   const [rowIndex, setRowIndex] = useState(0);
   const [selectedResidueIndex, setSelectedResidueIndex] = useState(-1);
+  const [pieResidueIndex, setPieResidueIndex] = useState(-1);
+  const [pieDistributionData, setPieDistributionData] = useState(null);
+  const [pieDistributionLoading, setPieDistributionLoading] = useState(false);
+  const [pieDistributionError, setPieDistributionError] = useState(null);
   const [residueIdMode, setResidueIdMode] = useState('auth');
   const [edgeSmoothEnabled, setEdgeSmoothEnabled] = useState(false);
   const [edgeSmoothStrength, setEdgeSmoothStrength] = useState(0.75);
@@ -463,6 +529,64 @@ export default function DeltaJs3DPage() {
     () => (Array.isArray(analysisData?.data?.D_edge) ? analysisData.data.D_edge : []),
     [analysisData]
   );
+
+  const selectedDistributionPies = useMemo(() => {
+    const residueIndex = Number(pieResidueIndex);
+    if (!Number.isInteger(residueIndex) || residueIndex < 0 || residueIndex >= residueLabels.length) return null;
+    return {
+      residueIndex,
+      residueLabel: residueRankingLabels[residueIndex] || residueLabels[residueIndex] || String(residueIndex),
+      a: pieDistributionData?.a || [],
+      sample: pieDistributionData?.sample || [],
+      b: pieDistributionData?.b || [],
+      sampleLabel: sampleLabels[rowIndex] || sampleIds[rowIndex] || 'Selected ensemble',
+    };
+  }, [pieDistributionData, pieResidueIndex, residueLabels, residueRankingLabels, rowIndex, sampleIds, sampleLabels]);
+
+  const openResidueDistributions = useCallback(async (residueIndex) => {
+    const index = Number(residueIndex);
+    const data = analysisData?.data || {};
+    const selectedSampleId = sampleIds[rowIndex];
+    if (!Number.isInteger(index) || index < 0 || !selectedClusterId || !selectedSampleId) return;
+
+    setPieResidueIndex(index);
+    setPieDistributionData(null);
+    setPieDistributionError(null);
+    setPieDistributionLoading(true);
+    try {
+      const refAIds = Array.isArray(data.ref_sample_ids_a) ? data.ref_sample_ids_a.map(String) : [];
+      const refBIds = Array.isArray(data.ref_sample_ids_b) ? data.ref_sample_ids_b.map(String) : [];
+      const allIds = Array.from(new Set([...refAIds, selectedSampleId, ...refBIds]));
+      const entries = await Promise.all(
+        allIds.map(async (sampleId) => [
+          sampleId,
+          await fetchSampleResidueProfile(projectId, systemId, selectedClusterId, sampleId, {
+            residue_index: index,
+            label_mode: 'assigned',
+            edge_pairs: [],
+          }),
+        ])
+      );
+      const byId = new Map(entries);
+      const clusterCount = Number(data?.K_list?.[index] || 0);
+      setPieDistributionData({
+        a: aggregateResidueProfiles(refAIds.map((sampleId) => byId.get(sampleId)), clusterCount),
+        sample: aggregateResidueProfiles([byId.get(selectedSampleId)], clusterCount),
+        b: aggregateResidueProfiles(refBIds.map((sampleId) => byId.get(sampleId)), clusterCount),
+      });
+    } catch (err) {
+      setPieDistributionError(err.message || 'Failed to load residue cluster distributions.');
+    } finally {
+      setPieDistributionLoading(false);
+    }
+  }, [analysisData, projectId, rowIndex, sampleIds, selectedClusterId, systemId]);
+
+  const closeResidueDistributions = useCallback(() => {
+    setPieResidueIndex(-1);
+    setPieDistributionData(null);
+    setPieDistributionError(null);
+    setPieDistributionLoading(false);
+  }, []);
 
   const rowDistances = useMemo(() => {
     const N = residueLabels.length;
@@ -1291,7 +1415,10 @@ export default function DeltaJs3DPage() {
                       className={`border-t border-gray-900 hover:bg-gray-800/40 cursor-pointer ${
                         row.residueIndex === selectedResidueIndex ? 'bg-cyan-950/20' : ''
                       }`}
-                      onClick={() => setSelectedResidueIndex(row.residueIndex)}
+                      onClick={() => {
+                        setSelectedResidueIndex(row.residueIndex);
+                        openResidueDistributions(row.residueIndex);
+                      }}
                     >
                       <td className="px-2 py-1.5 text-gray-200">{row.residueLabel}</td>
                       <td className="px-2 py-1.5 text-right text-gray-300">{row.jsA.toFixed(4)}</td>
@@ -1305,6 +1432,35 @@ export default function DeltaJs3DPage() {
           </div>
         </main>
       </div>
+      {selectedDistributionPies && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4" onClick={closeResidueDistributions}>
+          <div
+            className="max-h-[92vh] w-full max-w-5xl overflow-y-auto rounded-xl border border-gray-700 bg-gray-950 p-5 shadow-2xl"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <h2 className="text-lg font-semibold text-gray-100">Cluster distributions · {selectedDistributionPies.residueLabel}</h2>
+                <p className="mt-1 text-xs text-gray-400">Reference and ensemble marginals used to compute this residue&apos;s Delta JS values.</p>
+              </div>
+              <button type="button" onClick={closeResidueDistributions} className="text-gray-400 hover:text-gray-100" aria-label="Close cluster distributions">
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+            {pieDistributionLoading ? (
+              <div className="py-16"><Loader message="Loading cluster distributions..." /></div>
+            ) : pieDistributionError ? (
+              <div className="mt-5"><ErrorMessage message={pieDistributionError} /></div>
+            ) : (
+              <div className="mt-5 grid grid-cols-1 gap-4 lg:grid-cols-3">
+                <DistributionPiePanel title="A reference" subtitle="Aggregate assigned-cluster distribution for endpoint A." slices={selectedDistributionPies.a} />
+                <DistributionPiePanel title="Selected ensemble" subtitle={selectedDistributionPies.sampleLabel} slices={selectedDistributionPies.sample} />
+                <DistributionPiePanel title="B reference" subtitle="Aggregate assigned-cluster distribution for endpoint B." slices={selectedDistributionPies.b} />
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

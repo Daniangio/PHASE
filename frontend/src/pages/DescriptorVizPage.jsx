@@ -5,6 +5,7 @@ import { CircleHelp } from 'lucide-react';
 import Loader from '../components/common/Loader';
 import ErrorMessage from '../components/common/ErrorMessage';
 import HelpDrawer from '../components/common/HelpDrawer';
+import ClusterPieChart, { clusterPieColor } from '../components/common/ClusterPieChart';
 import {
   fetchSystem,
   fetchStateDescriptors,
@@ -29,50 +30,6 @@ const DEFAULT_DIHEDRAL_KEYS = ['phi', 'psi', 'omega', 'chi1', 'chi2'];
 
 function isFiniteNumber(value) {
   return Number.isFinite(Number(value));
-}
-
-function pieColor(idx) {
-  const hue = (idx * 137.507764) % 360;
-  return `hsl(${hue} 70% 55%)`;
-}
-
-function piePath(cx, cy, r, start, end) {
-  const x0 = cx + r * Math.cos(start);
-  const y0 = cy + r * Math.sin(start);
-  const x1 = cx + r * Math.cos(end);
-  const y1 = cy + r * Math.sin(end);
-  const large = end - start > Math.PI ? 1 : 0;
-  return `M ${cx} ${cy} L ${x0} ${y0} A ${r} ${r} 0 ${large} 1 ${x1} ${y1} Z`;
-}
-
-function PieChart({ slices, size = 120, onClick = null }) {
-  const radius = size * 0.45;
-  const center = size / 2;
-  let acc = -Math.PI / 2;
-  return (
-    <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} className="shrink-0">
-      <circle cx={center} cy={center} r={radius} fill="#111827" />
-      {(slices || []).map((slice, idx) => {
-        const v = Number(slice.value) || 0;
-        const next = acc + v * Math.PI * 2;
-        const d = piePath(center, center, radius, acc, next);
-        acc = next;
-        const pct = `${(100 * v).toFixed(2)}%`;
-        return (
-          <path
-            key={`${slice.label}:${idx}`}
-            d={d}
-            fill={slice.color || pieColor(idx)}
-            onClick={onClick ? () => onClick(slice) : undefined}
-            className={onClick ? 'cursor-pointer' : undefined}
-          >
-            <title>{`${slice.tooltip || slice.label}: ${pct}`}</title>
-          </path>
-        );
-      })}
-      <circle cx={center} cy={center} r={radius * 0.35} fill="#0b1220" />
-    </svg>
-  );
 }
 
 export default function DescriptorVizPage() {
@@ -946,7 +903,7 @@ export default function DescriptorVizPage() {
         .sort((a, b) => b[1] - a[1])
         .map(([cid, count], idx) => {
           const label = clusterLabelLookup[cid] || `c${cid}`;
-          const color = clusterColorMap[cid] || colors[Math.abs(cid) % colors.length] || pieColor(idx);
+          const color = clusterColorMap[cid] || colors[Math.abs(cid) % colors.length] || clusterPieColor(idx);
           const frac = valid > 0 ? count / valid : 0;
           return {
             label,
@@ -1459,7 +1416,7 @@ export default function DescriptorVizPage() {
                         </p>
                       ) : (
                         <div className="flex items-start gap-3">
-                          <PieChart
+                          <ClusterPieChart
                             slices={row.slices}
                             size={124}
                             onClick={() =>
@@ -1790,7 +1747,7 @@ export default function DescriptorVizPage() {
               </button>
             </div>
             <div className="flex flex-col md:flex-row items-start gap-4">
-              <PieChart slices={pieModal.slices || []} size={280} />
+              <ClusterPieChart slices={pieModal.slices || []} size={280} />
               <div className="flex-1 max-h-72 overflow-auto pr-1 space-y-1 text-xs">
                 {(pieModal.slices || []).map((s) => (
                   <div key={`pie-modal-slice:${s.label}`} className="flex items-center gap-2 text-gray-200">
