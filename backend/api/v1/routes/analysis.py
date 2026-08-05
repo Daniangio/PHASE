@@ -439,29 +439,6 @@ async def submit_potts_analysis_job(
         if atom_mode not in {"CA", "CM"}:
             raise HTTPException(status_code=400, detail="analysis_contact_atom_mode must be one of: CA, CM.")
 
-    pose_only = bool(payload.pose_only)
-    state_pose_ids = [str(v).strip() for v in (payload.state_pose_ids or []) if str(v).strip()]
-    if pose_only:
-        if not (payload.model_id or payload.model_path):
-            raise HTTPException(status_code=400, detail="pose_only requires model_id or model_path.")
-        if not state_pose_ids:
-            raise HTTPException(status_code=400, detail="pose_only requires at least one state_pose_id.")
-        missing_states = [
-            state_id for state_id in state_pose_ids if state_id not in (system_meta.states or {})
-        ]
-        if missing_states:
-            raise HTTPException(
-                status_code=404,
-                detail=f"Unknown state ids for pose analysis: {', '.join(missing_states)}",
-            )
-        for state_id in state_pose_ids:
-            state = (system_meta.states or {}).get(state_id)
-            if not getattr(state, "pdb_file", None):
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"State '{state_id}' has no stored PDB.",
-                )
-
     params = payload.dict(exclude_none=True, exclude={"project_id", "system_id", "cluster_id"})
     dataset_ref = {
         "project_id": payload.project_id,

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { useParams } from 'react-router-dom';
 import Loader from '../components/common/Loader';
 import ErrorMessage from '../components/common/ErrorMessage';
 import { fetchMetastableStates, renameMetastableState, metastablePdbUrl, fetchSystem } from '../api/projects';
@@ -10,7 +10,6 @@ import 'molstar/build/viewer/molstar.css';
 
 export default function MetastableVizPage() {
   const { projectId, systemId } = useParams();
-  const navigate = useNavigate();
 
   const containerRef = useRef(null);
   const pluginRef = useRef(null);
@@ -195,12 +194,6 @@ export default function MetastableVizPage() {
 
   return (
     <div className="space-y-4">
-      <button
-        onClick={() => navigate(`/projects/${projectId}/systems/${systemId}`)}
-        className="text-cyan-400 hover:text-cyan-300 text-sm"
-      >
-        ← Back to system
-      </button>
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold text-white">Metastable Visualization</h1>

@@ -684,13 +684,6 @@ export default function LigandCompletionPage() {
           >
             Back to sampling
           </button>
-          <button
-            type="button"
-            onClick={() => navigate(`/projects/${projectId}/systems/${systemId}`)}
-            className="text-xs px-3 py-2 rounded-md border border-gray-700 text-gray-200 hover:border-gray-500"
-          >
-            Back to system
-          </button>
         </div>
       </div>
 

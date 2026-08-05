@@ -161,7 +161,6 @@ export default function SamplingVizPage() {
 
   const [selectedAnalysisModelId, setSelectedAnalysisModelId] = useState('');
   const [runAnalysisModelId, setRunAnalysisModelId] = useState('');
-  const [selectedPoseStateId, setSelectedPoseStateId] = useState('');
   const [energyLoadLimit, setEnergyLoadLimit] = useState(1500);
   const [energyGraphMode, setEnergyGraphMode] = useState('histogram');
   const [analysisEdgeMode, setAnalysisEdgeMode] = useState('model');
@@ -198,12 +197,7 @@ export default function SamplingVizPage() {
 
   const sampleEntries = useMemo(() => selectedCluster?.samples || [], [selectedCluster]);
   const pottsModels = useMemo(() => selectedCluster?.potts_models || [], [selectedCluster]);
-  const stateEntries = useMemo(() => Object.values(system?.states || {}), [system]);
   const mdSamples = useMemo(() => sampleEntries.filter((s) => s.type === 'md_eval'), [sampleEntries]);
-  const poseEligibleStates = useMemo(
-    () => stateEntries.filter((state) => state?.pdb_file && state?.descriptor_file),
-    [stateEntries]
-  );
 
   const analysisLinkedSampleIds = useMemo(() => {
     if (!selectedAnalysisModelId) return new Set();
@@ -385,7 +379,11 @@ export default function SamplingVizPage() {
     [analyses]
   );
   const modelEnergyAnalyses = useMemo(
-    () => analyses.filter((a) => a.analysis_type === 'model_energy'),
+    () => analyses.filter(
+      (a) =>
+        a.analysis_type === 'model_energy' &&
+        !['state_pose', 'state_eval'].includes(String(a.sample_type || '').toLowerCase())
+    ),
     [analyses]
   );
 
@@ -473,16 +471,6 @@ export default function SamplingVizPage() {
     const first = selectedAnalysisModelIds[0] || '';
     if (first && first !== selectedAnalysisModelId) setSelectedAnalysisModelId(first);
   }, [selectedAnalysisModelIds, selectedAnalysisModelId]);
-
-  useEffect(() => {
-    if (!poseEligibleStates.length) {
-      setSelectedPoseStateId('');
-      return;
-    }
-    if (!selectedPoseStateId || !poseEligibleStates.some((s) => s.state_id === selectedPoseStateId)) {
-      setSelectedPoseStateId(poseEligibleStates[0].state_id);
-    }
-  }, [poseEligibleStates, selectedPoseStateId]);
 
   const mdLabelMode = 'assigned';
   const dropInvalid = true;
@@ -826,27 +814,6 @@ export default function SamplingVizPage() {
     analysisContactAtomMode,
   ]);
 
-  const handleAppendStatePoseEnergy = useCallback(async () => {
-    if (!selectedClusterId || !selectedAnalysisModelId || !selectedPoseStateId) return;
-    setAnalysesError(null);
-    setAnalysisJob(null);
-    setAnalysisJobStatus(null);
-    try {
-      const payload = {
-        project_id: projectId,
-        system_id: systemId,
-        cluster_id: selectedClusterId,
-        model_id: selectedAnalysisModelId,
-        pose_only: true,
-        state_pose_ids: [selectedPoseStateId],
-      };
-      const res = await submitPottsAnalysisJob(payload);
-      setAnalysisJob({ ...res, model_id: selectedAnalysisModelId });
-    } catch (err) {
-      setAnalysesError(err.message || 'Failed to append state pose energy.');
-    }
-  }, [projectId, systemId, selectedClusterId, selectedAnalysisModelId, selectedPoseStateId]);
-
   useEffect(() => {
     if (!analysisJob?.job_id) return;
     let cancelled = false;
@@ -907,16 +874,6 @@ export default function SamplingVizPage() {
     [analyses, loadAnalyses, projectId, selectedAnalysisModelId, selectedClusterId, systemId]
   );
 
-  const baseEnergyAnalysesForModel = useMemo(() => {
-    if (!selectedAnalysisModelId) return [];
-    return modelEnergyAnalyses.filter(
-      (a) =>
-        a.model_id === selectedAnalysisModelId &&
-        String(a.sample_type || '').toLowerCase() !== 'state_pose' &&
-        String(a.sample_type || '').toLowerCase() !== 'state_eval'
-    );
-  }, [modelEnergyAnalyses, selectedAnalysisModelId]);
-
   const [energyGraphs, setEnergyGraphs] = useState([]);
   const [energyError, setEnergyError] = useState(null);
   const [energyLoading, setEnergyLoading] = useState(false);
@@ -934,12 +891,8 @@ export default function SamplingVizPage() {
           const seen = new Set();
           for (const a of modelEnergyAnalyses) {
             if (a.model_id !== group.modelId) continue;
-            const sampleType = String(a.sample_type || '').toLowerCase();
-            const isStateDerived = sampleType === 'state_pose' || sampleType === 'state_eval';
-            if (!isStateDerived) {
-              if ((a.md_label_mode || 'assigned') !== mdLabelMode) continue;
-              if (Boolean(a.drop_invalid) !== Boolean(dropInvalid)) continue;
-            }
+            if ((a.md_label_mode || 'assigned') !== mdLabelMode) continue;
+            if (Boolean(a.drop_invalid) !== Boolean(dropInvalid)) continue;
             const sid = a.sample_id || '';
             if (!sid || seen.has(sid)) continue;
             seen.add(sid);
@@ -959,7 +912,7 @@ export default function SamplingVizPage() {
               id: `${group.modelId}:${meta.sample_id}`,
               sample_id: meta.sample_id,
               label: sample?.name || meta.sample_name || meta.sample_id,
-              kind: sampleType === 'state_pose' ? 'state_pose' : sampleType || 'sample',
+              kind: sampleType || 'sample',
               type: sampleType || 'sample',
               values: energies,
             });
@@ -1076,13 +1029,6 @@ export default function SamplingVizPage() {
 
       <div className="flex items-start justify-between gap-3">
         <div>
-          <button
-            type="button"
-            onClick={() => navigate(`/projects/${projectId}/systems/${systemId}`)}
-            className="mb-3 inline-flex items-center gap-2 text-xs px-3 py-2 rounded-md border border-gray-700 text-gray-200 hover:border-gray-500"
-          >
-            Back to system
-          </button>
           <h1 className="text-2xl font-semibold text-white">Sampling Explorer</h1>
           <p className="text-sm text-gray-400">
             Sampling runs save only <code>sample.npz</code>. Use the analysis job to generate derived metrics under{' '}
@@ -1105,34 +1051,6 @@ export default function SamplingVizPage() {
           >
             <Play className="h-4 w-4" />
             New analysis
-          </button>
-          <button
-            type="button"
-            onClick={() => navigate(`/projects/${projectId}/systems/${systemId}/sampling/delta_eval`)}
-            className="text-xs px-3 py-2 rounded-md border border-gray-700 text-gray-200 hover:border-gray-500"
-          >
-            Delta eval
-          </button>
-          <button
-            type="button"
-            onClick={() => navigate(`/projects/${projectId}/systems/${systemId}/sampling/lambda_sweep`)}
-            className="text-xs px-3 py-2 rounded-md border border-gray-700 text-gray-200 hover:border-gray-500"
-          >
-            Lambda sweep
-          </button>
-          <button
-            type="button"
-            onClick={() => navigate(`/projects/${projectId}/systems/${systemId}/sampling/gibbs_relaxation`)}
-            className="text-xs px-3 py-2 rounded-md border border-gray-700 text-gray-200 hover:border-gray-500"
-          >
-            Gibbs relaxation
-          </button>
-          <button
-            type="button"
-            onClick={() => navigate(`/projects/${projectId}/systems/${systemId}/sampling/potts_nn_mapping`)}
-            className="text-xs px-3 py-2 rounded-md border border-gray-700 text-gray-200 hover:border-gray-500"
-          >
-            Nearest neighbours
           </button>
         </div>
       </div>
@@ -1344,45 +1262,6 @@ export default function SamplingVizPage() {
               </p>
             </div>
 
-            <div className="space-y-2 rounded-md border border-gray-800 bg-gray-950/40 p-3">
-              <p className="text-xs font-semibold text-gray-300">State energy</p>
-              <p className="text-[11px] text-gray-500">
-                Use a descriptor-ready state and place its Potts energy on the current histogram. If the state is not yet materialized as an assigned cluster sample, PHASE will evaluate it once and reuse that assignment.
-              </p>
-              <div className="space-y-1">
-                <label className="block text-xs text-gray-400">State</label>
-                <select
-                  value={selectedPoseStateId}
-                  onChange={(e) => setSelectedPoseStateId(e.target.value)}
-                  disabled={!poseEligibleStates.length}
-                  className="w-full bg-gray-900 border border-gray-700 rounded-md px-3 py-2 text-white disabled:opacity-60"
-                >
-                  {!poseEligibleStates.length && <option value="">No descriptor-ready states available</option>}
-                  {poseEligibleStates.map((state) => (
-                    <option key={state.state_id} value={state.state_id}>
-                      {state.name || state.state_id}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              {!selectedAnalysisModelId && (
-                <p className="text-[11px] text-amber-300">Select an analysis in the sidebar first.</p>
-              )}
-              {!!selectedAnalysisModelId && !baseEnergyAnalysesForModel.length && (
-                <p className="text-[11px] text-amber-300">
-                  Run the complete Potts analysis for this model first. The state energy is appended to that model context.
-                </p>
-              )}
-              <button
-                type="button"
-                onClick={handleAppendStatePoseEnergy}
-                disabled={!selectedAnalysisModelId || !selectedPoseStateId || !baseEnergyAnalysesForModel.length}
-                className="inline-flex items-center gap-2 px-3 py-2 rounded-md bg-gray-700 hover:bg-gray-600 text-white text-sm disabled:opacity-60 disabled:cursor-not-allowed"
-              >
-                <Play className="h-4 w-4" />
-                Add energy
-              </button>
-            </div>
 
             {analysesError && <ErrorMessage message={analysesError} />}
           </div>
@@ -1545,7 +1424,7 @@ export default function SamplingVizPage() {
               <div className="rounded-md border border-cyan-800 bg-cyan-950/20 p-3 text-[12px] text-cyan-100 space-y-1">
                 <div>
                   Wrote {analysisSummary.comparisons_written ?? 0} MD-vs-sample analyses, {analysisSummary.energies_written ?? 0}{' '}
-                  energy analyses, and {analysisSummary.pose_energies_written ?? 0} single-pose energies.
+                  energy analyses.
                 </div>
                 {!!analysisSkippedSamples.length && (
                   <div className="text-cyan-200/90">

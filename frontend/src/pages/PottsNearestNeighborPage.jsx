@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
-import { CircleHelp, Play, RefreshCw, Trash2 } from 'lucide-react';
+import { useParams } from 'react-router-dom';
+import { CircleHelp, Play, Trash2, X } from 'lucide-react';
 import Plot from 'react-plotly.js';
 
 import Loader from '../components/common/Loader';
 import ErrorMessage from '../components/common/ErrorMessage';
 import HelpDrawer from '../components/common/HelpDrawer';
+import NearestNeighborWorkspaceTabs from '../components/potts/NearestNeighborWorkspaceTabs';
 import { buildKdeCurve } from '../components/common/EnergyDistributionPlot';
 import { deleteClusterAnalysis, fetchClusterAnalyses, fetchClusterAnalysisData, fetchSystem } from '../api/projects';
 import { fetchJobStatus, submitPottsNearestNeighborJob } from '../api/jobs';
@@ -31,7 +32,6 @@ function weightedQuantile(values, weights, q) {
 
 export default function PottsNearestNeighborPage() {
   const { projectId, systemId } = useParams();
-  const navigate = useNavigate();
 
   const [system, setSystem] = useState(null);
   const [loadingSystem, setLoadingSystem] = useState(true);
@@ -71,6 +71,7 @@ export default function PottsNearestNeighborPage() {
   const [jobError, setJobError] = useState(null);
   const [deletingAnalysisId, setDeletingAnalysisId] = useState('');
   const [helpOpen, setHelpOpen] = useState(false);
+  const [runPanelOpen, setRunPanelOpen] = useState(false);
 
   useEffect(() => {
     const loadSystem = async () => {
@@ -297,6 +298,7 @@ export default function PottsNearestNeighborPage() {
         workers: Number(workers) > 0 ? Number(workers) : null,
       });
       setJob(payload);
+      setRunPanelOpen(false);
     } catch (err) {
       setJobError(err.message || 'Failed to submit analysis.');
     }
@@ -536,54 +538,22 @@ export default function PottsNearestNeighborPage() {
         onClose={() => setHelpOpen(false)}
       />
 
-      <div className="flex items-center justify-between gap-3">
-        <div>
-          <h1 className="text-2xl font-semibold text-white">Potts NN Mapping</h1>
-          <p className="text-sm text-gray-400">Map one sample ensemble to its nearest MD frames in cluster space using Potts-weighted node and edge mismatches.</p>
-        </div>
-        <div className="flex items-center gap-2">
-          <button
-            type="button"
-            onClick={() => navigate(`/projects/${projectId}/systems/${systemId}/sampling/potts_nn_mapping_graph${selectedClusterId ? `?cluster_id=${encodeURIComponent(selectedClusterId)}` : ''}`)}
-            className="inline-flex items-center gap-2 text-xs px-3 py-2 rounded-md border border-gray-700 text-gray-200 hover:bg-gray-700/40"
-          >
-            Graph view
-          </button>
-          <button
-            type="button"
-            onClick={() => navigate(`/projects/${projectId}/systems/${systemId}/sampling/potts_nn_mapping_compare${selectedClusterId ? `?cluster_id=${encodeURIComponent(selectedClusterId)}` : ''}`)}
-            className="inline-flex items-center gap-2 text-xs px-3 py-2 rounded-md border border-gray-700 text-gray-200 hover:bg-gray-700/40"
-          >
-            Compare experiments
-          </button>
-          <button
-            type="button"
-            onClick={() => setHelpOpen(true)}
-            className="inline-flex items-center gap-2 text-xs px-3 py-2 rounded-md border border-gray-700 text-gray-200 hover:bg-gray-700/40"
-          >
-            <CircleHelp className="h-4 w-4" /> Help
-          </button>
-          <button
-            type="button"
-            onClick={() => navigate(`/projects/${projectId}/systems/${systemId}/sampling/visualize`)}
-            className="text-xs px-3 py-2 rounded-md border border-gray-700 text-gray-200 hover:bg-gray-700/40"
-          >
-            Sampling Explorer
-          </button>
-          <button
-            type="button"
-            onClick={loadAnalyses}
-            className="inline-flex items-center gap-2 text-xs px-3 py-2 rounded-md border border-gray-700 text-gray-200 hover:bg-gray-700/40"
-          >
-            <RefreshCw className="h-4 w-4" /> Refresh
-          </button>
-        </div>
-      </div>
 
-      <div className="grid grid-cols-1 xl:grid-cols-[320px,minmax(0,1fr)] gap-4">
-        <aside className="space-y-4 rounded-lg border border-gray-800 bg-gray-900/70 p-4 h-fit xl:sticky xl:top-6">
+      {runPanelOpen ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
+          <div className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-lg border border-gray-700 bg-gray-900 p-5 shadow-xl">
+            <div className="mb-4 flex items-start justify-between gap-3 border-b border-gray-800 pb-3">
+              <div>
+                <h2 className="text-lg font-semibold text-white">New nearest-neighbour analysis</h2>
+                <p className="mt-1 text-xs text-gray-400">Choose the source sample, reference MD ensemble, and distance settings.</p>
+              </div>
+              <button type="button" onClick={() => setRunPanelOpen(false)} className="rounded-md p-1 text-gray-400 hover:bg-gray-800 hover:text-white" aria-label="Close new analysis panel">
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+            <div className="space-y-4">
           <div>
-            <p className="text-xs uppercase tracking-[0.2em] text-gray-500">Run analysis</p>
+            <p className="text-xs uppercase tracking-[0.2em] text-gray-500">Analysis setup</p>
           </div>
           <label className="block text-sm text-gray-300">
             Cluster
@@ -635,8 +605,9 @@ export default function PottsNearestNeighborPage() {
             <label className="block text-sm text-gray-300">Alpha<input type="number" step="0.05" min="0" max="1" value={alpha} onChange={(e) => setAlpha(e.target.value)} className="mt-1 w-full rounded-md bg-gray-950 border border-gray-700 px-3 py-2 text-sm text-white" /></label>
             <label className="block text-sm text-gray-300">Top-K candidates<input type="number" min="0" value={topKCandidates} onChange={(e) => setTopKCandidates(e.target.value)} className="mt-1 w-full rounded-md bg-gray-950 border border-gray-700 px-3 py-2 text-sm text-white" /></label>
             <label className="block text-sm text-gray-300">Chunk size<input type="number" min="1" value={chunkSize} onChange={(e) => setChunkSize(e.target.value)} className="mt-1 w-full rounded-md bg-gray-950 border border-gray-700 px-3 py-2 text-sm text-white" /></label>
-            <label className="block text-sm text-gray-300">Workers<input type="number" min="0" value={workers} onChange={(e) => setWorkers(e.target.value)} className="mt-1 w-full rounded-md bg-gray-950 border border-gray-700 px-3 py-2 text-sm text-white" /></label>
+            <label className="block text-sm text-gray-300">Queue workers<input type="number" min="0" value={workers} onChange={(e) => setWorkers(e.target.value)} className="mt-1 w-full rounded-md bg-gray-950 border border-gray-700 px-3 py-2 text-sm text-white" /></label>
           </div>
+          <p className="text-xs text-gray-500">Use 0 to use available RQ workers. With one web worker, rows run sequentially inside that worker.</p>
           <label className="block text-sm text-gray-300">
             Distance thresholds
             <input value={distanceThresholds} onChange={(e) => setDistanceThresholds(e.target.value)} className="mt-1 w-full rounded-md bg-gray-950 border border-gray-700 px-3 py-2 text-sm text-white" />
@@ -658,8 +629,45 @@ export default function PottsNearestNeighborPage() {
             onClick={handleRun}
             className="w-full inline-flex items-center justify-center gap-2 rounded-md bg-cyan-500 text-slate-950 px-3 py-2 text-sm font-semibold hover:bg-cyan-400"
           >
-            <Play className="h-4 w-4" /> Run mapping
+            <Play className="h-4 w-4" /> Run analysis
           </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <h1 className="text-2xl font-semibold text-white">Potts NN Mapping</h1>
+          <p className="text-sm text-gray-400">Map one sample ensemble to its nearest MD frames in cluster space using Potts-weighted node and edge mismatches.</p>
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setHelpOpen(true)}
+            className="inline-flex items-center gap-2 rounded-md border border-gray-700 px-3 py-2 text-xs text-gray-200 hover:bg-gray-700/40"
+          >
+            <CircleHelp className="h-4 w-4" /> Help
+          </button>
+          <button
+            type="button"
+            onClick={() => setRunPanelOpen(true)}
+            className="inline-flex items-center gap-2 rounded-md bg-cyan-500 px-3 py-2 text-xs font-semibold text-slate-950 hover:bg-cyan-400"
+          >
+            <Play className="h-4 w-4" /> New analysis
+          </button>
+        </div>
+      </div>
+
+      <NearestNeighborWorkspaceTabs
+        projectId={projectId}
+        systemId={systemId}
+        clusterId={selectedClusterId}
+        active="mapping"
+      />
+
+      <div className="grid grid-cols-1 xl:grid-cols-[320px,minmax(0,1fr)] gap-4">
+        <aside className="space-y-4 rounded-lg border border-gray-800 bg-gray-900/70 p-4 h-fit xl:sticky xl:top-6">
           {jobStatus && (
             <div className="rounded-md border border-gray-800 bg-gray-950/60 p-3 text-xs text-gray-300">
               <div className="flex items-center justify-between gap-3">
@@ -671,7 +679,7 @@ export default function PottsNearestNeighborPage() {
           )}
           {(jobError || analysesError) && <ErrorMessage message={jobError || analysesError} />}
 
-          <div className="border-t border-gray-800 pt-4">
+          <div>
             <p className="text-xs uppercase tracking-[0.2em] text-gray-500 mb-2">Saved analyses</p>
             {analysesLoading && <p className="text-xs text-gray-400">Loading…</p>}
             {!analysesLoading && analyses.length === 0 && <p className="text-xs text-gray-500">No analyses yet.</p>}

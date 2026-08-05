@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useLocation, useNavigate, useParams } from 'react-router-dom';
+import { useLocation, useParams } from 'react-router-dom';
 import Plot from 'react-plotly.js';
 import { CircleHelp } from 'lucide-react';
 import Loader from '../components/common/Loader';
@@ -35,7 +35,6 @@ function isFiniteNumber(value) {
 export default function DescriptorVizPage() {
   const { projectId, systemId } = useParams();
   const location = useLocation();
-  const navigate = useNavigate();
 
   const [system, setSystem] = useState(null);
   const [loadingSystem, setLoadingSystem] = useState(true);
@@ -1026,12 +1025,6 @@ export default function DescriptorVizPage() {
         docPath="/docs/cluster_patching_help.md"
         onClose={() => setHelpOpen(false)}
       />
-      <button
-        onClick={() => navigate(`/projects/${projectId}/systems/${systemId}`)}
-        className="text-cyan-400 hover:text-cyan-300 text-sm"
-      >
-        ← Back to system
-      </button>
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold text-white">Descriptor Explorer</h1>

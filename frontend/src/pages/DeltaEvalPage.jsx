@@ -815,7 +815,7 @@ export default function DeltaEvalPage() {
           <div className="max-h-[90vh] w-full max-w-3xl overflow-y-auto rounded-lg border border-gray-700 bg-gray-900 p-4 shadow-xl">
             <div className="flex items-start justify-between gap-3 border-b border-gray-800 pb-3">
               <div>
-                <h2 className="text-lg font-semibold text-white">Run {activeTab === 'delta_energy' ? 'delta-energy' : 'commitment/frustration'} analysis</h2>
+                <h2 className="text-lg font-semibold text-white">New {activeTab === 'delta_energy' ? 'delta-energy' : 'commitment/frustration'} analysis</h2>
                 <p className="text-xs text-gray-400 mt-1">Select the model pair and trajectories for the active tab.</p>
               </div>
               <button type="button" onClick={() => setRunPanelOpen(false)} className="text-sm text-gray-400 hover:text-gray-100">
@@ -938,13 +938,6 @@ export default function DeltaEvalPage() {
         <div className="flex items-center gap-2">
           <button
             type="button"
-            onClick={() => navigate(`/projects/${projectId}/systems/${systemId}`)}
-            className="px-3 py-2 rounded-md border border-gray-700 text-sm text-gray-200 hover:bg-gray-800"
-          >
-            Back to system
-          </button>
-          <button
-            type="button"
             onClick={() => navigate(`/projects/${projectId}/systems/${systemId}/sampling/delta_commitment_3d${buildSamplingSuffix(selectedClusterId)}`)}
             className="px-3 py-2 rounded-md border border-gray-700 text-sm text-gray-200 hover:bg-gray-800"
           >
@@ -958,6 +951,14 @@ export default function DeltaEvalPage() {
             <CircleHelp className="h-4 w-4" />
             Help
           </button>
+          <button
+            type="button"
+            onClick={() => setRunPanelOpen(true)}
+            className="inline-flex items-center gap-2 px-3 py-2 rounded-md bg-cyan-500 text-sm font-semibold text-black hover:bg-cyan-400"
+          >
+            <Play className="h-4 w-4" />
+            New analysis
+          </button>
         </div>
       </div>
 
@@ -965,14 +966,6 @@ export default function DeltaEvalPage() {
         <section className="bg-gray-800 border border-gray-700 rounded-lg p-4 space-y-4">
           <div className="flex items-center justify-between">
             <h2 className="text-sm font-semibold text-white">Analysis browser</h2>
-            <button
-              type="button"
-              onClick={() => setRunPanelOpen(true)}
-              className="inline-flex items-center gap-2 px-2 py-1 rounded-md bg-cyan-500 text-xs font-semibold text-black"
-            >
-              <Play className="h-3.5 w-3.5" />
-              Run analysis
-            </button>
           </div>
           <div className="flex items-center justify-end">
             <button

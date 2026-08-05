@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useLocation, useNavigate, useParams } from 'react-router-dom';
+import { useLocation, useParams } from 'react-router-dom';
 import Plot from 'react-plotly.js';
 import { RefreshCw } from 'lucide-react';
 
 import Loader from '../components/common/Loader';
 import ErrorMessage from '../components/common/ErrorMessage';
 import { buildKdeCurve } from '../components/common/EnergyDistributionPlot';
+import NearestNeighborWorkspaceTabs from '../components/potts/NearestNeighborWorkspaceTabs';
 import { fetchClusterAnalyses, fetchClusterAnalysisData, fetchSystem } from '../api/projects';
 
 const palette = ['#22d3ee', '#f97316', '#10b981', '#f43f5e', '#60a5fa', '#f59e0b', '#a78bfa', '#facc15'];
@@ -13,7 +14,6 @@ const palette = ['#22d3ee', '#f97316', '#10b981', '#f43f5e', '#60a5fa', '#f59e0b
 export default function PottsNearestNeighborComparePage() {
   const { projectId, systemId } = useParams();
   const location = useLocation();
-  const navigate = useNavigate();
 
   const [system, setSystem] = useState(null);
   const [loadingSystem, setLoadingSystem] = useState(true);
@@ -82,7 +82,7 @@ export default function PottsNearestNeighborComparePage() {
       setSelectedIds((prev) => {
         const filtered = prev.filter((id) => list.some((row) => row.analysis_id === id));
         if (filtered.length) return filtered;
-        return list.slice(0, 4).map((row) => row.analysis_id);
+        return list.slice(0, 2).map((row) => row.analysis_id);
       });
     } catch (err) {
       setAnalyses([]);
@@ -216,13 +216,6 @@ export default function PottsNearestNeighborComparePage() {
         <div className="flex items-center gap-2">
           <button
             type="button"
-            onClick={() => navigate(`/projects/${projectId}/systems/${systemId}/sampling/potts_nn_mapping${selectedClusterId ? `?cluster_id=${encodeURIComponent(selectedClusterId)}` : ''}`)}
-            className="text-xs px-3 py-2 rounded-md border border-gray-700 text-gray-200 hover:bg-gray-700/40"
-          >
-            Back to mapping
-          </button>
-          <button
-            type="button"
             onClick={loadAnalyses}
             className="inline-flex items-center gap-2 text-xs px-3 py-2 rounded-md border border-gray-700 text-gray-200 hover:bg-gray-700/40"
           >
@@ -230,6 +223,13 @@ export default function PottsNearestNeighborComparePage() {
           </button>
         </div>
       </div>
+
+      <NearestNeighborWorkspaceTabs
+        projectId={projectId}
+        systemId={systemId}
+        clusterId={selectedClusterId}
+        active="compare"
+      />
 
       <div className="grid grid-cols-1 xl:grid-cols-[360px,minmax(0,1fr)] gap-4">
         <aside className="space-y-3 rounded-lg border border-gray-800 bg-gray-900/70 p-4 h-fit">

@@ -4,7 +4,7 @@ import argparse
 import os
 from pathlib import Path
 
-from phase.potts.analysis_run import analyze_cluster_samples, append_state_pose_energies
+from phase.potts.analysis_run import analyze_cluster_samples
 from phase.services.project_store import ProjectStore
 
 
@@ -27,8 +27,6 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--analysis-contact-state-id", action="append", default=[], help="State id used to build contact edges (repeatable).")
     ap.add_argument("--analysis-contact-pdb", action="append", default=[], help="Explicit PDB path used to build contact edges (repeatable).")
     ap.add_argument("--progress", action="store_true", help="Show progress while running local analysis.")
-    ap.add_argument("--pose-only", action="store_true", help="Append single-PDB state energies under an existing model-energy analysis context.")
-    ap.add_argument("--state-pose-id", action="append", default=[], help="State id to evaluate as a single PDB pose. Repeatable.")
     args = ap.parse_args(argv)
 
     model_ref = args.model.strip() or None
@@ -50,40 +48,27 @@ def main(argv: list[str] | None = None) -> int:
                 except Exception:
                     model_ref = None
 
-    if args.pose_only:
-        if not model_ref:
-            raise SystemExit("--pose-only requires --model.")
-        if not args.state_pose_id:
-            raise SystemExit("--pose-only requires at least one --state-pose-id.")
-        summary = append_state_pose_energies(
-            project_id=args.project_id,
-            system_id=args.system_id,
-            cluster_id=args.cluster_id,
-            model_ref=model_ref,
-            state_ids=args.state_pose_id,
-        )
-    else:
-        progress_cb = None
-        if args.progress:
-            def progress_cb(message: str, current: int, total: int):
-                total_i = max(1, int(total))
-                print(f"[{int(current)}/{total_i}] {message}")
+    progress_cb = None
+    if args.progress:
+        def progress_cb(message: str, current: int, total: int):
+            total_i = max(1, int(total))
+            print(f"[{int(current)}/{total_i}] {message}")
 
-        summary = analyze_cluster_samples(
-            project_id=args.project_id,
-            system_id=args.system_id,
-            cluster_id=args.cluster_id,
-            model_ref=model_ref,
-            md_label_mode=args.md_label_mode,
-            drop_invalid=not bool(args.keep_invalid),
-            n_workers=(int(args.workers) if int(args.workers) > 0 else None),
-            analysis_edge_mode=(args.analysis_edge_mode or None),
-            analysis_contact_cutoff=float(args.analysis_contact_cutoff),
-            analysis_contact_atom_mode=str(args.analysis_contact_atom_mode or "CA"),
-            analysis_contact_state_ids=[str(v).strip() for v in (args.analysis_contact_state_id or []) if str(v).strip()],
-            analysis_contact_pdbs=[str(v).strip() for v in (args.analysis_contact_pdb or []) if str(v).strip()],
-            progress_callback=progress_cb,
-        )
+    summary = analyze_cluster_samples(
+        project_id=args.project_id,
+        system_id=args.system_id,
+        cluster_id=args.cluster_id,
+        model_ref=model_ref,
+        md_label_mode=args.md_label_mode,
+        drop_invalid=not bool(args.keep_invalid),
+        n_workers=(int(args.workers) if int(args.workers) > 0 else None),
+        analysis_edge_mode=(args.analysis_edge_mode or None),
+        analysis_contact_cutoff=float(args.analysis_contact_cutoff),
+        analysis_contact_atom_mode=str(args.analysis_contact_atom_mode or "CA"),
+        analysis_contact_state_ids=[str(v).strip() for v in (args.analysis_contact_state_id or []) if str(v).strip()],
+        analysis_contact_pdbs=[str(v).strip() for v in (args.analysis_contact_pdb or []) if str(v).strip()],
+        progress_callback=progress_cb,
+    )
     print(summary)
     return 0
 

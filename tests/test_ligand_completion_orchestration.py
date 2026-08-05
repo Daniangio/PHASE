@@ -69,6 +69,63 @@ def test_run_local_payload_batch_preserves_input_order_with_parallel_workers():
     assert [row["row"] for row in out] == [0, 1, 2]
 
 
+def test_potts_nn_web_job_falls_back_to_serial_inside_single_rq_worker(tmp_path, monkeypatch):
+    redis_conn = FakeRedis()
+    fake_job = FakeJob(connection=redis_conn)
+    jobs_dir = tmp_path / "results" / "jobs"
+    jobs_dir.mkdir(parents=True, exist_ok=True)
+    analysis_dir = tmp_path / "nn-analysis"
+    analysis_dir.mkdir(parents=True, exist_ok=True)
+    analysis_npz = analysis_dir / "analysis.npz"
+    prepared = {
+        "analysis_id": "nn-local-analysis",
+        "analysis_dir": str(analysis_dir),
+        "analysis_npz": str(analysis_npz),
+        "payloads": [{"row": row} for row in range(8)],
+        "requested_workers": 8,
+    }
+    calls = {"max_workers": None}
+
+    class FakeQueue:
+        def __init__(self, name, connection):
+            self.name = name
+            self.connection = connection
+
+    def fake_run_local(payloads, worker_fn, max_workers, progress_callback=None, progress_label=None):
+        calls["max_workers"] = max_workers
+        return [{"row": payload["row"]} for payload in payloads]
+
+    def fake_aggregate(prepared_obj, out_rows, workers_used):
+        analysis_npz.write_text("npz", encoding="utf-8")
+        return {
+            "analysis_id": prepared_obj["analysis_id"],
+            "analysis_dir": prepared_obj["analysis_dir"],
+            "analysis_npz": prepared_obj["analysis_npz"],
+            "metadata": {
+                "analysis_id": prepared_obj["analysis_id"],
+                "summary": {"workers": workers_used},
+            },
+        }
+
+    monkeypatch.setattr(tasks, "get_current_job", lambda: fake_job)
+    monkeypatch.setattr(tasks.project_store, "ensure_results_directories", lambda *args, **kwargs: {"jobs_dir": jobs_dir})
+    monkeypatch.setattr(tasks, "prepare_potts_nn_mapping_batch", lambda **kwargs: prepared)
+    monkeypatch.setattr(tasks, "run_local_payload_batch", fake_run_local)
+    monkeypatch.setattr(tasks, "aggregate_potts_nn_mapping_batch", fake_aggregate)
+    monkeypatch.setattr(tasks, "_count_queue_workers", lambda queue: 1)
+    monkeypatch.setattr(tasks, "Queue", FakeQueue)
+
+    out = tasks.run_potts_nearest_neighbor_job(
+        "nn-local-job",
+        {"project_id": "proj", "system_id": "sys", "cluster_id": "cluster"},
+        {"model_id": "model", "sample_id": "sample", "md_sample_id": "md", "workers": 8},
+    )
+
+    assert calls["max_workers"] == 1
+    assert out["status"] == "finished"
+    assert out["results"]["summary"]["workers"] == 1
+
+
 def test_ligand_completion_job_falls_back_to_serial_inside_worker(tmp_path, monkeypatch):
     redis_conn = FakeRedis()
     fake_job = FakeJob(connection=redis_conn)

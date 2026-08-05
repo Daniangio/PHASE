@@ -263,8 +263,7 @@ export default function TransientStatesPage() {
       <main className="max-w-[1500px] mx-auto px-6 py-6 space-y-5">
         <div className="flex items-start justify-between gap-4">
           <div>
-            <button type="button" onClick={() => navigate(`/projects/${projectId}/systems/${systemId}`)} className="text-xs text-cyan-300 hover:text-cyan-200">← Back to system</button>
-            <h1 className="text-2xl font-semibold text-white mt-2">Transient-State Analysis</h1>
+            <h1 className="text-2xl font-semibold text-white">Transient-State Analysis</h1>
             <p className="text-sm text-gray-400 max-w-4xl">
               Detect low-occupancy residue clusters and joint edge states that are selectively enriched in one trajectory relative to the leave-one-out background.
             </p>

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Activity, Boxes, Database, Microscope, Network } from 'lucide-react';
+import { Activity, Boxes, Database, GitCompareArrows, Microscope, Network, Waypoints } from 'lucide-react';
 import { useLocation, useNavigate } from 'react-router-dom';
 
 import { fetchSystem } from '../../api/projects';
@@ -9,13 +9,14 @@ const MAIN_DESTINATIONS = [
   { key: 'descriptors', label: 'Visualize descriptors', icon: Microscope, suffix: '/descriptors/visualize' },
   { key: 'potts', label: 'Potts models', icon: Boxes, suffix: '/potts' },
   { key: 'sampling', label: 'Sampling explorer', icon: Activity, suffix: '/sampling/visualize' },
+  { key: 'model_pair', label: 'Model-pair analysis', icon: GitCompareArrows, suffix: '/sampling/delta_eval' },
+  { key: 'nearest', label: 'Nearest neighbours', icon: Waypoints, suffix: '/sampling/potts_nn_mapping' },
 ];
 
 const ANALYSIS_DESTINATIONS = [
   { label: 'More analyses...', suffix: '' },
-  { label: 'Model-pair analysis', suffix: '/sampling/delta_eval' },
   { label: 'Delta JS', suffix: '/sampling/delta_js' },
-  { label: 'Nearest-neighbour mapping', suffix: '/sampling/potts_nn_mapping' },
+  { label: 'NN mismatch graph', suffix: '/sampling/potts_nn_mapping_graph' },
   { label: 'Hamiltonian spectra', suffix: '/sampling/hamiltonian_spectral' },
   { label: 'Spectral pistons', suffix: '/sampling/spectral_intersection' },
   { label: 'Transient states', suffix: '/sampling/transient_states' },
@@ -33,6 +34,8 @@ function activeDestination(pathname, basePath) {
   if (pathname.startsWith(`${basePath}/descriptors/`)) return 'descriptors';
   if (pathname.startsWith(`${basePath}/potts`)) return 'potts';
   if (pathname.startsWith(`${basePath}/sampling/visualize`)) return 'sampling';
+  if (pathname.startsWith(`${basePath}/sampling/delta_eval`) || pathname.startsWith(`${basePath}/sampling/delta_commitment_3d`)) return 'model_pair';
+  if (pathname.startsWith(`${basePath}/sampling/potts_nn_mapping`)) return 'nearest';
   return '';
 }
 

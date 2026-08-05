@@ -312,7 +312,7 @@ export function buildEnergyDistributionPlot({
     const color = s.color || pickEnergyColor(idx);
     const label = s.label || s.name || `series ${idx + 1}`;
     const values = finiteValues(s.values || s.energies);
-    const isPose = s.kind === 'state_pose' || values.length === 1;
+    const isPose = values.length === 1;
     if (isPose && values.length) {
       const x = Number(values[0]);
       shapes.push({

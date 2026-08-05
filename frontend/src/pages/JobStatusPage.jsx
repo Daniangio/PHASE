@@ -34,9 +34,6 @@ export default function JobStatusPage() {
 
   return (
     <div className="space-y-4">
-      <button onClick={() => navigate('/projects')} className="text-cyan-400 hover:text-cyan-300 text-sm">
-        ← Back to projects
-      </button>
       <h1 className="text-2xl font-bold text-white">Job {jobId}</h1>
       <section className="bg-gray-800 border border-gray-700 rounded-lg p-4">
         <p className="text-lg text-white">

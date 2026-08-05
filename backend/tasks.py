@@ -22,7 +22,6 @@ from phase.potts.pipeline import parse_args as parse_simulation_args
 from phase.potts.pipeline import run_pipeline as run_simulation_pipeline
 from phase.potts.sampling_run import run_sampling
 from phase.potts.analysis_run import (
-    append_state_pose_energies,
     compute_delta_transition_analysis,
     upsert_delta_energy_analysis,
     upsert_endpoint_frustration_analysis,
@@ -1500,127 +1499,108 @@ def run_potts_analysis_job(
 
         md_label_mode = (params.get("md_label_mode") or "assigned").lower()
         keep_invalid = bool(params.get("keep_invalid", False))
-        pose_only = bool(params.get("pose_only", False))
-        state_pose_ids = [str(v).strip() for v in (params.get("state_pose_ids") or []) if str(v).strip()]
-
         save_progress("Running analyses...", 20)
-        if pose_only:
-            if not model_ref:
-                raise ValueError("state pose energy analysis requires model_id or model_path.")
-            if not state_pose_ids:
-                raise ValueError("state pose energy analysis requires at least one state_pose_id.")
-            state_eval_workers = _default_state_assignment_workers()
-            summary = append_state_pose_energies(
-                project_id=project_id,
-                system_id=system_id,
-                cluster_id=cluster_id,
-                model_ref=model_ref,
-                state_ids=state_pose_ids,
-                state_eval_workers=state_eval_workers,
-                progress_callback=save_progress,
-            )
-        else:
-            workers = params.get("workers")
-            workers_val = int(workers) if workers not in (None, "") else None
-            save_progress("Preparing Sampling Explorer analysis...", 10)
-            prepared = prepare_potts_analysis_batch(
-                project_id=project_id,
-                system_id=system_id,
-                cluster_id=cluster_id,
-                model_ref=model_ref,
-                comparison_sample_ids=params.get("sample_ids"),
-                md_label_mode=md_label_mode,
-                drop_invalid=not keep_invalid,
-                n_workers=workers_val,
-                analysis_edge_mode=params.get("analysis_edge_mode"),
-                analysis_contact_cutoff=params.get("analysis_contact_cutoff"),
-                analysis_contact_atom_mode=params.get("analysis_contact_atom_mode"),
-                analysis_contact_state_ids=params.get("analysis_contact_state_ids"),
-                analysis_contact_pdbs=params.get("analysis_contact_pdbs"),
-            )
-            payloads = prepared.get("payloads") or []
-            analysis_id = str(prepared.get("analysis_id") or "")
-            analysis_dir = Path(str(prepared.get("analysis_dir") or "")).resolve()
-            redis_conn = getattr(job, "connection", None)
-            queue_name = getattr(job, "origin", "phase-jobs")
-            queue = Queue(queue_name, connection=redis_conn) if redis_conn is not None else None
-            available_queue_workers = _count_queue_workers(queue) if queue is not None else 0
-            distributed_parallelism = _distributed_batch_parallelism(
-                requested_workers=int(prepared.get("requested_workers", workers_val or 0)),
-                available_queue_workers=available_queue_workers,
-                n_payloads=len(payloads),
-            )
+        workers = params.get("workers")
+        workers_val = int(workers) if workers not in (None, "") else None
+        save_progress("Preparing Sampling Explorer analysis...", 10)
+        prepared = prepare_potts_analysis_batch(
+            project_id=project_id,
+            system_id=system_id,
+            cluster_id=cluster_id,
+            model_ref=model_ref,
+            comparison_sample_ids=params.get("sample_ids"),
+            md_label_mode=md_label_mode,
+            drop_invalid=not keep_invalid,
+            n_workers=workers_val,
+            analysis_edge_mode=params.get("analysis_edge_mode"),
+            analysis_contact_cutoff=params.get("analysis_contact_cutoff"),
+            analysis_contact_atom_mode=params.get("analysis_contact_atom_mode"),
+            analysis_contact_state_ids=params.get("analysis_contact_state_ids"),
+            analysis_contact_pdbs=params.get("analysis_contact_pdbs"),
+        )
+        payloads = prepared.get("payloads") or []
+        analysis_id = str(prepared.get("analysis_id") or "")
+        analysis_dir = Path(str(prepared.get("analysis_dir") or "")).resolve()
+        redis_conn = getattr(job, "connection", None)
+        queue_name = getattr(job, "origin", "phase-jobs")
+        queue = Queue(queue_name, connection=redis_conn) if redis_conn is not None else None
+        available_queue_workers = _count_queue_workers(queue) if queue is not None else 0
+        distributed_parallelism = _distributed_batch_parallelism(
+            requested_workers=int(prepared.get("requested_workers", workers_val or 0)),
+            available_queue_workers=available_queue_workers,
+            n_payloads=len(payloads),
+        )
 
-            if distributed_parallelism > 1 and queue is not None:
-                keys = _potts_analysis_batch_keys(analysis_id)
-                redis_conn.delete(keys["done"], keys["error"], keys["child_error"])
-                redis_conn.set(keys["remaining"], int(len(payloads)), ex=_LIGAND_COMPLETION_BATCH_TTL_SECONDS)
-                redis_conn.set(keys["state"], "running", ex=_LIGAND_COMPLETION_BATCH_TTL_SECONDS)
-                save_progress(
-                    f"Dispatching {len(payloads)} Sampling Explorer tasks across {distributed_parallelism} queue workers...",
-                    15,
+        if distributed_parallelism > 1 and queue is not None:
+            keys = _potts_analysis_batch_keys(analysis_id)
+            redis_conn.delete(keys["done"], keys["error"], keys["child_error"])
+            redis_conn.set(keys["remaining"], int(len(payloads)), ex=_LIGAND_COMPLETION_BATCH_TTL_SECONDS)
+            redis_conn.set(keys["state"], "running", ex=_LIGAND_COMPLETION_BATCH_TTL_SECONDS)
+            save_progress(
+                f"Dispatching {len(payloads)} Sampling Explorer tasks across {distributed_parallelism} queue workers...",
+                15,
+            )
+            for row in range(len(payloads)):
+                queue.enqueue(
+                    run_potts_analysis_payload_job,
+                    args=(analysis_id, str(analysis_dir), int(row), int(distributed_parallelism)),
+                    job_timeout="8h",
+                    result_ttl=86400,
+                    job_id=f"potts-analysis-task-{analysis_id}-{row:06d}",
                 )
-                for row in range(len(payloads)):
-                    queue.enqueue(
-                        run_potts_analysis_payload_job,
-                        args=(analysis_id, str(analysis_dir), int(row), int(distributed_parallelism)),
-                        job_timeout="8h",
-                        result_ttl=86400,
-                        job_id=f"potts-analysis-task-{analysis_id}-{row:06d}",
-                    )
-                while True:
-                    done = _decode_redis_value(redis_conn.get(keys["done"]))
-                    remaining_raw = _decode_redis_value(redis_conn.get(keys["remaining"]))
-                    remaining = int(remaining_raw) if remaining_raw is not None else len(payloads)
-                    state = _decode_redis_value(redis_conn.get(keys["state"])) or "running"
-                    child_error = _decode_redis_value(redis_conn.get(keys["child_error"]))
-                    if done:
-                        break
-                    if remaining <= 0:
-                        save_progress("Aggregating distributed Sampling Explorer results...", 92)
-                    else:
-                        completed = max(0, min(len(payloads), len(payloads) - remaining))
-                        pct = 15 + int(70 * (float(completed) / float(max(1, len(payloads)))))
-                        status = f"Running distributed Sampling Explorer analysis ({completed}/{len(payloads)} tasks)"
-                        if child_error:
-                            status = f"{status}; worker error recorded, waiting for aggregation"
-                        elif state and state != "running":
-                            status = f"{status}; state={state}"
-                        save_progress(status, pct)
-                    time.sleep(1.0)
-                error = _decode_redis_value(redis_conn.get(keys["error"]))
-                if error:
-                    raise RuntimeError(error)
-                out = pickle_load(orchestration_paths(analysis_dir)["aggregate"])
-            else:
-                save_progress("Running Sampling Explorer analysis locally...", 15)
-
-                def progress_cb(message: str, current: int, total: int):
-                    if total <= 0:
-                        return
-                    ratio = max(0.0, min(1.0, float(current) / float(total)))
-                    save_progress(message, 15 + int(70 * ratio))
-
-                requested_workers = int(prepared.get("requested_workers") or 0)
-                if requested_workers > 0:
-                    max_workers = requested_workers
+            while True:
+                done = _decode_redis_value(redis_conn.get(keys["done"]))
+                remaining_raw = _decode_redis_value(redis_conn.get(keys["remaining"]))
+                remaining = int(remaining_raw) if remaining_raw is not None else len(payloads)
+                state = _decode_redis_value(redis_conn.get(keys["state"])) or "running"
+                child_error = _decode_redis_value(redis_conn.get(keys["child_error"]))
+                if done:
+                    break
+                if remaining <= 0:
+                    save_progress("Aggregating distributed Sampling Explorer results...", 92)
                 else:
-                    max_workers = max(1, min(int(os.cpu_count() or 1), max(1, len(payloads))))
-                if job is not None:
-                    max_workers = 1
-                out_rows = run_local_payload_batch(
-                    payloads,
-                    worker_fn=_potts_analysis_payload_worker,
-                    max_workers=max_workers,
-                    progress_callback=progress_cb,
-                    progress_label="Running Sampling Explorer analysis",
-                )
-                out = aggregate_potts_analysis_batch(
-                    prepared,
-                    out_rows,
-                    workers_used=(1 if not payloads else max(1, min(max_workers, len(payloads)))),
-                )
-            summary = out.get("metadata") or {}
+                    completed = max(0, min(len(payloads), len(payloads) - remaining))
+                    pct = 15 + int(70 * (float(completed) / float(max(1, len(payloads)))))
+                    status = f"Running distributed Sampling Explorer analysis ({completed}/{len(payloads)} tasks)"
+                    if child_error:
+                        status = f"{status}; worker error recorded, waiting for aggregation"
+                    elif state and state != "running":
+                        status = f"{status}; state={state}"
+                    save_progress(status, pct)
+                time.sleep(1.0)
+            error = _decode_redis_value(redis_conn.get(keys["error"]))
+            if error:
+                raise RuntimeError(error)
+            out = pickle_load(orchestration_paths(analysis_dir)["aggregate"])
+        else:
+            save_progress("Running Sampling Explorer analysis locally...", 15)
+
+            def progress_cb(message: str, current: int, total: int):
+                if total <= 0:
+                    return
+                ratio = max(0.0, min(1.0, float(current) / float(total)))
+                save_progress(message, 15 + int(70 * ratio))
+
+            requested_workers = int(prepared.get("requested_workers") or 0)
+            if requested_workers > 0:
+                max_workers = requested_workers
+            else:
+                max_workers = max(1, min(int(os.cpu_count() or 1), max(1, len(payloads))))
+            if job is not None:
+                max_workers = 1
+            out_rows = run_local_payload_batch(
+                payloads,
+                worker_fn=_potts_analysis_payload_worker,
+                max_workers=max_workers,
+                progress_callback=progress_cb,
+                progress_label="Running Sampling Explorer analysis",
+            )
+            out = aggregate_potts_analysis_batch(
+                prepared,
+                out_rows,
+                workers_used=(1 if not payloads else max(1, min(max_workers, len(payloads)))),
+            )
+        summary = out.get("metadata") or {}
 
         cluster_dirs = project_store.ensure_cluster_directories(project_id, system_id, cluster_id)
         analyses_dir = cluster_dirs["cluster_dir"] / "analyses"
@@ -1779,7 +1759,10 @@ def run_potts_nearest_neighbor_job(
                 raise RuntimeError(error)
             out = pickle_load(orchestration_paths(analysis_dir)["aggregate"])
         else:
-            save_progress("Running nearest-neighbor mapping locally...", 15)
+            save_progress(
+                "Running nearest-neighbor mapping sequentially (no idle queue workers available)...",
+                15,
+            )
 
             def progress_cb(message: str, current: int, total: int):
                 if total <= 0:
@@ -1787,7 +1770,10 @@ def run_potts_nearest_neighbor_job(
                 ratio = max(0.0, min(1.0, float(current) / float(total)))
                 save_progress(message, 15 + int(70 * ratio))
 
-            max_workers = max(1, int(prepared.get("requested_workers") or 1))
+            # An RQ worker is already a child process. Forking one process per
+            # unique sample row here can exhaust file descriptors on large runs.
+            # Parallelism in web jobs is provided only by idle RQ workers above.
+            max_workers = 1
             out_rows = run_local_payload_batch(
                 payloads,
                 worker_fn=_potts_nn_row_worker,

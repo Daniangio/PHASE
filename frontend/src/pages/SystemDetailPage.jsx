@@ -1287,9 +1287,6 @@ export default function SystemDetailPage({ section = 'system' }) {
   return (
     <div className="space-y-8">
       <div>
-        <button onClick={() => navigate('/projects')} className="text-cyan-400 hover:text-cyan-300 text-sm mb-2">
-          ← Back to Projects
-        </button>
         <h1 className="text-2xl font-bold text-white">{system.name}</h1>
         <p className="text-gray-400 text-sm">{system.description || 'No description provided.'}</p>
       </div>

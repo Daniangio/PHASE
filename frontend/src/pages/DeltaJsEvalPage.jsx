@@ -881,13 +881,6 @@ export default function DeltaJsEvalPage() {
       />
       <div className="flex items-start justify-between gap-3">
         <div>
-          <button
-            type="button"
-            onClick={() => navigate(`/projects/${projectId}/systems/${systemId}`)}
-            className="text-cyan-400 hover:text-cyan-300 text-sm"
-          >
-            ← Back to system
-          </button>
           <h1 className="text-2xl font-semibold text-white">Delta JS (A/B/Other)</h1>
           <p className="text-sm text-gray-400">
             Alternative to commitment: per-residue/per-edge JS distance to A and B references with 4-way color logic.

@@ -77,7 +77,7 @@ export default function SystemDetailMacroPanel({
         <>
       {!descriptorsReady && states.length > 0 && (
         <p className="text-xs text-amber-300">
-          Trajectories are optional. Upload them later to build descriptors; PDB-only states can still be used for single-pose Potts energy evaluation.
+          Trajectories are optional. Upload them later to build descriptors; a PDB-only state can be built as a one-frame state and included the next time Sampling Explorer analysis is run.
         </p>
       )}
       <div className="grid md:grid-cols-3 gap-4">

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useLocation, useNavigate, useParams } from 'react-router-dom';
+import { useLocation, useParams } from 'react-router-dom';
 import { createPluginUI } from 'molstar/lib/mol-plugin-ui/index';
 import { renderReact18 } from 'molstar/lib/mol-plugin-ui/react18';
 import { Asset } from 'molstar/lib/mol-util/assets';
@@ -56,7 +56,6 @@ function selectedResiduesFromBlocks(blocks, residueKeys) {
 export default function ResidueSelectionPage() {
   const { projectId, systemId } = useParams();
   const location = useLocation();
-  const navigate = useNavigate();
   const query = new URLSearchParams(location.search);
 
   const [system, setSystem] = useState(null);
@@ -246,8 +245,7 @@ export default function ResidueSelectionPage() {
     <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <button type="button" onClick={() => navigate(`/projects/${projectId}/systems/${systemId}`)} className="text-sm text-cyan-300 hover:text-cyan-200">← Back to system</button>
-          <h1 className="mt-2 text-2xl font-semibold text-white">Residue selections</h1>
+          <h1 className="text-2xl font-semibold text-white">Residue selections</h1>
           <p className="text-sm text-gray-400">Create reusable OR selections. Energy pages use node terms for selected residues and edge terms touching them.</p>
         </div>
         <button type="button" onClick={saveSelection} disabled={busy || !name.trim()} className="rounded-md bg-cyan-500 px-4 py-2 text-sm font-semibold text-black disabled:opacity-50">Save selection</button>
