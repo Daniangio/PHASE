@@ -38,11 +38,30 @@ except Exception as exc:  # pragma: no cover - import guard
 DIHEDRAL_KEYS = ("phi", "psi", "omega", "chi1", "chi2")
 
 CHI2_DESCRIPTOR_INDEX = 4
+SYMMETRIC_CHI2_RESNAMES = frozenset({"ASP", "LEU", "PHE", "TYR"})
 
 
-def _fold_samples_for_model_symmetry(samples: np.ndarray, model: Any) -> np.ndarray:
+def _fold_samples_for_model_symmetry(
+    samples: np.ndarray,
+    model: Any,
+    *,
+    residue_resname: Optional[str] = None,
+) -> np.ndarray:
     meta = getattr(model, "phase_descriptor_symmetry", None)
     if not isinstance(meta, dict) or not bool(meta.get("enabled")):
+        return np.asarray(samples, dtype=np.float64)
+    descriptor = str(meta.get("descriptor") or "chi2").strip().lower()
+    try:
+        descriptor_index = int(meta.get("descriptor_index", CHI2_DESCRIPTOR_INDEX))
+    except (TypeError, ValueError):
+        return np.asarray(samples, dtype=np.float64)
+    model_resname = str(meta.get("resname") or "").strip().upper()
+    input_resname = str(residue_resname or "").strip().upper()
+    if descriptor != "chi2" or descriptor_index != CHI2_DESCRIPTOR_INDEX:
+        return np.asarray(samples, dtype=np.float64)
+    if model_resname and model_resname not in SYMMETRIC_CHI2_RESNAMES:
+        return np.asarray(samples, dtype=np.float64)
+    if input_resname and input_resname not in SYMMETRIC_CHI2_RESNAMES:
         return np.asarray(samples, dtype=np.float64)
     arr = np.asarray(samples, dtype=np.float64)
     if arr.ndim == 1:
@@ -103,7 +122,13 @@ def _angles_to_circular_features(samples: np.ndarray) -> np.ndarray:
     return np.concatenate([np.sin(centered), np.cos(centered)], axis=1).astype(np.float64, copy=False)
 
 
-def _predict_cluster_adp(dp_data: Data, samples: np.ndarray, *, density_maxk: int) -> tuple[np.ndarray, np.ndarray]:
+def _predict_cluster_adp(
+    dp_data: Data,
+    samples: np.ndarray,
+    *,
+    density_maxk: int,
+    residue_resname: Optional[str] = None,
+) -> tuple[np.ndarray, np.ndarray]:
     expected_dims: Optional[int] = None
     model_X = getattr(dp_data, "X", None)
     if model_X is not None:
@@ -112,7 +137,7 @@ def _predict_cluster_adp(dp_data: Data, samples: np.ndarray, *, density_maxk: in
         except Exception:
             expected_dims = None
 
-    samples = _fold_samples_for_model_symmetry(samples, dp_data)
+    samples = _fold_samples_for_model_symmetry(samples, dp_data, residue_resname=residue_resname)
     emb, _ = _angles_to_periodic(samples, expected_dims=expected_dims)
     if emb.shape[0] == 0:
         empty = np.zeros((0,), dtype=np.int32)
@@ -272,7 +297,13 @@ def _predict_cluster_frozen_gmm(model: Dict[str, Any], samples: np.ndarray) -> t
     return assigned, halo
 
 
-def _predict_with_model(model: Any, samples: np.ndarray, *, density_maxk: int) -> tuple[np.ndarray, np.ndarray]:
+def _predict_with_model(
+    model: Any,
+    samples: np.ndarray,
+    *,
+    density_maxk: int,
+    residue_resname: Optional[str] = None,
+) -> tuple[np.ndarray, np.ndarray]:
     if isinstance(model, dict):
         kind = str(model.get("kind") or "").lower()
         if kind == "frozen_gmm":
@@ -280,11 +311,26 @@ def _predict_with_model(model: Any, samples: np.ndarray, *, density_maxk: int) -
         if kind == "adp_legacy_models":
             model_assigned = model.get("model_assigned")
             model_halo = model.get("model_halo")
-            assigned, _ = _predict_cluster_adp(model_assigned, samples, density_maxk=density_maxk)
-            _, halo = _predict_cluster_adp(model_halo, samples, density_maxk=density_maxk)
+            assigned, _ = _predict_cluster_adp(
+                model_assigned,
+                samples,
+                density_maxk=density_maxk,
+                residue_resname=residue_resname,
+            )
+            _, halo = _predict_cluster_adp(
+                model_halo,
+                samples,
+                density_maxk=density_maxk,
+                residue_resname=residue_resname,
+            )
             return assigned, halo
     if hasattr(model, "predict_cluster_ADP"):
-        return _predict_cluster_adp(model, samples, density_maxk=density_maxk)
+        return _predict_cluster_adp(
+            model,
+            samples,
+            density_maxk=density_maxk,
+            residue_resname=residue_resname,
+        )
     raise TypeError(f"Unsupported residue model type: {type(model)}")
 
 
@@ -781,7 +827,12 @@ def main() -> int:
             print(f"WARNING: missing model for {selected_keys[j]} -> labels stay -1", file=sys.stderr)
             continue
         samples = np.asarray(angles_rad[:, j, :], dtype=np.float32)
-        assigned, halo = _predict_with_model(model, samples, density_maxk=density_maxk)
+        assigned, halo = _predict_with_model(
+            model,
+            samples,
+            density_maxk=density_maxk,
+            residue_resname=str(getattr(selected_residues[j], "resname", "") or ""),
+        )
         labels_assigned[:, j] = np.asarray(assigned, dtype=np.int32)
         labels_halo[:, j] = np.asarray(halo, dtype=np.int32)
 
