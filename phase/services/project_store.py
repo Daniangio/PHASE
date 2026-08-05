@@ -332,6 +332,134 @@ class ProjectStore:
 
         return metadata
 
+    def clone_system(
+        self,
+        project_id: str,
+        source_system_id: str,
+        *,
+        name: str,
+        description: Optional[str] = None,
+        system_id: Optional[str] = None,
+    ) -> SystemMetadata:
+        """Clone reusable system inputs while excluding generated analyses and Potts samples.
+
+        The clone keeps state IDs, cluster IDs, model IDs, and MD sample IDs so references
+        between copied artifacts remain valid. Potts-generated samples, analyses, job results,
+        orchestration scratch data, and UI setup files are deliberately not copied.
+        """
+        project_meta = self.get_project(project_id)
+        source_meta = self.get_system(project_id, source_system_id)
+        source_dir = self._system_dir(project_id, source_system_id)
+        target_system_id = system_id or str(uuid.uuid4())
+        target_dir = self._system_dir(project_id, target_system_id)
+        if target_dir.exists() or target_system_id in (project_meta.systems or []):
+            raise FileExistsError(f"System '{target_system_id}' already exists in project '{project_id}'.")
+
+        staging_dir = target_dir.with_name(f".{target_system_id}.{uuid.uuid4().hex}.clone-tmp")
+        try:
+            staging_dir.mkdir(parents=True, exist_ok=False)
+            for folder_name in ("states", "structures", "descriptors", "trajectories"):
+                source_path = source_dir / folder_name
+                target_path = staging_dir / folder_name
+                if source_path.exists():
+                    shutil.copytree(source_path, target_path)
+                else:
+                    target_path.mkdir(parents=True, exist_ok=True)
+
+            for legacy_name in (STATES_METADATA_FILENAME, METASTABLE_METADATA_FILENAME):
+                source_path = source_dir / legacy_name
+                if source_path.is_file():
+                    shutil.copy2(source_path, staging_dir / legacy_name)
+
+            source_clusters = source_dir / "clusters"
+            target_clusters = staging_dir / "clusters"
+            target_clusters.mkdir(parents=True, exist_ok=True)
+            if source_clusters.exists():
+                for source_cluster in sorted(path for path in source_clusters.iterdir() if path.is_dir()):
+                    target_cluster = target_clusters / source_cluster.name
+                    shutil.copytree(
+                        source_cluster,
+                        target_cluster,
+                        ignore=shutil.ignore_patterns("analyses", "_orchestration", "samples"),
+                    )
+                    source_samples = source_cluster / "samples"
+                    target_samples = target_cluster / "samples"
+                    target_samples.mkdir(parents=True, exist_ok=True)
+                    if source_samples.exists():
+                        for source_sample in sorted(path for path in source_samples.iterdir() if path.is_dir()):
+                            sample_meta_path = source_sample / SAMPLE_METADATA_FILENAME
+                            try:
+                                sample_meta = _read_json(sample_meta_path)
+                            except Exception:
+                                continue
+                            if str(sample_meta.get("type") or "").strip().lower() != "md_eval":
+                                continue
+                            shutil.copytree(source_sample, target_samples / source_sample.name)
+
+            cloned_meta = SystemMetadata(
+                system_id=target_system_id,
+                project_id=project_id,
+                name=name.strip(),
+                description=source_meta.description if description is None else description,
+                created_at=_utc_now(),
+                status=source_meta.status,
+                macro_locked=source_meta.macro_locked,
+                metastable_locked=source_meta.metastable_locked,
+                analysis_mode=source_meta.analysis_mode,
+                residue_selections=source_meta.residue_selections,
+                residue_selections_mapping=dict(source_meta.residue_selections_mapping or {}),
+            )
+            _write_json(staging_dir / "system.json", self._encode_system(cloned_meta))
+            self._rewrite_cloned_json_paths(
+                staging_dir,
+                source_dir=source_dir,
+                target_dir=target_dir,
+                source_system_id=source_system_id,
+                target_system_id=target_system_id,
+            )
+            staging_dir.replace(target_dir)
+            project_meta.systems.append(target_system_id)
+            self._save_project(project_meta)
+        except Exception:
+            shutil.rmtree(staging_dir, ignore_errors=True)
+            if target_dir.exists() and target_system_id not in (project_meta.systems or []):
+                shutil.rmtree(target_dir, ignore_errors=True)
+            raise
+
+        return self.get_system(project_id, target_system_id)
+
+    @staticmethod
+    def _rewrite_cloned_json_paths(
+        root: Path,
+        *,
+        source_dir: Path,
+        target_dir: Path,
+        source_system_id: str,
+        target_system_id: str,
+    ) -> None:
+        source_abs = str(source_dir.resolve())
+        target_abs = str(target_dir.resolve())
+        source_segment = f"/systems/{source_system_id}/"
+        target_segment = f"/systems/{target_system_id}/"
+
+        def rewrite(value: Any, key: Optional[str] = None) -> Any:
+            if isinstance(value, dict):
+                return {item_key: rewrite(item_value, item_key) for item_key, item_value in value.items()}
+            if isinstance(value, list):
+                return [rewrite(item) for item in value]
+            if isinstance(value, str):
+                if key == "system_id" and value == source_system_id:
+                    return target_system_id
+                return value.replace(source_abs, target_abs).replace(source_segment, target_segment)
+            return value
+
+        for json_path in root.rglob("*.json"):
+            try:
+                payload = _read_json(json_path)
+                _write_json(json_path, rewrite(payload))
+            except Exception:
+                continue
+
     def save_system(self, metadata: SystemMetadata) -> None:
         self._sync_states_metadata(metadata)
         self._sync_state_metastable_metadata(metadata)

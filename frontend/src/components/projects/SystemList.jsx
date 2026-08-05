@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
-import { ChevronDown, ChevronRight, Circle, CheckCircle, AlertTriangle, Trash2 } from 'lucide-react';
+import { ChevronDown, ChevronRight, Circle, CheckCircle, AlertTriangle, Copy, Trash2 } from 'lucide-react';
 import IconButton from '../common/IconButton';
 
 const statusIcon = {
@@ -9,7 +9,7 @@ const statusIcon = {
   failed: AlertTriangle,
 };
 
-export default function SystemList({ projectId, systems, onDelete }) {
+export default function SystemList({ projectId, systems, onDelete, onClone }) {
   const [openStatesBySystem, setOpenStatesBySystem] = useState({});
 
   if (!projectId) {
@@ -58,6 +58,15 @@ export default function SystemList({ projectId, systems, onDelete }) {
                   {isOpen ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
                 </button>
                 <ChevronRight className="h-5 w-5 text-gray-500" />
+                {onClone && (
+                  <IconButton
+                    icon={Copy}
+                    label={`Clone ${system.name || 'system'}`}
+                    title="Clone states, clusters, Potts models, and MD samples"
+                    onClick={() => onClone(system)}
+                    className="text-gray-500 hover:text-cyan-300"
+                  />
+                )}
                 {onDelete && (
                   <IconButton
                     icon={Trash2}

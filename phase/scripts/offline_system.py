@@ -65,6 +65,33 @@ def create_system(
     return system.system_id
 
 
+def clone_system(
+    store: ProjectStore,
+    project_id: str,
+    source_system_id: str,
+    name: str,
+    description: str | None,
+    *,
+    use_slug_ids: bool,
+) -> str:
+    if not name.strip():
+        raise ValueError("A name is required for the cloned system.")
+    system_id = None
+    if use_slug_ids:
+        slug = _slugify(name)
+        project_meta = store.get_project(project_id)
+        system_id = _unique_id(slug, set(project_meta.systems or []))
+    cloned = store.clone_system(
+        project_id,
+        source_system_id,
+        name=name,
+        description=description,
+        system_id=system_id,
+    )
+    print(cloned.system_id)
+    return cloned.system_id
+
+
 def add_state(
     store: ProjectStore,
     project_id: str,
@@ -150,6 +177,13 @@ def main(argv: list[str] | None = None) -> int:
     sp.add_argument("--description")
     sp.add_argument("--use-slug-ids", action="store_true")
 
+    sp = sub.add_parser("clone-system")
+    sp.add_argument("--project-id", required=True)
+    sp.add_argument("--source-system-id", required=True)
+    sp.add_argument("--name", required=True)
+    sp.add_argument("--description")
+    sp.add_argument("--use-slug-ids", action="store_true")
+
     sp = sub.add_parser("add-state")
     sp.add_argument("--project-id", required=True)
     sp.add_argument("--system-id", required=True)
@@ -175,6 +209,15 @@ def main(argv: list[str] | None = None) -> int:
         init_project(store, args.name, args.description, use_slug_ids=args.use_slug_ids)
     elif args.cmd == "create-system":
         create_system(store, args.project_id, args.name, args.description, use_slug_ids=args.use_slug_ids)
+    elif args.cmd == "clone-system":
+        clone_system(
+            store,
+            args.project_id,
+            args.source_system_id,
+            args.name,
+            args.description,
+            use_slug_ids=args.use_slug_ids,
+        )
     elif args.cmd == "add-state":
         add_state(
             store,

@@ -206,7 +206,7 @@ system_menu() {
     echo "Systems:"
     python -m phase.scripts.offline_browser --root "$OFFLINE_ROOT" list-systems --project-id "$OFFLINE_PROJECT_ID" || true
     echo ""
-    ACTION_LINES=$'open|Open system\nnew|Create system\nback|Back to projects'
+    ACTION_LINES=$'open|Open system\nnew|Create system\nclone|Clone system (states, clusters, models, MD samples)\nback|Back to projects'
     ACTION_ROW="$(offline_choose_one "System actions:" "$ACTION_LINES")"
     ACTION="$(printf "%s" "$ACTION_ROW" | awk -F'|' '{print $1}')"
     case "$ACTION" in
@@ -223,6 +223,28 @@ system_menu() {
           EXTRA_ARGS+=(--use-slug-ids)
         fi
         python -m phase.scripts.offline_system --root "$OFFLINE_ROOT" create-system --project-id "$OFFLINE_PROJECT_ID" --name "$NAME" ${DESC:+--description "$DESC"} "${EXTRA_ARGS[@]}"
+        ;;
+      clone)
+        if offline_select_system; then
+          SOURCE_SYSTEM_ID="$OFFLINE_SYSTEM_ID"
+          SOURCE_SYSTEM_NAME="${OFFLINE_SYSTEM_NAME:-$OFFLINE_SYSTEM_ID}"
+          NAME="$(prompt "New system name" "${SOURCE_SYSTEM_NAME} clone")"
+          DESC="$(prompt "New system description (blank inherits source)" "")"
+          EXTRA_ARGS=()
+          if [ "$USE_SLUG_IDS" = "true" ]; then
+            EXTRA_ARGS+=(--use-slug-ids)
+          fi
+          echo "Cloning states, clusters, Potts models, and MD samples. Potts samples and analyses are excluded..."
+          python -m phase.scripts.offline_system \
+            --root "$OFFLINE_ROOT" \
+            clone-system \
+            --project-id "$OFFLINE_PROJECT_ID" \
+            --source-system-id "$SOURCE_SYSTEM_ID" \
+            --name "$NAME" \
+            ${DESC:+--description "$DESC"} \
+            "${EXTRA_ARGS[@]}"
+          unset OFFLINE_SYSTEM_ID OFFLINE_SYSTEM_NAME
+        fi
         ;;
       back|"")
         return 0

@@ -118,6 +118,13 @@ export function fetchSystem(projectId, systemId) {
   return requestJSON(`/projects/${projectId}/systems/${systemId}`);
 }
 
+export function cloneSystem(projectId, systemId, payload) {
+  return requestJSON(`/projects/${projectId}/systems/${systemId}/clone`, {
+    method: 'POST',
+    body: payload,
+  });
+}
+
 export function fetchSamplingSummary(projectId, systemId, clusterId, sampleId) {
   return requestJSON(
     `/projects/${projectId}/systems/${systemId}/metastable/clusters/${clusterId}/samples/${sampleId}/summary`

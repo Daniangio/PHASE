@@ -14,6 +14,7 @@ import {
   createProject,
   listSystems,
   createSystem,
+  cloneSystem,
   deleteProject,
   deleteSystem,
 } from '../api/projects';
@@ -28,6 +29,11 @@ export default function ProjectsPage() {
   const [actionMessage, setActionMessage] = useState(null);
   const [showProjectForm, setShowProjectForm] = useState(false);
   const [showSystemForm, setShowSystemForm] = useState(false);
+  const [cloneSource, setCloneSource] = useState(null);
+  const [cloneName, setCloneName] = useState('');
+  const [cloneDescription, setCloneDescription] = useState('');
+  const [cloneBusy, setCloneBusy] = useState(false);
+  const [cloneError, setCloneError] = useState(null);
   const [isDumping, setIsDumping] = useState(false);
   const [dumpError, setDumpError] = useState(null);
   const [isRestoring, setIsRestoring] = useState(false);
@@ -116,6 +122,35 @@ export default function ProjectsPage() {
       setTimeout(() => setActionMessage(null), 4000);
     } catch (err) {
       setError(err.message);
+    }
+  };
+
+  const openCloneSystem = (system) => {
+    setCloneSource(system);
+    setCloneName(`${system?.name || 'System'} clone`);
+    setCloneDescription('');
+    setCloneError(null);
+  };
+
+  const handleCloneSystem = async (event) => {
+    event.preventDefault();
+    if (!selectedProjectId || !cloneSource || !cloneName.trim()) return;
+    setCloneBusy(true);
+    setCloneError(null);
+    try {
+      const cloned = await cloneSystem(selectedProjectId, cloneSource.system_id, {
+        name: cloneName.trim(),
+        description: cloneDescription.trim() || null,
+      });
+      const data = await listSystems(selectedProjectId);
+      setSystems(data);
+      setCloneSource(null);
+      setActionMessage(`System "${cloned.name}" cloned without Potts samples or analyses.`);
+      setTimeout(() => setActionMessage(null), 4000);
+    } catch (err) {
+      setCloneError(err.message || 'Failed to clone system.');
+    } finally {
+      setCloneBusy(false);
     }
   };
 
@@ -285,7 +320,12 @@ export default function ProjectsPage() {
             {isLoadingSystems ? (
               <Loader message="Loading systems..." />
             ) : (
-              <SystemList projectId={selectedProjectId} systems={systems} onDelete={handleDeleteSystem} />
+              <SystemList
+                projectId={selectedProjectId}
+                systems={systems}
+                onDelete={handleDeleteSystem}
+                onClone={openCloneSystem}
+              />
             )}
           </div>
         </div>
@@ -311,6 +351,55 @@ export default function ProjectsPage() {
           ) : (
             <EmptyState title="Select a project" description="Choose a project to attach the new system to." />
           )}
+        </Overlay>
+      )}
+
+      {cloneSource && (
+        <Overlay title={`Clone ${cloneSource.name || 'system'}`} onClose={() => !cloneBusy && setCloneSource(null)}>
+          <form className="space-y-4" onSubmit={handleCloneSystem}>
+            <p className="text-sm text-gray-300">
+              Copies states, metastable states, residue clusters, Potts models, and MD samples. Generated Potts
+              samples, analyses, job results, and temporary files are excluded.
+            </p>
+            <label className="block space-y-1">
+              <span className="text-sm text-gray-300">New system name</span>
+              <input
+                autoFocus
+                required
+                value={cloneName}
+                onChange={(event) => setCloneName(event.target.value)}
+                className="w-full rounded-md border border-gray-600 bg-gray-950 px-3 py-2 text-white"
+              />
+            </label>
+            <label className="block space-y-1">
+              <span className="text-sm text-gray-300">Description</span>
+              <textarea
+                value={cloneDescription}
+                onChange={(event) => setCloneDescription(event.target.value)}
+                placeholder="Leave blank to inherit the source description"
+                rows={3}
+                className="w-full rounded-md border border-gray-600 bg-gray-950 px-3 py-2 text-white"
+              />
+            </label>
+            {cloneError && <ErrorMessage message={cloneError} />}
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                disabled={cloneBusy}
+                onClick={() => setCloneSource(null)}
+                className="rounded-md border border-gray-600 px-3 py-2 text-sm text-gray-300 disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={cloneBusy || !cloneName.trim()}
+                className="rounded-md bg-cyan-600 px-4 py-2 text-sm font-medium text-white hover:bg-cyan-500 disabled:opacity-50"
+              >
+                {cloneBusy ? 'Cloning files...' : 'Clone system'}
+              </button>
+            </div>
+          </form>
         </Overlay>
       )}
     </div>

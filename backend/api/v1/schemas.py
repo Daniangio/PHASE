@@ -26,6 +26,13 @@ class ProjectCreateRequest(BaseModel):
     use_slug_ids: Optional[bool] = False
 
 
+class SystemCloneRequest(BaseModel):
+    """Request payload for selectively cloning an existing system."""
+    name: str
+    description: Optional[str] = None
+    use_slug_ids: Optional[bool] = False
+
+
 class AnalysisJobBase(BaseModel):
     """Shared fields for analysis job submissions."""
     project_id: str

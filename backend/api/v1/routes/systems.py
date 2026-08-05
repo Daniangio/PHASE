@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi.concurrency import run_in_threadpool
 
 from backend.api.v1.common import (
     parse_residue_selections,
@@ -15,9 +16,23 @@ from backend.api.v1.common import (
 )
 from backend.services.project_store import DescriptorState
 from phase.workflows.macro_states import allocate_state_storage_key
+from backend.api.v1.schemas import SystemCloneRequest
 
 
 router = APIRouter()
+
+
+def _unique_clone_system_id(project_id: str, name: str) -> Optional[str]:
+    slug = re.sub(r"[^A-Za-z0-9]+", "_", name.strip().lower()).strip("_")
+    if not slug:
+        return None
+    existing = set(project_store.get_project(project_id).systems or [])
+    candidate = slug
+    suffix = 2
+    while candidate in existing:
+        candidate = f"{slug}-{suffix}"
+        suffix += 1
+    return candidate
 
 
 @router.get("/projects/{project_id}/systems/{system_id}", summary="Get system metadata")
@@ -122,6 +137,33 @@ async def create_system_with_descriptors(
     refresh_system_metadata(system_meta)
     project_store.save_system(system_meta)
     return serialize_system(system_meta)
+
+
+@router.post(
+    "/projects/{project_id}/systems/{system_id}/clone",
+    summary="Clone states, clusters, Potts models, and MD samples into a new system",
+)
+async def clone_system(project_id: str, system_id: str, payload: SystemCloneRequest):
+    clone_name = payload.name.strip()
+    if not clone_name:
+        raise HTTPException(status_code=400, detail="A name is required for the cloned system.")
+    try:
+        target_id = _unique_clone_system_id(project_id, clone_name) if payload.use_slug_ids else None
+        cloned = await run_in_threadpool(
+            project_store.clone_system,
+            project_id,
+            system_id,
+            name=clone_name,
+            description=payload.description,
+            system_id=target_id,
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except FileExistsError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as exc:  # pragma: no cover - filesystem failure paths
+        raise HTTPException(status_code=500, detail=f"Failed to clone system: {exc}") from exc
+    return serialize_system(cloned)
 
 
 @router.delete("/projects/{project_id}/systems/{system_id}", summary="Delete a system")
