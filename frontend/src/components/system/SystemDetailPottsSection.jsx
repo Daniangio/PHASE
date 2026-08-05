@@ -833,6 +833,15 @@ export default function SystemDetailPottsSection(props) {
                                 <Download className="h-4 w-4" />
                               </button>
                             )}
+                            <button
+                              type="button"
+                              onClick={() => handleDeleteSample(sample.sample_id)}
+                              className="text-gray-400 hover:text-red-300"
+                              aria-label={`Delete MD sample ${label}`}
+                              title="Delete this MD sample and analyses that depend on it"
+                            >
+                              <Trash2 className="h-4 w-4" />
+                            </button>
                           </div>
                         </div>
                         {renderInlineSampleInfo(sample)}

@@ -236,6 +236,105 @@ def cleanup_orphan_cluster_analyses(project_id: str, system_id: str, cluster_id:
     return removed
 
 
+def remove_md_samples_for_states(
+    project_id: str,
+    system_id: str,
+    state_ids: Iterable[str],
+) -> dict[str, Any]:
+    """Remove md_eval sample folders associated with deleted macro states."""
+    target_ids = {str(state_id).strip() for state_id in state_ids if str(state_id).strip()}
+    removed_sample_ids: list[str] = []
+    affected_cluster_ids: list[str] = []
+    if not target_ids:
+        return {
+            "md_samples_removed": 0,
+            "removed_md_sample_ids": removed_sample_ids,
+            "affected_cluster_ids": affected_cluster_ids,
+        }
+
+    try:
+        entries = project_store.list_cluster_entries(project_id, system_id)
+    except Exception:
+        entries = []
+    for entry in entries:
+        cluster_id = str(entry.get("cluster_id") or "").strip()
+        if not cluster_id:
+            continue
+        matched_ids: list[str] = []
+        for sample in entry.get("samples") or []:
+            if not isinstance(sample, dict):
+                continue
+            if str(sample.get("type") or "").strip().lower() != "md_eval":
+                continue
+            state_refs = {
+                str(sample.get(key) or "").strip()
+                for key in ("state_id", "macro_state_id", "metastable_id")
+            }
+            state_refs.discard("")
+            if not (state_refs & target_ids):
+                continue
+            sample_id = str(sample.get("sample_id") or "").strip()
+            if sample_id:
+                matched_ids.append(sample_id)
+        if not matched_ids:
+            continue
+        cluster_dir = project_store.ensure_cluster_directories(project_id, system_id, cluster_id)["cluster_dir"]
+        for sample_id in matched_ids:
+            shutil.rmtree(cluster_dir / "samples" / sample_id, ignore_errors=True)
+            removed_sample_ids.append(sample_id)
+        affected_cluster_ids.append(cluster_id)
+
+    return {
+        "md_samples_removed": len(removed_sample_ids),
+        "removed_md_sample_ids": removed_sample_ids,
+        "affected_cluster_ids": affected_cluster_ids,
+    }
+
+
+def cleanup_results_for_samples(project_id: str, system_id: str, sample_ids: Iterable[str]) -> int:
+    """Remove stored job results that directly reference deleted samples."""
+    target_ids = {str(sample_id).strip() for sample_id in sample_ids if str(sample_id).strip()}
+    if not target_ids:
+        return 0
+    system_dir = project_store.resolve_path(project_id, system_id, "")
+    removed = 0
+
+    def references_target(node: Any) -> bool:
+        if isinstance(node, dict):
+            refs, _essential, _optional = _extract_sample_refs(node)
+            if refs & target_ids:
+                return True
+            for key, value in node.items():
+                key_text = str(key).lower()
+                if key_text.endswith("sample_id") or key_text.endswith("sample_ids"):
+                    if set(_coerce_str_list(value)) & target_ids:
+                        return True
+                if references_target(value):
+                    return True
+            return False
+        if isinstance(node, (list, tuple, set)):
+            return any(references_target(item) for item in node)
+        if isinstance(node, str):
+            return any(sample_id in Path(node).parts for sample_id in target_ids)
+        return False
+
+    for result_file in _iter_result_files_for_system(project_id, system_id):
+        try:
+            payload = json.loads(result_file.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not references_target(payload):
+            continue
+        try:
+            results_payload = payload.get("results") if isinstance(payload, dict) else {}
+            _remove_results_dir((results_payload or {}).get("results_dir"), system_dir=system_dir)
+            result_file.unlink(missing_ok=True)
+            removed += 1
+        except Exception:
+            continue
+    return removed
+
+
 def _iter_result_files_for_system(project_id: str, system_id: str) -> list[Path]:
     jobs_dir = project_store.resolve_path(project_id, system_id, "") / "results" / "jobs"
     if not jobs_dir.exists():

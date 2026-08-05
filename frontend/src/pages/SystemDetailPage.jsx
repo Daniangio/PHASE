@@ -623,7 +623,13 @@ export default function SystemDetailPage({ section = 'system' }) {
   const handleDeleteSample = useCallback(
     async (sampleId) => {
       if (!pottsFitClusterId) return;
-      const ok = window.confirm('Delete this sampling result? This cannot be undone.');
+      const sample = sampleEntries.find((entry) => entry.sample_id === sampleId);
+      const isMdSample = sample?.type === 'md_eval';
+      const label = sample?.name || sampleId;
+      const message = isMdSample
+        ? `Delete MD sample "${label}" and analyses that reference it? The source system state and its descriptor files are not deleted.`
+        : `Delete sample "${label}" and analyses that reference it? This cannot be undone.`;
+      const ok = window.confirm(message);
       if (!ok) return;
       try {
         await deleteSamplingSample(projectId, systemId, pottsFitClusterId, sampleId);
@@ -632,7 +638,7 @@ export default function SystemDetailPage({ section = 'system' }) {
         setActionError(err.message || 'Failed to delete sample.');
       }
     },
-    [projectId, systemId, pottsFitClusterId, refreshSystem]
+    [projectId, systemId, pottsFitClusterId, refreshSystem, sampleEntries]
   );
 
   const handleUploadSimulationResults = async ({
@@ -918,11 +924,16 @@ export default function SystemDetailPage({ section = 'system' }) {
   };
 
   const handleDeleteState = async (stateId, name) => {
-    if (!window.confirm(`Delete state "${name}" and its files?`)) return;
+    if (!window.confirm(`Delete state "${name}", its associated MD samples, and dependent analyses?`)) return;
     setActionError(null);
     try {
-      await deleteState(projectId, systemId, stateId);
-      setActionMessage(`State "${name}" deleted.`);
+      const response = await deleteState(projectId, systemId, stateId);
+      const cleanup = response?.cleanup_summary || {};
+      const mdCount = Number(cleanup.md_samples_removed || 0);
+      const analysisCount = Number(cleanup.cluster_analyses_removed || 0);
+      setActionMessage(
+        `State "${name}" deleted. Removed ${mdCount} associated MD sample${mdCount === 1 ? '' : 's'} and ${analysisCount} dependent analysis${analysisCount === 1 ? '' : 'es'}.`
+      );
       await refreshSystem();
       await loadResults();
     } catch (err) {

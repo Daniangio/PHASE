@@ -1528,7 +1528,7 @@ async def download_sampling_artifact(
 
 @router.delete(
     "/projects/{project_id}/systems/{system_id}/metastable/clusters/{cluster_id}/samples/{sample_id}",
-    summary="Delete a sampling sample and its artifacts",
+    summary="Delete any sample, its artifacts, and dependent analyses",
 )
 async def delete_sampling_sample(
     project_id: str,

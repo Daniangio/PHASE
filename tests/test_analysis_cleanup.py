@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import json
 import os
 from pathlib import Path
@@ -20,6 +22,7 @@ class _FakeStore:
         state_ids: list[str] | None = None,
         metastable_ids: list[str] | None = None,
         base_dir: Path | None = None,
+        sample_entries: list[dict] | None = None,
     ):
         self._cluster_dir = cluster_dir
         self._sample_ids = sample_ids
@@ -27,12 +30,18 @@ class _FakeStore:
         self._state_ids = state_ids or []
         self._metastable_ids = metastable_ids or []
         self.base_dir = base_dir or cluster_dir.parent
+        self._sample_entries = sample_entries
 
     def ensure_cluster_directories(self, project_id: str, system_id: str, cluster_id: str):
         return {"cluster_dir": self._cluster_dir}
 
     def list_samples(self, project_id: str, system_id: str, cluster_id: str):
+        if self._sample_entries is not None:
+            return self._sample_entries
         return [{"sample_id": sid} for sid in self._sample_ids]
+
+    def list_cluster_entries(self, project_id: str, system_id: str):
+        return [{"cluster_id": "cluster-1", "samples": self.list_samples(project_id, system_id, "cluster-1")}]
 
     def list_potts_models(self, project_id: str, system_id: str, cluster_id: str):
         return [{"model_id": mid} for mid in self._model_ids]
@@ -80,6 +89,32 @@ def test_cleanup_orphan_cluster_analyses_removes_md_vs_sample_with_missing_sampl
 
     assert removed == 1
     assert not (cluster_dir / "analyses" / "md_vs_sample" / "a1").exists()
+
+
+def test_remove_md_samples_for_deleted_state_preserves_other_samples(monkeypatch, tmp_path):
+    cluster_dir = tmp_path / "cluster"
+    for sample_id in ("md_deleted", "md_kept", "potts_kept"):
+        sample_dir = cluster_dir / "samples" / sample_id
+        sample_dir.mkdir(parents=True, exist_ok=True)
+        (sample_dir / "sample.npz").write_bytes(b"sample")
+    samples = [
+        {"sample_id": "md_deleted", "type": "md_eval", "state_id": "deleted"},
+        {"sample_id": "md_kept", "type": "md_eval", "state_id": "kept"},
+        {"sample_id": "potts_kept", "type": "potts_sampling", "state_id": "deleted"},
+    ]
+    monkeypatch.setattr(
+        analysis_cleanup,
+        "project_store",
+        _FakeStore(cluster_dir=cluster_dir, sample_ids=[], sample_entries=samples),
+    )
+
+    summary = analysis_cleanup.remove_md_samples_for_states("p", "s", ["deleted"])
+
+    assert summary["md_samples_removed"] == 1
+    assert summary["removed_md_sample_ids"] == ["md_deleted"]
+    assert not (cluster_dir / "samples" / "md_deleted").exists()
+    assert (cluster_dir / "samples" / "md_kept").exists()
+    assert (cluster_dir / "samples" / "potts_kept").exists()
 
 
 def test_cleanup_orphan_cluster_analyses_keeps_delta_js_if_some_samples_still_exist(monkeypatch, tmp_path):
@@ -173,7 +208,7 @@ def test_cleanup_orphan_cluster_analyses_removes_analysis_with_missing_state_ref
 def test_cleanup_state_linked_results_removes_jobs_referencing_missing_states(monkeypatch, tmp_path):
     project_id = "proj"
     system_id = "sys"
-    system_dir = tmp_path / project_id / "systems" / system_id
+    system_dir = tmp_path / "projects" / project_id / "systems" / system_id
     jobs_dir = system_dir / "results" / "jobs"
     artifact_dir = system_dir / "results" / "ligand_completion" / "job-1"
     artifact_dir.mkdir(parents=True, exist_ok=True)
@@ -204,7 +239,7 @@ def test_cleanup_state_linked_results_removes_jobs_referencing_missing_states(mo
             model_ids=[],
             state_ids=["state_ok"],
             metastable_ids=["meta_ok"],
-            base_dir=tmp_path,
+            base_dir=tmp_path / "projects",
         ),
     )
 

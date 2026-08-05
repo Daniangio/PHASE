@@ -8,7 +8,11 @@ from typing import Any, Dict, Optional
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, Response
 
-from backend.api.v1.analysis_cleanup import cleanup_state_linked_artifacts
+from backend.api.v1.analysis_cleanup import (
+    cleanup_results_for_samples,
+    cleanup_state_linked_artifacts,
+    remove_md_samples_for_states,
+)
 from backend.api.v1.common import (
     build_state_descriptors,
     get_state_or_404,
@@ -497,6 +501,14 @@ async def delete_state(project_id: str, system_id: str, state_id: str):
         raise HTTPException(status_code=404, detail=f"System '{system_id}' not found.")
 
     state_meta = get_state_or_404(system_meta, state_id)
+    linked_state_ids = {str(state_id)}
+    linked_state_ids.update(
+        str(meta.get("metastable_id") or meta.get("id"))
+        for meta in (system_meta.metastable_states or [])
+        if isinstance(meta, dict)
+        and str(meta.get("macro_state_id") or "") == str(state_id)
+        and (meta.get("metastable_id") or meta.get("id"))
+    )
 
     for field in ("descriptor_file", "descriptor_metadata_file", "trajectory_file", "pdb_file"):
         _unlink_if_inside_system(project_id, system_id, getattr(state_meta, field, None))
@@ -520,10 +532,20 @@ async def delete_state(project_id: str, system_id: str, state_id: str):
     system_meta.states.pop(state_id, None)
     refresh_system_metadata(system_meta)
     project_store.save_system(system_meta)
+    md_cleanup = remove_md_samples_for_states(project_id, system_id, linked_state_ids)
+    sample_results_removed = cleanup_results_for_samples(
+        project_id,
+        system_id,
+        md_cleanup.get("removed_md_sample_ids") or [],
+    )
     cleanup = cleanup_state_linked_artifacts(project_id, system_id)
     return {
         **serialize_system(system_meta),
-        "cleanup_summary": cleanup,
+        "cleanup_summary": {
+            **cleanup,
+            **md_cleanup,
+            "sample_results_removed": sample_results_removed,
+        },
     }
 
 
