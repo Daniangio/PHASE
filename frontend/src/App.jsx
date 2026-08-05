@@ -42,6 +42,7 @@ export default function App() {
           <Route path="/" element={<Navigate to="/projects" replace />} />
           <Route path="/projects" element={<ProjectsPage />} />
           <Route path="/projects/:projectId/systems/:systemId" element={<SystemDetailPage />} />
+          <Route path="/projects/:projectId/systems/:systemId/potts" element={<SystemDetailPage section="potts" />} />
           <Route
             path="/projects/:projectId/systems/:systemId/descriptors/visualize"
             element={<DescriptorVizPage />}

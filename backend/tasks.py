@@ -1528,6 +1528,7 @@ def run_potts_analysis_job(
                 system_id=system_id,
                 cluster_id=cluster_id,
                 model_ref=model_ref,
+                comparison_sample_ids=params.get("sample_ids"),
                 md_label_mode=md_label_mode,
                 drop_invalid=not keep_invalid,
                 n_workers=workers_val,

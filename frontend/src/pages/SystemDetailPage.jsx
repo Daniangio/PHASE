@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import Loader from '../components/common/Loader';
 import ErrorMessage from '../components/common/ErrorMessage';
-import SystemDetailSidebar from '../components/system/SystemDetailSidebar';
+import SystemClusterPanel from '../components/system/SystemClusterPanel';
 import SystemDetailMacroPanel from '../components/system/SystemDetailMacroPanel';
 import SystemDetailMetastablePanel from '../components/system/SystemDetailMetastablePanel';
 import SystemDetailPottsSection from '../components/system/SystemDetailPottsSection';
@@ -50,8 +50,9 @@ import {
 import { confirmAndDeleteResult } from '../utils/results';
 import StaticAnalysisForm from '../components/analysis/StaticAnalysisForm';
 
-export default function SystemDetailPage() {
+export default function SystemDetailPage({ section = 'system' }) {
   const { projectId, systemId } = useParams();
+  const location = useLocation();
   const [system, setSystem] = useState(null);
   const [isLoading, setIsLoading] = useState(true);
   const [pageError, setPageError] = useState(null);
@@ -95,7 +96,7 @@ export default function SystemDetailPage() {
   const [densityZMode, setDensityZMode] = useState('manual');
   const [densityZValue, setDensityZValue] = useState(3.0);
   const [densityMaxk, setDensityMaxk] = useState(100);
-  const [analysisFocus, setAnalysisFocus] = useState('');
+  const [analysisFocus, setAnalysisFocus] = useState(section === 'potts' ? 'potts' : '');
   const [showMetastableInfo, setShowMetastableInfo] = useState(false);
   const [docId, setDocId] = useState('metastable_states');
   const [infoOverlayState, setInfoOverlayState] = useState(null); // New state for info overlay
@@ -258,10 +259,6 @@ export default function SystemDetailPage() {
     () => systemResults.filter((result) => result.analysis_type === 'static'),
     [systemResults]
   );
-  const simulationResults = useMemo(
-    () => systemResults.filter((result) => result.analysis_type === 'simulation'),
-    [systemResults]
-  );
   const pottsFitResults = useMemo(
     () => systemResults.filter((result) => result.analysis_type === 'potts_fit'),
     [systemResults]
@@ -317,10 +314,8 @@ export default function SystemDetailPage() {
     }
     setPottsFitSampleIds((prev) => prev.filter((sampleId) => availableMdIds.includes(sampleId)));
   }, [selectedCluster]);
-  const showSidebar = descriptorStates.length > 0 || readyClusterRuns.length > 0;
   const clustersUnlocked = descriptorStates.length > 0;
   const analysisUnlocked = descriptorStates.length >= 2 || readyClusterRuns.length > 0;
-  const analysisNote = 'Static needs two descriptor-ready states; Potts uses saved cluster NPZ files.';
   const showMetastablePanel = descriptorStates.length > 0;
   const clusterSelectableStates = useMemo(() => {
     if (Array.isArray(system?.analysis_states) && system.analysis_states.length > 0) {
@@ -379,11 +374,16 @@ export default function SystemDetailPage() {
       setPottsFitClusterId('');
       return;
     }
+    const requestedClusterId = new URLSearchParams(location.search).get('cluster_id') || '';
+    if (requestedClusterId && readyClusterRuns.some((run) => run.cluster_id === requestedClusterId)) {
+      if (pottsFitClusterId !== requestedClusterId) setPottsFitClusterId(requestedClusterId);
+      return;
+    }
     const exists = readyClusterRuns.some((run) => run.cluster_id === pottsFitClusterId);
     if (!pottsFitClusterId || !exists) {
       setPottsFitClusterId(readyClusterRuns[readyClusterRuns.length - 1].cluster_id);
     }
-  }, [readyClusterRuns, pottsFitClusterId]);
+  }, [readyClusterRuns, pottsFitClusterId, location.search]);
 
   useEffect(() => {
     if (!pottsModels.length) {
@@ -529,7 +529,7 @@ export default function SystemDetailPage() {
   }, [analysisStateOptions, statePair.a, statePair.b]);
 
 
-  const refreshSystem = async () => {
+  const refreshSystem = useCallback(async () => {
     try {
       const data = await fetchSystem(projectId, systemId);
       setSystem(data);
@@ -540,7 +540,7 @@ export default function SystemDetailPage() {
     } catch (err) {
       setActionError(err.message);
     }
-  };
+  }, [projectId, systemId]);
 
   const loadMetastable = async () => {
     setMetaLoading(true);
@@ -1156,10 +1156,6 @@ export default function SystemDetailPage() {
     [navigate, projectId, systemId, pottsFitClusterId, setPottsFitClusterId]
   );
 
-  if (isLoading) return <Loader message="Loading system..." />;
-  if (pageError) return <ErrorMessage message={pageError} />;
-  if (!system) return null;
-
   const handleDownloadSavedCluster = async (clusterId, filename) => {
     setClusterError(null);
     try {
@@ -1263,6 +1259,20 @@ export default function SystemDetailPage() {
     setInfoOverlayState(null);
   };
 
+  const selectWorkspaceCluster = useCallback((clusterId) => {
+    setPottsFitClusterId(clusterId);
+    const params = new URLSearchParams(location.search);
+    if (clusterId) params.set('cluster_id', clusterId);
+    else params.delete('cluster_id');
+    navigate({ pathname: location.pathname, search: params.toString() ? `?${params.toString()}` : '' }, { replace: true });
+  }, [location.pathname, location.search, navigate]);
+
+  // Keep early render exits below every hook so loading the system cannot
+  // change the number or order of hooks between renders.
+  if (isLoading) return <Loader message="Loading system..." />;
+  if (pageError) return <ErrorMessage message={pageError} />;
+  if (!system) return null;
+
   return (
     <div className="space-y-8">
       <div>
@@ -1273,32 +1283,9 @@ export default function SystemDetailPage() {
         <p className="text-gray-400 text-sm">{system.description || 'No description provided.'}</p>
       </div>
 
-      <div className={showSidebar ? 'lg:grid lg:grid-cols-[260px_1fr] gap-6' : ''}>
-        {showSidebar && (
-          <SystemDetailSidebar
-            states={states}
-            metastableStates={metastableStates}
-            clustersUnlocked={clustersUnlocked}
-            clusterError={clusterError}
-            clusterLoading={clusterLoading}
-            clusterRuns={clusterRuns}
-            clusterJobStatus={clusterJobStatus}
-            setInfoOverlayState={setInfoOverlayState}
-            setPottsFitClusterId={setPottsFitClusterId}
-            setAnalysisFocus={setAnalysisFocus}
-            setClusterPanelOpen={setClusterPanelOpen}
-            setClusterError={setClusterError}
-            handleDeleteSavedCluster={handleDeleteSavedCluster}
-            selectedClusterId={pottsFitClusterId}
-            openDescriptorExplorer={openDescriptorExplorer}
-            openDoc={openDoc}
-            navigate={navigate}
-            projectId={projectId}
-            systemId={systemId}
-          />
-        )}
-
-        <div className="space-y-8">
+      <div className="space-y-8">
+          {section === 'system' && (
+            <>
           <SystemDetailMacroPanel
             states={states}
             systemStatus={system.status}
@@ -1340,14 +1327,36 @@ export default function SystemDetailPage() {
             />
           )}
 
-          {analysisUnlocked && (
+          <SystemClusterPanel
+            clustersUnlocked={clustersUnlocked}
+            clusterError={clusterError}
+            clusterLoading={clusterLoading}
+            clusterRuns={clusterRuns}
+            clusterJobStatus={clusterJobStatus}
+            selectedClusterId={pottsFitClusterId}
+            setSelectedClusterId={selectWorkspaceCluster}
+            setClusterPanelOpen={setClusterPanelOpen}
+            setClusterError={setClusterError}
+            handleDeleteSavedCluster={handleDeleteSavedCluster}
+            openDescriptorExplorer={openDescriptorExplorer}
+            openDoc={openDoc}
+          />
+            </>
+          )}
+
+          {section === 'potts' && !analysisUnlocked && (
+            <div className="rounded-lg border border-dashed border-gray-700 bg-gray-800/60 p-6 text-sm text-gray-400">
+              Create a residue cluster from the System page before fitting Potts models or generating samples.
+            </div>
+          )}
+          {section === 'potts' && analysisUnlocked && (
             <section className="bg-gray-800 border border-gray-700 rounded-lg p-4 space-y-4">
           <div className="flex items-center justify-between gap-4">
             <div>
-              <h2 className="text-lg font-semibold text-white">Run Analysis</h2>
-              <p className="text-xs text-gray-400">{analysisNote}</p>
+              <h2 className="text-lg font-semibold text-white">Potts workspace</h2>
+              <p className="text-xs text-gray-400">Inspect models and samples for the selected cluster, or start a new fit or sampling run.</p>
             </div>
-            {analysisFocus && (
+            {analysisFocus && section !== 'potts' && (
               <button
                 type="button"
                 onClick={() => setAnalysisFocus('')}
@@ -1432,6 +1441,7 @@ export default function SystemDetailPage() {
           )}
           {analysisFocus === 'potts' && (
             <SystemDetailPottsSection
+              allSamples={sampleEntries}
               mdSamples={mdSamples}
               gibbsSamples={gibbsSamples}
               saSamples={saSamples}
@@ -1455,7 +1465,7 @@ export default function SystemDetailPage() {
               setPottsDeltaBaseModelId={setPottsDeltaBaseModelId}
               pottsDeltaStateIds={pottsDeltaStateIds}
               setPottsDeltaStateIds={setPottsDeltaStateIds}
-              setPottsFitClusterId={setPottsFitClusterId}
+              setPottsFitClusterId={selectWorkspaceCluster}
               readyClusterRuns={readyClusterRuns}
               pottsModelName={pottsModelName}
               setPottsModelName={setPottsModelName}
@@ -1520,7 +1530,6 @@ export default function SystemDetailPage() {
           )}
         </section>
           )}
-        </div>
       </div>
       {clusterPanelOpen && (
         <ClusterBuildOverlay

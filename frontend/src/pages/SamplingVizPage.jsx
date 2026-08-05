@@ -11,14 +11,12 @@ import EnergyDistributionPlot, {
 } from '../components/common/EnergyDistributionPlot';
 import {
   deleteClusterAnalysis,
-  deleteSamplingSample,
   fetchClusterAnalyses,
   fetchClusterAnalysisData,
   fetchPottsClusterInfo,
-  fetchSampleStats,
   fetchSystem,
 } from '../api/projects';
-import { fetchJobStatus, submitMdSamplesRefreshJob, submitPottsAnalysisJob } from '../api/jobs';
+import { fetchJobStatus, submitPottsAnalysisJob } from '../api/jobs';
 
 function buildEdgeMatrix(n, edges, values) {
   const matrix = Array.from({ length: n }, () => Array.from({ length: n }, () => null));
@@ -60,6 +58,17 @@ function finiteRangeFromEnergyGraphs(graphs) {
   return Number.isFinite(minValue) && Number.isFinite(maxValue) ? [minValue, maxValue] : null;
 }
 
+function sampleModelIds(sample) {
+  const params = sample?.params && typeof sample.params === 'object' ? sample.params : {};
+  const values = [
+    sample?.model_id,
+    ...(Array.isArray(sample?.model_ids) ? sample.model_ids : []),
+    params.model_id,
+    ...(Array.isArray(params.model_ids) ? params.model_ids : []),
+  ];
+  return Array.from(new Set(values.map((value) => String(value || '').trim()).filter(Boolean)));
+}
+
 function PlotOverlay({ overlay, onClose }) {
   if (!overlay) return null;
   const layout = { ...(overlay.layout || {}), autosize: true };
@@ -90,109 +99,6 @@ function PlotOverlay({ overlay, onClose }) {
           />
         </div>
       </div>
-    </div>
-  );
-}
-
-function SampleInfoPanel({ sample, stats, onClose }) {
-  if (!sample) return null;
-  return (
-    <div className="rounded-md border border-gray-800 bg-gray-950/60 p-2 text-[11px] text-gray-300 space-y-2">
-      <div className="flex items-start justify-between gap-2">
-        <div>
-          <p className="text-xs font-semibold text-white">{sample.name || sample.sample_id}</p>
-          <p className="text-[10px] text-gray-500">Sample info</p>
-        </div>
-        <button
-          type="button"
-          onClick={onClose}
-          className="text-gray-400 hover:text-gray-200"
-          aria-label="Close sample info"
-        >
-          <X className="h-3.5 w-3.5" />
-        </button>
-      </div>
-
-      <div className="space-y-1">
-        <div>
-          <span className="text-gray-400">id:</span> {sample.sample_id}
-        </div>
-        {sample.created_at && (
-          <div>
-            <span className="text-gray-400">created:</span> {sample.created_at}
-          </div>
-        )}
-        {sample.type && (
-          <div>
-            <span className="text-gray-400">type:</span> {sample.type}
-          </div>
-        )}
-        {sample.method && (
-          <div>
-            <span className="text-gray-400">method:</span> {sample.method}
-          </div>
-        )}
-        {sample.source && (
-          <div>
-            <span className="text-gray-400">source:</span> {sample.source}
-          </div>
-        )}
-        {sample.series_kind && (
-          <div>
-            <span className="text-gray-400">series:</span> {sample.series_kind}
-          </div>
-        )}
-        {sample.series_id && (
-          <div className="break-all">
-            <span className="text-gray-400">series_id:</span> {sample.series_id}
-          </div>
-        )}
-        {typeof sample.lambda === 'number' && Number.isFinite(sample.lambda) && (
-          <div>
-            <span className="text-gray-400">lambda:</span> {sample.lambda.toFixed(3)}
-          </div>
-        )}
-        {sample.model_names && sample.model_names.length > 0 && (
-          <div>
-            <span className="text-gray-400">models:</span> {sample.model_names.join(', ')}
-          </div>
-        )}
-        {sample.path && (
-          <div className="break-all">
-            <span className="text-gray-400">path:</span> {sample.path}
-          </div>
-        )}
-      </div>
-
-      {stats && (
-        <div className="space-y-1">
-          <p className="text-[10px] text-gray-500">NPZ stats</p>
-          <div>
-            <span className="text-gray-400">frames:</span> {stats.n_frames}
-          </div>
-          <div>
-            <span className="text-gray-400">residues:</span> {stats.n_residues}
-          </div>
-          {typeof stats.invalid_count === 'number' && typeof stats.invalid_fraction === 'number' && (
-            <div>
-              <span className="text-gray-400">invalid:</span> {stats.invalid_count} (
-              {(stats.invalid_fraction * 100).toFixed(2)}%)
-            </div>
-          )}
-          <div>
-            <span className="text-gray-400">has halo labels:</span> {stats.has_halo ? 'yes' : 'no'}
-          </div>
-        </div>
-      )}
-
-      {sample.params && (
-        <details className="text-[11px] text-gray-300">
-          <summary className="cursor-pointer text-gray-200">Params</summary>
-          <pre className="mt-2 max-h-56 overflow-auto rounded bg-gray-900 p-2 text-[10px] text-gray-300">
-            {JSON.stringify(sample.params, null, 2)}
-          </pre>
-        </details>
-      )}
     </div>
   );
 }
@@ -269,20 +175,13 @@ export default function SamplingVizPage() {
   const [analysisJob, setAnalysisJob] = useState(null);
   const [analysisJobStatus, setAnalysisJobStatus] = useState(null);
 
-  const [mdRefreshJob, setMdRefreshJob] = useState(null);
-  const [mdRefreshJobStatus, setMdRefreshJobStatus] = useState(null);
-  const [mdRefreshError, setMdRefreshError] = useState(null);
-
-  const [infoSampleId, setInfoSampleId] = useState('');
-  const [sampleStatsCache, setSampleStatsCache] = useState({});
-  const [sampleStatsError, setSampleStatsError] = useState(null);
-
   const [overlayPlot, setOverlayPlot] = useState(null);
   const [helpOpen, setHelpOpen] = useState(false);
   const [runPanelOpen, setRunPanelOpen] = useState(false);
   const [activeExplorerTab, setActiveExplorerTab] = useState('js');
   const [activeJsSubtab, setActiveJsSubtab] = useState('nodes');
   const [selectedAnalysisModelIds, setSelectedAnalysisModelIds] = useState([]);
+  const [analysisSearch, setAnalysisSearch] = useState('');
   const [analysisInfoModelId, setAnalysisInfoModelId] = useState('');
   const [pairSelections, setPairSelections] = useState({});
   const [comparisonDataMap, setComparisonDataMap] = useState({});
@@ -321,13 +220,18 @@ export default function SamplingVizPage() {
     if (!selectedAnalysisModelId) return sampleEntries;
     return sampleEntries.filter((s) => {
       if (s.type === 'md_eval') return true;
-      if (s.type === 'potts_lambda_sweep') return true;
       if (analysisLinkedSampleIds.has(String(s.sample_id || ''))) return true;
-      const ids = Array.isArray(s.model_ids) ? s.model_ids : s.model_id ? [s.model_id] : [];
-      if (!ids.length) return true;
-      return ids.includes(selectedAnalysisModelId);
+      return sampleModelIds(s).includes(selectedAnalysisModelId);
     });
   }, [sampleEntries, selectedAnalysisModelId, analysisLinkedSampleIds]);
+
+  const runAnalysisSampleIds = useMemo(
+    () => sampleEntries
+      .filter((sample) => sample.type !== 'md_eval' && sampleModelIds(sample).includes(runAnalysisModelId))
+      .map((sample) => sample.sample_id)
+      .filter(Boolean),
+    [runAnalysisModelId, sampleEntries]
+  );
   const gibbsSamples = useMemo(
     () => filteredSamples.filter((s) => s.type === 'potts_sampling' && s.method === 'gibbs'),
     [filteredSamples]
@@ -343,33 +247,6 @@ export default function SamplingVizPage() {
   );
   const selectableSamples = useMemo(() => [...pottsSamples, ...lambdaSweepSamples], [pottsSamples, lambdaSweepSamples]);
 
-  const lambdaSweepSeries = useMemo(() => {
-    const map = new Map();
-    lambdaSweepSamples.forEach((s) => {
-      const sid = s.series_id || 'unknown';
-      if (!map.has(sid)) {
-        map.set(sid, {
-          series_id: sid,
-          label: s.series_label || `Lambda sweep (${sid.slice(0, 8)})`,
-          samples: [],
-        });
-      }
-      map.get(sid).samples.push(s);
-    });
-    const out = Array.from(map.values());
-    out.forEach((g) => {
-      g.samples.sort((a, b) => {
-        const la = typeof a.lambda === 'number' ? a.lambda : Number.POSITIVE_INFINITY;
-        const lb = typeof b.lambda === 'number' ? b.lambda : Number.POSITIVE_INFINITY;
-        return la - lb;
-      });
-    });
-    out.sort((a, b) => String(a.label).localeCompare(String(b.label)));
-    return out;
-  }, [lambdaSweepSamples]);
-
-  const infoSample = useMemo(() => sampleEntries.find((s) => s.sample_id === infoSampleId) || null, [sampleEntries, infoSampleId]);
-  const infoSampleStats = useMemo(() => (infoSampleId ? sampleStatsCache[infoSampleId] : null), [sampleStatsCache, infoSampleId]);
   const analysisSummary = analysisJobStatus?.result?.results?.summary || analysisJobStatus?.meta?.summary || null;
   const analysisSkippedSamples = useMemo(
     () => (Array.isArray(analysisSummary?.skipped_samples) ? analysisSummary.skipped_samples : []),
@@ -396,8 +273,16 @@ export default function SamplingVizPage() {
     const params = new URLSearchParams(location.search || '');
     const clusterId = params.get('cluster_id');
     const sampleId = params.get('sample_id');
+    const modelIds = (params.get('model_ids') || params.get('model_id') || '').split(',').filter(Boolean);
+    const sampleIds = (params.get('sample_ids') || '').split(',').filter(Boolean);
     if (clusterId) setSelectedClusterId(clusterId);
     if (sampleId) setSelectedSampleId(sampleId);
+    if (sampleIds.length) setSelectedSampleId(sampleIds[0]);
+    if (modelIds.length) {
+      setRunAnalysisModelId(modelIds[0]);
+      setSelectedAnalysisModelId(modelIds[0]);
+      setSelectedAnalysisModelIds(modelIds);
+    }
   }, [location.search]);
 
   useEffect(() => {
@@ -467,7 +352,6 @@ export default function SamplingVizPage() {
     analysisDataCacheRef.current = {};
     analysisDataInFlightRef.current = {};
     setSelectedMdSampleId('');
-    setInfoSampleId('');
   }, [selectedClusterId, loadClusterInfo, loadAnalyses]);
 
   useEffect(() => {
@@ -563,6 +447,11 @@ export default function SamplingVizPage() {
     () => selectedAnalysisModelIds.map((id) => analysisGroupMap.get(id)).filter(Boolean),
     [analysisGroupMap, selectedAnalysisModelIds]
   );
+  const visibleAnalysisGroups = useMemo(() => {
+    const query = analysisSearch.trim().toLowerCase();
+    if (!query) return analysisGroups;
+    return analysisGroups.filter((group) => `${group.modelName || ''} ${group.modelId || ''}`.toLowerCase().includes(query));
+  }, [analysisGroups, analysisSearch]);
 
   useEffect(() => {
     if (!analysisGroups.length) {
@@ -919,6 +808,7 @@ export default function SamplingVizPage() {
         payload.analysis_contact_atom_mode = analysisContactAtomMode || 'CA';
       }
       if (runAnalysisModelId) payload.model_id = runAnalysisModelId;
+      payload.sample_ids = runAnalysisSampleIds;
       const res = await submitPottsAnalysisJob(payload);
       setAnalysisJob({ ...res, model_id: runAnalysisModelId });
       if (runAnalysisModelId) setSelectedAnalysisModelId(runAnalysisModelId);
@@ -930,6 +820,7 @@ export default function SamplingVizPage() {
     systemId,
     selectedClusterId,
     runAnalysisModelId,
+    runAnalysisSampleIds,
     analysisEdgeMode,
     analysisContactCutoff,
     analysisContactAtomMode,
@@ -955,26 +846,6 @@ export default function SamplingVizPage() {
       setAnalysesError(err.message || 'Failed to append state pose energy.');
     }
   }, [projectId, systemId, selectedClusterId, selectedAnalysisModelId, selectedPoseStateId]);
-
-  const handleRefreshMdSamples = useCallback(async () => {
-    if (!selectedClusterId) return;
-    setMdRefreshError(null);
-    setMdRefreshJob(null);
-    setMdRefreshJobStatus(null);
-    try {
-      const payload = {
-        project_id: projectId,
-        system_id: systemId,
-        cluster_id: selectedClusterId,
-        overwrite: true,
-        cleanup: true,
-      };
-      const res = await submitMdSamplesRefreshJob(payload);
-      setMdRefreshJob(res);
-    } catch (err) {
-      setMdRefreshError(err.message || 'Failed to submit MD refresh job.');
-    }
-  }, [projectId, systemId, selectedClusterId]);
 
   useEffect(() => {
     if (!analysisJob?.job_id) return;
@@ -1006,56 +877,6 @@ export default function SamplingVizPage() {
     };
   }, [analysisJob, loadAnalyses, projectId, systemId]);
 
-  useEffect(() => {
-    if (!mdRefreshJob?.job_id) return;
-    let cancelled = false;
-    const terminal = new Set(['finished', 'failed', 'canceled']);
-    const poll = async () => {
-      try {
-        const status = await fetchJobStatus(mdRefreshJob.job_id);
-        if (cancelled) return;
-        setMdRefreshJobStatus(status);
-        if (terminal.has(status?.status)) {
-          clearInterval(timer);
-          if (status?.status === 'finished') {
-            const data = await fetchSystem(projectId, systemId);
-            if (!cancelled) setSystem(data);
-          }
-        }
-      } catch (err) {
-        if (!cancelled) setMdRefreshError(err.message || 'Failed to poll MD refresh job.');
-      }
-    };
-    const timer = setInterval(poll, 2000);
-    poll();
-    return () => {
-      cancelled = true;
-      clearInterval(timer);
-    };
-  }, [mdRefreshJob, projectId, systemId]);
-
-  const handleDeleteSample = useCallback(
-    async (sampleId) => {
-      if (!selectedClusterId || !sampleId) return;
-      const ok = window.confirm('Delete this sample? This cannot be undone.');
-      if (!ok) return;
-      try {
-        await deleteSamplingSample(projectId, systemId, selectedClusterId, sampleId);
-        const data = await fetchSystem(projectId, systemId);
-        setSystem(data);
-        await loadAnalyses();
-        setInfoSampleId('');
-      } catch (err) {
-        setSystemError(err.message || 'Failed to delete sample.');
-      }
-    },
-    [projectId, systemId, selectedClusterId, loadAnalyses]
-  );
-
-  const toggleInfo = useCallback((sampleId) => {
-    setInfoSampleId((prev) => (prev === sampleId ? '' : sampleId));
-  }, []);
-
   const handleDeleteAnalysisGroup = useCallback(
     async (modelId) => {
       if (!selectedClusterId || !modelId) return;
@@ -1085,35 +906,6 @@ export default function SamplingVizPage() {
     },
     [analyses, loadAnalyses, projectId, selectedAnalysisModelId, selectedClusterId, systemId]
   );
-
-  useEffect(() => {
-    const load = async () => {
-      if (!infoSampleId) return;
-      if (sampleStatsCache[infoSampleId]) return;
-      setSampleStatsError(null);
-      try {
-        const stats = await fetchSampleStats(projectId, systemId, selectedClusterId, infoSampleId);
-        setSampleStatsCache((prev) => ({ ...prev, [infoSampleId]: stats }));
-      } catch (err) {
-        setSampleStatsError(err.message || 'Failed to load sample stats.');
-      }
-    };
-    load();
-  }, [infoSampleId, sampleStatsCache, projectId, systemId, selectedClusterId]);
-
-  useEffect(() => {
-    const load = async () => {
-      if (!selectedSampleId) return;
-      if (sampleStatsCache[selectedSampleId]) return;
-      try {
-        const stats = await fetchSampleStats(projectId, systemId, selectedClusterId, selectedSampleId);
-        setSampleStatsCache((prev) => ({ ...prev, [selectedSampleId]: stats }));
-      } catch (err) {
-        setSampleStatsError(err.message || 'Failed to load sample stats.');
-      }
-    };
-    load();
-  }, [selectedSampleId, sampleStatsCache, projectId, systemId, selectedClusterId]);
 
   const baseEnergyAnalysesForModel = useMemo(() => {
     if (!selectedAnalysisModelId) return [];
@@ -1263,7 +1055,7 @@ export default function SamplingVizPage() {
                 </div>
               )}
               <div className="rounded-md border border-gray-800 bg-gray-900/60 p-3 text-[11px] text-gray-400">
-                MD label mode is fixed to assigned labels and invalid SA frames are dropped.
+                MD label mode is fixed to assigned labels and invalid SA frames are dropped. This run compares the selected model&apos;s {runAnalysisSampleIds.length} linked non-MD sample{runAnalysisSampleIds.length === 1 ? '' : 's'} against every available MD sample; samples generated by other models are excluded.
               </div>
               <button
                 type="button"
@@ -1392,11 +1184,17 @@ export default function SamplingVizPage() {
                   Refresh
                 </button>
               </div>
+              <input
+                value={analysisSearch}
+                onChange={(event) => setAnalysisSearch(event.target.value)}
+                placeholder="Filter analyses by model name or ID"
+                className="w-full rounded-md border border-gray-700 bg-gray-950 px-3 py-2 text-xs text-white"
+              />
               <div className="space-y-2 rounded-md border border-gray-800 bg-gray-950/40 p-2">
                 {!analysisGroups.length && !pendingAnalysisEntry && (
                   <p className="text-[11px] text-gray-500">No Potts analyses yet.</p>
                 )}
-                {analysisGroups.map((group) => {
+                {visibleAnalysisGroups.map((group) => {
                   const isSelected = selectedAnalysisModelIds.includes(group.modelId);
                   const isPending = pendingAnalysisEntry?.modelId === group.modelId;
                   const progress = isPending ? pendingAnalysisEntry.progress : null;
@@ -1590,159 +1388,33 @@ export default function SamplingVizPage() {
           </div>
 
           <div className="rounded-lg border border-gray-800 bg-gray-900/40 p-3 space-y-3">
-            <div>
-              <div className="flex items-center justify-between gap-2">
-                <p className="text-xs font-semibold text-gray-300">MD samples</p>
-                <button
-                  type="button"
-                  onClick={handleRefreshMdSamples}
-                  className="inline-flex items-center gap-1 text-[11px] text-gray-300 hover:text-white disabled:opacity-50"
-                  disabled={!selectedClusterId || mdRefreshJobStatus?.status === 'started' || mdRefreshJobStatus?.status === 'queued'}
-                >
-                  <RefreshCw className="h-3.5 w-3.5" />
-                  Recompute
-                </button>
-              </div>
-              {mdRefreshJob?.job_id && (
-                <div className="text-[11px] text-gray-400 mt-1">
-                  Refresh job: <span className="text-gray-200">{mdRefreshJob.job_id}</span>{' '}
-                  {mdRefreshJobStatus?.meta?.status ? `· ${mdRefreshJobStatus.meta.status}` : ''}
-                  {typeof mdRefreshJobStatus?.meta?.progress === 'number' ? ` · ${mdRefreshJobStatus.meta.progress}%` : ''}
-                </div>
-              )}
-              {mdRefreshError && <ErrorMessage message={mdRefreshError} />}
-              {mdSamples.length === 0 && <p className="text-[11px] text-gray-500 mt-1">No MD samples yet.</p>}
-              {mdSamples.length > 0 && (
-                <div className="space-y-1 mt-2">
-                  {mdSamples.map((sample) => (
-                    <div
-                      key={sample.sample_id || sample.path}
-                      className="flex items-center justify-between gap-2 rounded-md border border-gray-800 bg-gray-950/40 px-2 py-1 text-[11px] text-gray-300"
-                    >
-                      <button
-                        type="button"
-                        onClick={() => setSelectedMdSampleId(sample.sample_id)}
-                        className={`truncate text-left ${selectedMdSampleId === sample.sample_id ? 'text-cyan-200' : ''}`}
-                      >
-                        {sample.name || 'MD sample'} • {sample.created_at || ''}
-                      </button>
-                      <div className="flex items-center gap-2">
-                        <button
-                          type="button"
-                          onClick={() => toggleInfo(sample.sample_id)}
-                          className="text-gray-400 hover:text-gray-200"
-                          aria-label={`Show info for ${sample.name || 'MD sample'}`}
-                        >
-                          <Info className="h-4 w-4" />
-                        </button>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
+            <p className="text-xs font-semibold text-gray-300">Related data</p>
+            <p className="text-[11px] text-gray-500">
+              Sampling Explorer only manages derived analyses. Inspect, create, or delete source samples in the Potts workspace.
+            </p>
+            <div className="grid gap-2">
+              <button
+                type="button"
+                onClick={() => navigate(`/projects/${projectId}/systems/${systemId}/potts?cluster_id=${encodeURIComponent(selectedClusterId)}&tab=samples${selectedAnalysisModelIds.length ? `&model_ids=${encodeURIComponent(selectedAnalysisModelIds.join(','))}` : ''}`)}
+                className="rounded-md border border-gray-700 px-3 py-2 text-left text-xs text-cyan-200 hover:border-cyan-500"
+              >
+                Open linked samples in Potts workspace
+              </button>
+              <button
+                type="button"
+                onClick={() => navigate(`/projects/${projectId}/systems/${systemId}/potts?cluster_id=${encodeURIComponent(selectedClusterId)}&tab=models${selectedAnalysisModelIds.length ? `&model_ids=${encodeURIComponent(selectedAnalysisModelIds.join(','))}` : ''}`)}
+                className="rounded-md border border-gray-700 px-3 py-2 text-left text-xs text-gray-200 hover:border-gray-500"
+              >
+                Open selected Potts models
+              </button>
+              <button
+                type="button"
+                onClick={() => navigate(`/projects/${projectId}/systems/${systemId}/descriptors/visualize?cluster_id=${encodeURIComponent(selectedClusterId)}`)}
+                className="rounded-md border border-gray-700 px-3 py-2 text-left text-xs text-gray-200 hover:border-gray-500"
+              >
+                Visualize MD descriptors
+              </button>
             </div>
-
-            <div>
-              <p className="text-xs font-semibold text-gray-300">Potts samples</p>
-              {pottsSamples.length === 0 && <p className="text-[11px] text-gray-500 mt-1">No Potts samples yet.</p>}
-              {pottsSamples.length > 0 && (
-                <div className="space-y-1 mt-2">
-                  {pottsSamples.map((sample) => (
-                    <div
-                      key={sample.sample_id || sample.path}
-                      className="flex items-center justify-between gap-2 rounded-md border border-gray-800 bg-gray-950/40 px-2 py-1 text-[11px] text-gray-300"
-                    >
-                      <button
-                        type="button"
-                        onClick={() => setSelectedSampleId(sample.sample_id)}
-                        className={`truncate text-left ${selectedSampleId === sample.sample_id ? 'text-cyan-200' : ''}`}
-                      >
-                        {sample.name || 'Potts sample'} • {sample.created_at || ''}
-                      </button>
-                      <div className="flex items-center gap-2">
-                        <button
-                          type="button"
-                          onClick={() => toggleInfo(sample.sample_id)}
-                          className="text-gray-400 hover:text-gray-200"
-                          aria-label={`Show info for ${sample.name || 'Potts sample'}`}
-                        >
-                          <Info className="h-4 w-4" />
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => handleDeleteSample(sample.sample_id)}
-                          className="text-gray-400 hover:text-red-300"
-                          aria-label={`Delete ${sample.name || 'Potts sample'}`}
-                        >
-                          <Trash2 className="h-4 w-4" />
-                        </button>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-
-            <div>
-              <p className="text-xs font-semibold text-gray-300">Lambda sweeps</p>
-              {lambdaSweepSamples.length === 0 && (
-                <p className="text-[11px] text-gray-500 mt-1">No lambda sweep samples yet.</p>
-              )}
-              {lambdaSweepSeries.length > 0 && (
-                <div className="space-y-2 mt-2">
-                  {lambdaSweepSeries.map((group) => (
-                    <div key={group.series_id} className="rounded-md border border-gray-800 bg-gray-950/30 p-2">
-                      <p className="text-[11px] text-gray-200 font-semibold">{group.label}</p>
-                      <p className="text-[10px] text-gray-500">{group.samples.length} samples</p>
-                      <div className="space-y-1 mt-2">
-                        {group.samples.map((sample) => (
-                          <div
-                            key={sample.sample_id || sample.path}
-                            className="flex items-center justify-between gap-2 rounded-md border border-gray-800 bg-gray-950/40 px-2 py-1 text-[11px] text-gray-300"
-                          >
-                            <button
-                              type="button"
-                              onClick={() => setSelectedSampleId(sample.sample_id)}
-                              className={`truncate text-left ${selectedSampleId === sample.sample_id ? 'text-cyan-200' : ''}`}
-                            >
-                              {typeof sample.lambda === 'number' && Number.isFinite(sample.lambda)
-                                ? `λ=${sample.lambda.toFixed(3)}`
-                                : sample.name || 'Lambda sample'}{' '}
-                              • {sample.created_at || ''}
-                            </button>
-                            <div className="flex items-center gap-2">
-                              <button
-                                type="button"
-                                onClick={() => toggleInfo(sample.sample_id)}
-                                className="text-gray-400 hover:text-gray-200"
-                                aria-label={`Show info for ${sample.name || 'lambda sweep sample'}`}
-                              >
-                                <Info className="h-4 w-4" />
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => handleDeleteSample(sample.sample_id)}
-                                className="text-gray-400 hover:text-red-300"
-                                aria-label={`Delete ${sample.name || 'lambda sweep sample'}`}
-                              >
-                                <Trash2 className="h-4 w-4" />
-                              </button>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-
-            {sampleStatsError && <ErrorMessage message={sampleStatsError} />}
-            <SampleInfoPanel
-              sample={infoSample}
-              stats={infoSampleStats}
-              onClose={() => setInfoSampleId('')}
-            />
           </div>
         </aside>
 

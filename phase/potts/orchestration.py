@@ -455,12 +455,35 @@ def _skip_record_from_sample(sample_entry: dict[str, Any], *, stage: str, reason
     return payload
 
 
+def _filter_potts_analysis_samples(
+    samples: Sequence[dict[str, Any]],
+    *,
+    model_id: str | None,
+    requested_sample_ids: Sequence[str] | None,
+) -> list[dict[str, Any]]:
+    requested = {str(value).strip() for value in (requested_sample_ids or []) if str(value).strip()}
+
+    def model_ids(sample: dict[str, Any]) -> set[str]:
+        params = sample.get("params") if isinstance(sample.get("params"), dict) else {}
+        raw = [sample.get("model_id"), params.get("model_id")]
+        raw.extend(sample.get("model_ids") if isinstance(sample.get("model_ids"), list) else [])
+        raw.extend(params.get("model_ids") if isinstance(params.get("model_ids"), list) else [])
+        return {str(value).strip() for value in raw if str(value or "").strip()}
+
+    if requested:
+        return [sample for sample in samples if str(sample.get("sample_id") or "") in requested]
+    if model_id:
+        return [sample for sample in samples if str(model_id) in model_ids(sample)]
+    return list(samples)
+
+
 def prepare_potts_analysis_batch(
     *,
     project_id: str,
     system_id: str,
     cluster_id: str,
     model_ref: str | None = None,
+    comparison_sample_ids: Sequence[str] | None = None,
     md_label_mode: str = "assigned",
     drop_invalid: bool = True,
     n_workers: int | None = None,
@@ -500,6 +523,14 @@ def prepare_potts_analysis_batch(
             cluster_id=cluster_id,
             model_ref=str(model_ref),
         )
+
+    other_samples = _filter_potts_analysis_samples(
+        other_samples,
+        model_id=model_id,
+        requested_sample_ids=comparison_sample_ids,
+    )
+
+    analysis_samples = [*md_samples, *other_samples]
 
     edge_mode = str(analysis_edge_mode or "").strip().lower()
     if edge_mode and edge_mode not in {"model", "cluster", "contact", "all_vs_all"}:
@@ -602,7 +633,7 @@ def prepare_potts_analysis_batch(
             )
 
     if model_path is not None:
-        for sample_entry in samples:
+        for sample_entry in analysis_samples:
             sample_npz_path = _resolve_analysis_sample_npz_path(
                 store=store,
                 project_id=project_id,

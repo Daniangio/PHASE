@@ -11,6 +11,7 @@ from backend import tasks
 from backend.api.v1.analysis_payloads import downsample_model_energy_payload
 from backend.tasks import run_md_samples_refresh_job
 from phase.potts.analysis_run import analyze_cluster_samples, append_state_pose_energies
+from phase.potts.orchestration import _filter_potts_analysis_samples
 from phase.potts.potts_model import PottsModel, save_potts_model
 from phase.potts.sample_io import save_sample_npz
 from phase.services.project_store import DescriptorState, ProjectStore
@@ -56,6 +57,21 @@ def _write_prepared_pickle(prepared):
     paths["root"].mkdir(parents=True, exist_ok=True)
     with open(paths["prepared"], "wb") as fh:
         pickle.dump(prepared, fh, protocol=pickle.HIGHEST_PROTOCOL)
+
+
+def test_sampling_explorer_filters_samples_by_selected_model_or_explicit_ids():
+    samples = [
+        {"sample_id": "a", "model_id": "model-a"},
+        {"sample_id": "b", "model_ids": ["model-b", "model-c"]},
+        {"sample_id": "c", "params": {"model_id": "model-a"}},
+        {"sample_id": "legacy"},
+    ]
+
+    linked = _filter_potts_analysis_samples(samples, model_id="model-a", requested_sample_ids=None)
+    assert [sample["sample_id"] for sample in linked] == ["a", "c"]
+
+    explicit = _filter_potts_analysis_samples(samples, model_id="model-a", requested_sample_ids=["b"])
+    assert [sample["sample_id"] for sample in explicit] == ["b"]
 
 
 def _write_sample(system_dir: Path, cluster_id: str, sample_id: str, meta: dict, *, labels: np.ndarray, invalid_mask=None):
@@ -536,7 +552,10 @@ def test_run_potts_analysis_job_uses_distributed_rq_workers(tmp_path, monkeypatc
             func(*args)
             return type("FakeEnqueuedJob", (), {"id": kwargs.get("job_id", "fake-job")})()
 
+    prepare_kwargs = {}
+
     def _fake_prepare(**kwargs):
+        prepare_kwargs.update(kwargs)
         _write_prepared_pickle(prepared)
         return prepared
 
@@ -584,10 +603,11 @@ def test_run_potts_analysis_job_uses_distributed_rq_workers(tmp_path, monkeypatc
     out = tasks.run_potts_analysis_job(
         "job-dist",
         {"project_id": "proj", "system_id": "sys", "cluster_id": "cluster"},
-        {"model_id": "model-1", "workers": 0},
+        {"model_id": "model-1", "workers": 0, "sample_ids": ["sa1"]},
     )
 
     assert out["status"] == "finished"
+    assert prepare_kwargs["comparison_sample_ids"] == ["sa1"]
     assert out["results"]["summary"]["comparisons_written"] == 1
     assert any(name == "run_potts_analysis_payload_job" for name, _args, _kwargs in enqueued)
     assert any(name == "run_potts_analysis_aggregate_job" for name, _args, _kwargs in enqueued)

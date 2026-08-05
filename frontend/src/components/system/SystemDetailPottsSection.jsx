@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Check, Download, Eye, Info, Pencil, Plus, SlidersHorizontal, Trash2, UploadCloud, X } from 'lucide-react';
+import { useSearchParams } from 'react-router-dom';
 import ErrorMessage from '../common/ErrorMessage';
 import { AnalysisResultsList, InfoTooltip } from './SystemDetailWidgets';
 import SimulationAnalysisForm from '../analysis/SimulationAnalysisForm';
@@ -8,6 +9,7 @@ import { createLambdaPottsModel, fetchSampleStats } from '../../api/projects';
 
 export default function SystemDetailPottsSection(props) {
   const {
+    allSamples: allSampleEntries = [],
     mdSamples,
     gibbsSamples,
     saSamples,
@@ -92,6 +94,82 @@ export default function SystemDetailPottsSection(props) {
     systemId,
     handleDeleteSample,
   } = props;
+  const allSamples = useMemo(
+    () => allSampleEntries.length ? allSampleEntries : [...mdSamples, ...gibbsSamples, ...saSamples],
+    [allSampleEntries, mdSamples, gibbsSamples, saSamples]
+  );
+  const [searchParams, setSearchParams] = useSearchParams();
+  const activeTab = searchParams.get('tab') === 'samples' ? 'samples' : 'models';
+  const linkedModelIds = useMemo(
+    () => new Set((searchParams.get('model_ids') || '').split(',').map((value) => value.trim()).filter(Boolean)),
+    [searchParams]
+  );
+  const linkedSampleIds = useMemo(
+    () => new Set((searchParams.get('sample_ids') || '').split(',').map((value) => value.trim()).filter(Boolean)),
+    [searchParams]
+  );
+  const [modelSearch, setModelSearch] = useState('');
+  const [modelKindFilter, setModelKindFilter] = useState('all');
+  const [sampleSearch, setSampleSearch] = useState('');
+  const [sampleMethodFilter, setSampleMethodFilter] = useState('all');
+  const [sampleModelFilter, setSampleModelFilter] = useState('all');
+
+  const setWorkspaceTab = (tab, extra = {}) => {
+    const next = new URLSearchParams(searchParams);
+    next.set('tab', tab);
+    Object.entries(extra).forEach(([key, value]) => {
+      if (value) next.set(key, value);
+      else next.delete(key);
+    });
+    setSearchParams(next);
+  };
+
+  const sampleModelIds = (sample) => {
+    const values = [
+      sample?.model_id,
+      ...(Array.isArray(sample?.model_ids) ? sample.model_ids : []),
+      sample?.params?.model_id,
+      ...(Array.isArray(sample?.params?.model_ids) ? sample.params.model_ids : []),
+    ];
+    return Array.from(new Set(values.map((value) => String(value || '').trim()).filter(Boolean)));
+  };
+
+  const visiblePottsModels = useMemo(() => {
+    const query = modelSearch.trim().toLowerCase();
+    return (pottsModels || []).filter((model) => {
+      if (linkedModelIds.size && !linkedModelIds.has(String(model.model_id || ''))) return false;
+      if (linkedSampleIds.size) {
+        const linked = allSamples
+          .filter((sample) => linkedSampleIds.has(String(sample.sample_id || '')))
+          .some((sample) => sampleModelIds(sample).includes(String(model.model_id || '')));
+        if (!linked) return false;
+      }
+      const kind = model?.params?.delta_kind || (model?.params?.fit_mode === 'delta' ? 'delta' : 'standard');
+      if (modelKindFilter !== 'all' && kind !== modelKindFilter) return false;
+      if (!query) return true;
+      return `${formatPottsModelName(model)} ${model.model_id || ''}`.toLowerCase().includes(query);
+    });
+  }, [allSamples, formatPottsModelName, linkedModelIds, linkedSampleIds, modelKindFilter, modelSearch, pottsModels]);
+
+  const sampleMatchesFilters = (sample) => {
+    const query = sampleSearch.trim().toLowerCase();
+    const ids = sampleModelIds(sample);
+    if (linkedModelIds.size && !ids.some((id) => linkedModelIds.has(id))) return false;
+    if (linkedSampleIds.size && !linkedSampleIds.has(String(sample?.sample_id || ''))) return false;
+    if (sampleModelFilter !== 'all' && !ids.includes(sampleModelFilter)) return false;
+    const method = String(sample?.method || (sample?.type === 'md_eval' ? 'md' : 'other')).toLowerCase();
+    if (sampleMethodFilter === 'other' && ['md', 'gibbs', 'sa'].includes(method)) return false;
+    if (sampleMethodFilter !== 'all' && sampleMethodFilter !== 'other' && method !== sampleMethodFilter) return false;
+    if (!query) return true;
+    return `${sample?.name || ''} ${sample?.sample_id || ''} ${method} ${ids.join(' ')}`.toLowerCase().includes(query);
+  };
+  const visibleMdSamples = allSamples.filter((sample) => sample?.type === 'md_eval' && sampleMatchesFilters(sample));
+  const visibleGibbsSamples = allSamples.filter((sample) => sample?.type !== 'md_eval' && String(sample?.method || '').toLowerCase() === 'gibbs' && sampleMatchesFilters(sample));
+  const visibleSaSamples = allSamples.filter((sample) => sample?.type !== 'md_eval' && String(sample?.method || '').toLowerCase() === 'sa' && sampleMatchesFilters(sample));
+  const visibleOtherSamples = allSamples.filter((sample) => {
+    const method = String(sample?.method || '').toLowerCase();
+    return sample?.type !== 'md_eval' && method !== 'gibbs' && method !== 'sa' && sampleMatchesFilters(sample);
+  });
 
   const [fitOverlayOpen, setFitOverlayOpen] = useState(false);
   const [samplingOverlayOpen, setSamplingOverlayOpen] = useState(false);
@@ -148,7 +226,6 @@ export default function SystemDetailPottsSection(props) {
     return map;
   }, [pottsModels, formatPottsModelName]);
 
-  const allSamples = useMemo(() => [...mdSamples, ...gibbsSamples, ...saSamples], [mdSamples, gibbsSamples, saSamples]);
   const infoSample = useMemo(
     () => allSamples.find((sample) => sample.sample_id === infoSampleId) || null,
     [allSamples, infoSampleId]
@@ -334,7 +411,40 @@ export default function SystemDetailPottsSection(props) {
 
   return (
     <div className="space-y-4">
-      <div className="grid xl:grid-cols-[minmax(0,1.4fr)_420px_380px] gap-2">
+      <div className="flex flex-col gap-3 rounded-lg border border-gray-700 bg-gray-900/70 p-3 lg:flex-row lg:items-center lg:justify-between">
+        <div className="flex items-center gap-1">
+          <button type="button" onClick={() => setWorkspaceTab('models')} className={`rounded-md px-4 py-2 text-sm ${activeTab === 'models' ? 'bg-cyan-600 text-white' : 'text-gray-300 hover:bg-gray-800'}`}>Models</button>
+          <button type="button" onClick={() => setWorkspaceTab('samples')} className={`rounded-md px-4 py-2 text-sm ${activeTab === 'samples' ? 'bg-cyan-600 text-white' : 'text-gray-300 hover:bg-gray-800'}`}>Samples</button>
+        </div>
+        {activeTab === 'models' ? (
+          <div className="flex flex-wrap items-center gap-2">
+            <input value={modelSearch} onChange={(event) => setModelSearch(event.target.value)} placeholder="Filter models by name or ID" className="min-w-64 rounded-md border border-gray-700 bg-gray-950 px-3 py-2 text-xs text-white" />
+            <select value={modelKindFilter} onChange={(event) => setModelKindFilter(event.target.value)} className="rounded-md border border-gray-700 bg-gray-950 px-3 py-2 text-xs text-white">
+              <option value="all">All model types</option>
+              <option value="standard">Standard</option>
+              <option value="delta">Delta</option>
+            </select>
+            {(linkedModelIds.size > 0 || linkedSampleIds.size > 0) && <button type="button" onClick={() => setWorkspaceTab('models', { model_ids: '', sample_ids: '' })} className="text-xs text-cyan-300 hover:text-cyan-200">Clear linked filter</button>}
+          </div>
+        ) : (
+          <div className="flex flex-wrap items-center gap-2">
+            <input value={sampleSearch} onChange={(event) => setSampleSearch(event.target.value)} placeholder="Filter samples" className="min-w-64 rounded-md border border-gray-700 bg-gray-950 px-3 py-2 text-xs text-white" />
+            <select value={sampleMethodFilter} onChange={(event) => setSampleMethodFilter(event.target.value)} className="rounded-md border border-gray-700 bg-gray-950 px-3 py-2 text-xs text-white">
+              <option value="all">All methods</option>
+              <option value="md">MD</option>
+              <option value="gibbs">Gibbs</option>
+              <option value="sa">SA</option>
+              <option value="other">Other</option>
+            </select>
+            <select value={sampleModelFilter} onChange={(event) => setSampleModelFilter(event.target.value)} className="max-w-64 rounded-md border border-gray-700 bg-gray-950 px-3 py-2 text-xs text-white">
+              <option value="all">All source models</option>
+              {pottsModels.map((model) => <option key={model.model_id} value={model.model_id}>{formatPottsModelName(model)}</option>)}
+            </select>
+            {(linkedModelIds.size > 0 || linkedSampleIds.size > 0) && <button type="button" onClick={() => setWorkspaceTab('samples', { model_ids: '', sample_ids: '' })} className="text-xs text-cyan-300 hover:text-cyan-200">Clear linked filter</button>}
+          </div>
+        )}
+      </div>
+      <div className="grid xl:grid-cols-[320px_minmax(0,1fr)] gap-3">
         <section className="bg-gray-900 border border-gray-700 rounded-lg p-4 space-y-4">
           <div className="flex items-start justify-between gap-3">
             <div>
@@ -351,6 +461,16 @@ export default function SystemDetailPottsSection(props) {
               onClick={() => openDoc('potts_overview')}
             />
           </div>
+          <select
+            value={pottsFitClusterId}
+            onChange={(event) => setPottsFitClusterId(event.target.value)}
+            className="w-full rounded-md border border-gray-700 bg-gray-950 px-3 py-2 text-xs text-white"
+          >
+            {!readyClusterRuns.length && <option value="">No clusters available</option>}
+            {readyClusterRuns.map((run) => (
+              <option key={run.cluster_id} value={run.cluster_id}>{run.name || run.cluster_name || run.cluster_id}</option>
+            ))}
+          </select>
           {!pottsFitClusterId && (
             <div className="rounded-md border border-dashed border-gray-700 bg-gray-950/40 p-4 text-sm text-gray-400">
               No cluster selected yet.
@@ -407,7 +527,7 @@ export default function SystemDetailPottsSection(props) {
           )}
         </section>
 
-        <aside className="bg-gray-900 border border-gray-700 rounded-lg p-4 space-y-3 min-w-[320px]">
+        {activeTab === 'models' && <aside className="bg-gray-900 border border-gray-700 rounded-lg p-4 space-y-3 min-w-[320px]">
           <div className="flex items-start justify-between gap-3">
             <div>
               <h3 className="text-sm font-semibold text-white">Potts models</h3>
@@ -425,12 +545,12 @@ export default function SystemDetailPottsSection(props) {
           {!pottsFitClusterId && (
             <p className="text-[11px] text-gray-500">Select a cluster to view its Potts models.</p>
           )}
-          {pottsFitClusterId && pottsModels.length === 0 && (
+          {pottsFitClusterId && visiblePottsModels.length === 0 && (
             <p className="text-[11px] text-gray-500">No Potts models yet.</p>
           )}
-          {pottsModels.length > 0 && (
+          {visiblePottsModels.length > 0 && (
             <div className="space-y-3">
-              {pottsModels.map((run) => {
+              {visiblePottsModels.map((run) => {
                 const displayName = formatPottsModelName(run);
                 const isBusy = pottsRenameBusy[run.model_id];
                 const isDeleting = pottsDeleteBusy[run.model_id];
@@ -548,6 +668,13 @@ export default function SystemDetailPottsSection(props) {
                         Δ patch{baseLabel ? ` · base: ${baseLabel}` : ''}
                       </p>
                     )}
+                    <button
+                      type="button"
+                      onClick={() => setWorkspaceTab('samples', { model_ids: run.model_id, sample_ids: '' })}
+                      className="text-[11px] text-cyan-300 hover:text-cyan-200"
+                    >
+                      Show samples generated with this model
+                    </button>
                     {infoModel && String(infoModel.model_id || '') === String(run.model_id || '') && (
                       <div className="mt-2 rounded-md border border-gray-800 bg-gray-950/60 p-2 text-[11px] text-gray-300 space-y-2">
                         <div className="flex items-start justify-between gap-2">
@@ -590,9 +717,9 @@ export default function SystemDetailPottsSection(props) {
               {pottsDeleteError && <ErrorMessage message={pottsDeleteError} />}
             </div>
           )}
-        </aside>
+        </aside>}
 
-        <aside className="bg-gray-900 border border-gray-700 rounded-lg p-4 space-y-3">
+        {activeTab === 'samples' && <aside className="bg-gray-900 border border-gray-700 rounded-lg p-4 space-y-3">
           <div className="flex items-start justify-between gap-3">
             <div>
               <h3 className="text-sm font-semibold text-white">Samples</h3>
@@ -613,10 +740,10 @@ export default function SystemDetailPottsSection(props) {
           <div className="space-y-3">
             <div>
               <p className="text-xs font-semibold text-gray-300">From MD</p>
-              {mdSamples.length === 0 && <p className="text-[11px] text-gray-500 mt-1">No MD samples yet.</p>}
-              {mdSamples.length > 0 && (
+              {visibleMdSamples.length === 0 && <p className="text-[11px] text-gray-500 mt-1">No matching MD samples.</p>}
+              {visibleMdSamples.length > 0 && (
                 <div className="space-y-2 mt-2">
-                  {mdSamples.map((sample) => {
+                  {visibleMdSamples.map((sample) => {
                     const meta = sample.metastable_id ? metastableById.get(sample.metastable_id) : null;
                     const stateId = sample.state_id || meta?.macro_state_id;
                     const stateName =
@@ -717,10 +844,10 @@ export default function SystemDetailPottsSection(props) {
             </div>
             <div>
               <p className="text-xs font-semibold text-gray-300">From Gibbs</p>
-              {gibbsSamples.length === 0 && <p className="text-[11px] text-gray-500 mt-1">No Gibbs samples yet.</p>}
-              {gibbsSamples.length > 0 && (
+              {visibleGibbsSamples.length === 0 && <p className="text-[11px] text-gray-500 mt-1">No matching Gibbs samples.</p>}
+              {visibleGibbsSamples.length > 0 && (
                 <div className="space-y-1 mt-2">
-                  {gibbsSamples.map((sample) => (
+                  {visibleGibbsSamples.map((sample) => (
                     <div key={sample.sample_id || sample.path} className="space-y-2">
                       <div className="flex items-center justify-between gap-2 rounded-md border border-gray-800 bg-gray-950/40 px-2 py-1 text-[11px] text-gray-300">
                         <span className="truncate">{sample.name || 'Gibbs sample'} • {sample.created_at || ''}</span>
@@ -756,6 +883,9 @@ export default function SystemDetailPottsSection(props) {
                         </div>
                       </div>
                       {renderInlineSampleInfo(sample)}
+                      {!!sampleModelIds(sample).length && (
+                        <button type="button" onClick={() => setWorkspaceTab('models', { model_ids: sampleModelIds(sample).join(','), sample_ids: sample.sample_id })} className="text-[11px] text-cyan-300 hover:text-cyan-200">Show source model</button>
+                      )}
                     </div>
                     ))}
                 </div>
@@ -763,10 +893,10 @@ export default function SystemDetailPottsSection(props) {
             </div>
             <div>
               <p className="text-xs font-semibold text-gray-300">From SA</p>
-              {saSamples.length === 0 && <p className="text-[11px] text-gray-500 mt-1">No SA samples yet.</p>}
-              {saSamples.length > 0 && (
+              {visibleSaSamples.length === 0 && <p className="text-[11px] text-gray-500 mt-1">No matching SA samples.</p>}
+              {visibleSaSamples.length > 0 && (
                 <div className="space-y-1 mt-2">
-                  {saSamples.map((sample) => (
+                  {visibleSaSamples.map((sample) => (
                     <div key={sample.sample_id || sample.path} className="space-y-2">
                       <div className="flex items-center justify-between gap-2 rounded-md border border-gray-800 bg-gray-950/40 px-2 py-1 text-[11px] text-gray-300">
                         <span className="truncate">{sample.name || 'SA sample'} • {sample.created_at || ''}</span>
@@ -802,13 +932,39 @@ export default function SystemDetailPottsSection(props) {
                         </div>
                       </div>
                       {renderInlineSampleInfo(sample)}
+                      {!!sampleModelIds(sample).length && (
+                        <button type="button" onClick={() => setWorkspaceTab('models', { model_ids: sampleModelIds(sample).join(','), sample_ids: sample.sample_id })} className="text-[11px] text-cyan-300 hover:text-cyan-200">Show source model</button>
+                      )}
                     </div>
                     ))}
                 </div>
               )}
             </div>
+            <div>
+              <p className="text-xs font-semibold text-gray-300">Other sampling methods</p>
+              {visibleOtherSamples.length === 0 && <p className="text-[11px] text-gray-500 mt-1">No matching samples.</p>}
+              {visibleOtherSamples.length > 0 && (
+                <div className="space-y-1 mt-2">
+                  {visibleOtherSamples.map((sample) => (
+                    <div key={sample.sample_id || sample.path} className="rounded-md border border-gray-800 bg-gray-950/40 px-2 py-2 text-[11px] text-gray-300">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="truncate">{sample.name || sample.sample_id}</span>
+                        <div className="flex items-center gap-2">
+                          <button type="button" onClick={() => setInfoSampleId(sample.sample_id)} className="text-gray-400 hover:text-gray-200" aria-label={`Show info for ${sample.name || sample.sample_id}`}><Info className="h-4 w-4" /></button>
+                          <button type="button" onClick={() => handleDeleteSample(sample.sample_id)} className="text-gray-400 hover:text-red-300" aria-label={`Delete ${sample.name || sample.sample_id}`}><Trash2 className="h-4 w-4" /></button>
+                        </div>
+                      </div>
+                      {renderInlineSampleInfo(sample)}
+                      {!!sampleModelIds(sample).length && (
+                        <button type="button" onClick={() => setWorkspaceTab('models', { model_ids: sampleModelIds(sample).join(','), sample_ids: sample.sample_id })} className="mt-1 text-[11px] text-cyan-300 hover:text-cyan-200">Show source models</button>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
           </div>
-        </aside>
+        </aside>}
       </div>
 
       {fitOverlayOpen && (

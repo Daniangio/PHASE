@@ -1,6 +1,7 @@
 import { Upload, Database, Server, Moon, Sun } from 'lucide-react';
 import { NavLink } from 'react-router-dom';
 import { useEffect, useState } from 'react';
+import SystemWorkspaceNav from './SystemWorkspaceNav';
 
 const navItems = [
   { to: '/projects', label: 'Projects', icon: Upload },
@@ -70,7 +71,10 @@ export default function AppLayout({ children }) {
           </nav>
         </div>
       </header>
-      <main className="flex-grow container mx-auto px-4 py-8 min-h-0">{children}</main>
+      <main className="flex-grow container mx-auto px-4 py-8 min-h-0">
+        <SystemWorkspaceNav />
+        {children}
+      </main>
       <footer className="bg-gray-800 text-gray-400 text-sm text-center py-4 border-t border-gray-700">
         © {new Date().getFullYear()} PHASE
       </footer>
