@@ -11,7 +11,7 @@ from backend import tasks
 from backend.api.v1.analysis_payloads import downsample_model_energy_payload
 from backend.tasks import run_md_samples_refresh_job
 from phase.potts.analysis_run import analyze_cluster_samples
-from phase.potts.orchestration import _filter_potts_analysis_samples
+from phase.potts.orchestration import _filter_potts_analysis_samples, _load_additive_potts_analysis_model
 from phase.potts.potts_model import PottsModel, save_potts_model
 from phase.potts.sample_io import save_sample_npz
 from phase.services.project_store import DescriptorState, ProjectStore
@@ -72,6 +72,36 @@ def test_sampling_explorer_filters_samples_by_selected_model_or_explicit_ids():
 
     explicit = _filter_potts_analysis_samples(samples, model_id="model-a", requested_sample_ids=["b"])
     assert [sample["sample_id"] for sample in explicit] == ["b"]
+
+    additive = _filter_potts_analysis_samples(
+        samples,
+        model_ids=["model-b", "model-c"],
+        requested_sample_ids=None,
+    )
+    assert [sample["sample_id"] for sample in additive] == ["b"]
+
+
+def test_sampling_explorer_adds_selected_potts_hamiltonians(tmp_path):
+    model_a = PottsModel(
+        h=[np.asarray([0.0, 1.0]), np.asarray([0.0, 2.0])],
+        J={(0, 1): np.asarray([[0.0, 0.5], [1.0, 1.5]])},
+        edges=[(0, 1)],
+    )
+    model_b = PottsModel(
+        h=[np.asarray([0.0, 3.0]), np.asarray([0.0, 4.0])],
+        J={(0, 1): np.asarray([[0.0, 2.0], [2.5, 3.0]])},
+        edges=[(0, 1)],
+    )
+    path_a = tmp_path / "a.npz"
+    path_b = tmp_path / "b.npz"
+    save_potts_model(model_a, path_a)
+    save_potts_model(model_b, path_b)
+    labels = np.asarray([[0, 0], [1, 0], [1, 1]], dtype=np.int32)
+
+    additive = _load_additive_potts_analysis_model([path_a, path_b])
+
+    expected = model_a.energy_batch(labels) + model_b.energy_batch(labels)
+    assert np.allclose(additive.energy_batch(labels), expected)
 
 
 def _write_sample(system_dir: Path, cluster_id: str, sample_id: str, meta: dict, *, labels: np.ndarray, invalid_mask=None):

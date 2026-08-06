@@ -15,8 +15,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--cluster-id", required=True)
     ap.add_argument(
         "--model",
-        default="",
-        help="Optional: model_id (from potts_models metadata) or a model NPZ path. If set, energies are computed for all samples.",
+        action="append",
+        default=[],
+        help="Optional model_id or model NPZ path. Repeat to evaluate the additive Hamiltonian.",
     )
     ap.add_argument("--md-label-mode", default="assigned", choices=["assigned", "halo"])
     ap.add_argument("--keep-invalid", action="store_true", help="Do not drop invalid SA samples (invalid_mask rows).")
@@ -29,8 +30,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--progress", action="store_true", help="Show progress while running local analysis.")
     args = ap.parse_args(argv)
 
-    model_ref = args.model.strip() or None
-    if model_ref is None:
+    model_refs = [str(value).strip() for value in (args.model or []) if str(value).strip()]
+    if not model_refs:
         data_root = Path(os.getenv("PHASE_DATA_ROOT", "/app/data"))
         store = ProjectStore(base_dir=data_root / "projects")
         models = store.list_potts_models(args.project_id, args.system_id, args.cluster_id)
@@ -39,14 +40,17 @@ def main(argv: list[str] | None = None) -> int:
             for idx, model in enumerate(models, start=1):
                 label = model.get("name") or model.get("model_id") or "model"
                 print(f"  [{idx}] {label} ({model.get('model_id')})")
-            choice = input("Select model number for energies (blank to skip): ").strip()
+            choice = input("Select model numbers for additive energies (comma separated; blank to skip): ").strip()
             if choice:
-                try:
-                    selected = int(choice)
+                for raw in choice.split(","):
+                    try:
+                        selected = int(raw.strip())
+                    except ValueError:
+                        continue
                     if 1 <= selected <= len(models):
-                        model_ref = str(models[selected - 1].get("model_id") or "").strip() or None
-                except Exception:
-                    model_ref = None
+                        ref = str(models[selected - 1].get("model_id") or "").strip()
+                        if ref and ref not in model_refs:
+                            model_refs.append(ref)
 
     progress_cb = None
     if args.progress:
@@ -58,7 +62,7 @@ def main(argv: list[str] | None = None) -> int:
         project_id=args.project_id,
         system_id=args.system_id,
         cluster_id=args.cluster_id,
-        model_ref=model_ref,
+        model_refs=model_refs,
         md_label_mode=args.md_label_mode,
         drop_invalid=not bool(args.keep_invalid),
         n_workers=(int(args.workers) if int(args.workers) > 0 else None),

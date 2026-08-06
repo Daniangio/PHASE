@@ -1490,11 +1490,14 @@ def run_potts_analysis_job(
             raise FileNotFoundError(f"Cluster '{cluster_id}' not found.")
 
         model_ref = None
+        model_refs = _coerce_str_list(params.get("model_ids"))
+        if not model_refs:
+            model_refs = _coerce_str_list(params.get("model_paths"))
         model_id = params.get("model_id")
         model_path = params.get("model_path")
-        if model_path:
+        if not model_refs and model_path:
             model_ref = str(model_path)
-        elif model_id:
+        elif not model_refs and model_id:
             model_ref = str(model_id)
 
         md_label_mode = (params.get("md_label_mode") or "assigned").lower()
@@ -1508,6 +1511,7 @@ def run_potts_analysis_job(
             system_id=system_id,
             cluster_id=cluster_id,
             model_ref=model_ref,
+            model_refs=model_refs,
             comparison_sample_ids=params.get("sample_ids"),
             md_label_mode=md_label_mode,
             drop_invalid=not keep_invalid,

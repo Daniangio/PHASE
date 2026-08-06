@@ -69,6 +69,12 @@ function sampleModelIds(sample) {
   return Array.from(new Set(values.map((value) => String(value || '').trim()).filter(Boolean)));
 }
 
+function additiveModelGroupId(modelIds) {
+  const ids = Array.from(new Set((modelIds || []).map((value) => String(value || '').trim()).filter(Boolean))).sort();
+  if (ids.length <= 1) return ids[0] || '';
+  return `additive:${ids.join('+')}`;
+}
+
 function PlotOverlay({ overlay, onClose }) {
   if (!overlay) return null;
   const layout = { ...(overlay.layout || {}), autosize: true };
@@ -160,7 +166,7 @@ export default function SamplingVizPage() {
   const analysisDataInFlightRef = useRef({});
 
   const [selectedAnalysisModelId, setSelectedAnalysisModelId] = useState('');
-  const [runAnalysisModelId, setRunAnalysisModelId] = useState('');
+  const [runAnalysisModelIds, setRunAnalysisModelIds] = useState([]);
   const [energyLoadLimit, setEnergyLoadLimit] = useState(1500);
   const [energyGraphMode, setEnergyGraphMode] = useState('histogram');
   const [analysisEdgeMode, setAnalysisEdgeMode] = useState('model');
@@ -221,10 +227,15 @@ export default function SamplingVizPage() {
 
   const runAnalysisSampleIds = useMemo(
     () => sampleEntries
-      .filter((sample) => sample.type !== 'md_eval' && sampleModelIds(sample).includes(runAnalysisModelId))
+      .filter((sample) => {
+        if (sample.type === 'md_eval' || !runAnalysisModelIds.length) return false;
+        const linked = new Set(sampleModelIds(sample));
+        if (runAnalysisModelIds.length === 1) return linked.has(runAnalysisModelIds[0]);
+        return linked.size === runAnalysisModelIds.length && runAnalysisModelIds.every((id) => linked.has(id));
+      })
       .map((sample) => sample.sample_id)
       .filter(Boolean),
-    [runAnalysisModelId, sampleEntries]
+    [runAnalysisModelIds, sampleEntries]
   );
   const gibbsSamples = useMemo(
     () => filteredSamples.filter((s) => s.type === 'potts_sampling' && s.method === 'gibbs'),
@@ -273,7 +284,7 @@ export default function SamplingVizPage() {
     if (sampleId) setSelectedSampleId(sampleId);
     if (sampleIds.length) setSelectedSampleId(sampleIds[0]);
     if (modelIds.length) {
-      setRunAnalysisModelId(modelIds[0]);
+      setRunAnalysisModelIds(modelIds);
       setSelectedAnalysisModelId(modelIds[0]);
       setSelectedAnalysisModelIds(modelIds);
     }
@@ -289,22 +300,25 @@ export default function SamplingVizPage() {
   useEffect(() => {
     if (!pottsModels.length) {
       setSelectedAnalysisModelId('');
-      setRunAnalysisModelId('');
+      setRunAnalysisModelIds([]);
       return;
     }
-    if (!runAnalysisModelId) {
-      setRunAnalysisModelId(pottsModels[0]?.model_id || '');
-    } else if (!pottsModels.some((m) => m.model_id === runAnalysisModelId)) {
-      setRunAnalysisModelId(pottsModels[0]?.model_id || '');
+    const allowed = new Set(pottsModels.map((model) => model.model_id));
+    const valid = runAnalysisModelIds.filter((id) => allowed.has(id));
+    if (valid.length !== runAnalysisModelIds.length) {
+      setRunAnalysisModelIds(valid.length ? valid : [pottsModels[0]?.model_id].filter(Boolean));
+    } else if (!valid.length) {
+      setRunAnalysisModelIds([pottsModels[0]?.model_id].filter(Boolean));
     }
-  }, [pottsModels, runAnalysisModelId]);
+  }, [pottsModels, runAnalysisModelIds]);
 
   const loadClusterInfo = useCallback(async (modelIdOverride) => {
     if (!selectedClusterId) return;
     setClusterInfoLoading(true);
     setClusterInfoError(null);
     try {
-      const modelId = typeof modelIdOverride === 'string' && modelIdOverride ? modelIdOverride : '';
+      const requestedModelId = typeof modelIdOverride === 'string' && modelIdOverride ? modelIdOverride : '';
+      const modelId = pottsModels.some((model) => model.model_id === requestedModelId) ? requestedModelId : '';
       const data = await fetchPottsClusterInfo(projectId, systemId, selectedClusterId, { modelId: modelId || undefined });
       setClusterInfo(data);
     } catch (err) {
@@ -313,7 +327,7 @@ export default function SamplingVizPage() {
     } finally {
       setClusterInfoLoading(false);
     }
-  }, [projectId, systemId, selectedClusterId]);
+  }, [projectId, systemId, selectedClusterId, pottsModels]);
 
   const loadAnalyses = useCallback(async () => {
     if (!selectedClusterId) return;
@@ -421,6 +435,7 @@ export default function SamplingVizPage() {
     const modelId = String(analysisJob?.model_id || '').trim();
     if (!modelId || !selectedClusterId) return null;
     const modelName =
+      analysisJob?.model_name ||
       pottsModels.find((m) => m.model_id === modelId)?.name ||
       analysisGroups.find((g) => g.modelId === modelId)?.modelName ||
       modelId;
@@ -795,11 +810,15 @@ export default function SamplingVizPage() {
         if (Number.isFinite(parsedCutoff) && parsedCutoff > 0) payload.analysis_contact_cutoff = parsedCutoff;
         payload.analysis_contact_atom_mode = analysisContactAtomMode || 'CA';
       }
-      if (runAnalysisModelId) payload.model_id = runAnalysisModelId;
+      if (runAnalysisModelIds.length) payload.model_ids = runAnalysisModelIds;
       payload.sample_ids = runAnalysisSampleIds;
       const res = await submitPottsAnalysisJob(payload);
-      setAnalysisJob({ ...res, model_id: runAnalysisModelId });
-      if (runAnalysisModelId) setSelectedAnalysisModelId(runAnalysisModelId);
+      const groupId = additiveModelGroupId(runAnalysisModelIds);
+      const selectedNames = runAnalysisModelIds.map(
+        (id) => pottsModels.find((model) => model.model_id === id)?.name || id
+      );
+      setAnalysisJob({ ...res, model_id: groupId, model_ids: runAnalysisModelIds, model_name: selectedNames.join(' + ') });
+      if (groupId) setSelectedAnalysisModelId(groupId);
     } catch (err) {
       setAnalysesError(err.message || 'Failed to submit analysis job.');
     }
@@ -807,11 +826,12 @@ export default function SamplingVizPage() {
     projectId,
     systemId,
     selectedClusterId,
-    runAnalysisModelId,
+    runAnalysisModelIds,
     runAnalysisSampleIds,
     analysisEdgeMode,
     analysisContactCutoff,
     analysisContactAtomMode,
+    pottsModels,
   ]);
 
   useEffect(() => {
@@ -960,24 +980,39 @@ export default function SamplingVizPage() {
             <div className="flex items-start justify-between gap-3 border-b border-gray-800 pb-3">
               <div>
                 <h2 className="text-lg font-semibold text-white">Run Sampling Explorer analysis</h2>
-                <p className="mt-1 text-xs text-gray-400">Computes MD-vs-sample JS metrics and model-energy distributions for the selected Potts model.</p>
+                <p className="mt-1 text-xs text-gray-400">Computes MD-vs-sample JS metrics and energy distributions under the additive Hamiltonian of the selected Potts models.</p>
               </div>
               <button type="button" onClick={() => setRunPanelOpen(false)} className="text-sm text-gray-400 hover:text-gray-100">Close</button>
             </div>
             <div className="space-y-3 pt-4">
               <div className="space-y-1">
-                <label className="block text-xs text-gray-400">Potts model</label>
-                <select
-                  value={runAnalysisModelId}
-                  onChange={(e) => setRunAnalysisModelId(e.target.value)}
-                  disabled={!pottsModels.length}
-                  className="w-full bg-gray-900 border border-gray-700 rounded-md px-3 py-2 text-white disabled:opacity-60"
-                >
-                  {!pottsModels.length && <option value="">No models</option>}
-                  {pottsModels.map((m) => (
-                    <option key={m.model_id} value={m.model_id}>{m.name || m.model_id}</option>
-                  ))}
-                </select>
+                <div className="flex items-center justify-between gap-2">
+                  <label className="block text-xs text-gray-400">Potts models</label>
+                  <span className="text-[11px] text-gray-500">{runAnalysisModelIds.length} selected</span>
+                </div>
+                <div className="max-h-56 space-y-1 overflow-y-auto rounded-md border border-gray-700 bg-gray-900 p-2">
+                  {!pottsModels.length && <p className="text-xs text-gray-500">No models available.</p>}
+                  {pottsModels.map((model) => {
+                    const checked = runAnalysisModelIds.includes(model.model_id);
+                    return (
+                      <label key={model.model_id} className="flex items-center gap-2 rounded px-2 py-1.5 text-xs text-gray-200 hover:bg-gray-800">
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={(event) => {
+                            setRunAnalysisModelIds((previous) => (
+                              event.target.checked
+                                ? [...previous, model.model_id]
+                                : previous.filter((id) => id !== model.model_id)
+                            ));
+                          }}
+                        />
+                        <span>{model.name || model.model_id}</span>
+                      </label>
+                    );
+                  })}
+                </div>
+                <p className="text-[11px] text-gray-500">Selected Hamiltonians are summed before evaluating energies. Models must have compatible residues, alphabets, and edges.</p>
               </div>
               <div className="space-y-1">
                 <label className="block text-xs text-gray-400">Metric edge set</label>
@@ -1008,7 +1043,7 @@ export default function SamplingVizPage() {
                 </div>
               )}
               <div className="rounded-md border border-gray-800 bg-gray-900/60 p-3 text-[11px] text-gray-400">
-                MD label mode is fixed to assigned labels and invalid SA frames are dropped. This run compares the selected model&apos;s {runAnalysisSampleIds.length} linked non-MD sample{runAnalysisSampleIds.length === 1 ? '' : 's'} against every available MD sample; samples generated by other models are excluded.
+                MD label mode is fixed to assigned labels and invalid SA frames are dropped. This run compares {runAnalysisSampleIds.length} non-MD sample{runAnalysisSampleIds.length === 1 ? '' : 's'} generated with the selected model combination against every available MD sample.
               </div>
               <button
                 type="button"
@@ -1016,7 +1051,7 @@ export default function SamplingVizPage() {
                   await handleRunAnalysis();
                   setRunPanelOpen(false);
                 }}
-                disabled={!runAnalysisModelId}
+                disabled={!runAnalysisModelIds.length}
                 className="inline-flex items-center gap-2 px-3 py-2 rounded-md bg-cyan-600 hover:bg-cyan-500 text-white text-sm disabled:opacity-60 disabled:cursor-not-allowed"
               >
                 <Play className="h-4 w-4" />

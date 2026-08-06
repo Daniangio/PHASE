@@ -77,13 +77,8 @@ fi
 
 MODEL_LINES="$(_offline_list list-models --project-id "$OFFLINE_PROJECT_ID" --system-id "$OFFLINE_SYSTEM_ID" || true)"
 MODEL_LINES="$(printf "%s\n" "$MODEL_LINES" | awk -F'|' -v cid="$CLUSTER_ID" '$4==cid')"
-SELECT_NONE="none|Skip energy evaluation"
-MODEL_ROW="$(offline_choose_one "Select Potts model for energies (blank = comparisons only):" "$SELECT_NONE
-$MODEL_LINES")"
-MODEL_ID="$(printf "%s" "$MODEL_ROW" | awk -F'|' '{print $1}')"
-if [ "$MODEL_ID" = "none" ]; then
-  MODEL_ID=""
-fi
+MODEL_ROWS="$(offline_choose_multi "Select Potts model(s) for additive energies (blank = comparisons only):" "$MODEL_LINES")"
+MODEL_IDS="$(printf "%s\n" "$MODEL_ROWS" | awk -F'|' 'NF {print $1}')"
 
 MD_LABEL_MODE="$(prompt "MD label mode (assigned/halo)" "assigned")"
 MD_LABEL_MODE="$(printf "%s" "$MD_LABEL_MODE" | tr '[:upper:]' '[:lower:]')"
@@ -116,7 +111,9 @@ CMD=(
   --workers "$WORKERS"
   --analysis-edge-mode "$ANALYSIS_EDGE_MODE"
 )
-if [ -n "$MODEL_ID" ]; then CMD+=(--model "$MODEL_ID"); fi
+while IFS= read -r MODEL_ID; do
+  [ -n "$MODEL_ID" ] && CMD+=(--model "$MODEL_ID")
+done <<< "$MODEL_IDS"
 if [ "$KEEP_INVALID" = "y" ] || [ "$KEEP_INVALID" = "yes" ]; then CMD+=(--keep-invalid); fi
 if [ "$ANALYSIS_EDGE_MODE" = "contact" ]; then
   CMD+=(--analysis-contact-cutoff "$CONTACT_CUTOFF" --analysis-contact-atom-mode "$CONTACT_ATOM_MODE")

@@ -18,13 +18,23 @@ Each frame is represented as a discrete vector `s_t` of length `N` (one entry pe
 
 Clusters often do **not** persist edges (contacts), so edge-based metrics must use an **edge set** coming from a Potts model.
 
-When you pick a Potts model in the sidebar, the UI uses that model’s edges for:
+When starting an analysis, you can select one or more Potts models. With multiple
+models, PHASE adds their Hamiltonians and evaluates every frame with
+`E_total(s) = sum_m E_m(s)`, matching additive-model sampling.
+
+All selected models must describe the same residues and alphabets and must have
+compatible edge sets. Incompatible models are rejected rather than silently
+producing an ambiguous energy.
+
+The selected model or additive model group determines:
 
 - edge JS (pairwise distribution divergence)
 - energy histograms (energies computed under that model)
-- sample filtering (optionally showing only samples generated from that model)
+- sample filtering: for multiple models, comparisons use samples generated with
+  exactly that model combination
 
-If you change the model, edge plots and energies can change even if samples are the same.
+If you change the model combination, edge plots and energies can change even if
+the samples are the same.
 
 ## MD vs Sample Panel (JS Metrics)
 
@@ -42,7 +52,8 @@ How to interpret:
 
 ## Energy Panel
 
-Energies are computed as `E(s_t)` under the selected Potts model.
+Energies are computed under the selected Potts model, or under the sum of all
+selected models.
 
 Interpretation:
 
@@ -78,7 +89,8 @@ From `phase_console`, the same analysis is available as:
 
 Console parameters:
 
-- **Potts model**: optional. If omitted, only MD-vs-sample JS analyses are written.
+- **Potts models**: optional and multi-select. If omitted, only MD-vs-sample JS
+  analyses are written. Multiple selections are added into one Hamiltonian.
 - **MD label mode**: `assigned` or `halo` for MD ensembles.
 - **Keep invalid SA rows**: if off, rows flagged by `invalid_mask` are dropped before comparison and energy evaluation.
 - **Workers**: local multiprocessing fan-out. `0` means auto.

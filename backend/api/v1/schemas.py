@@ -146,7 +146,9 @@ class PottsAnalysisJobRequest(BaseModel):
     system_id: str
     cluster_id: str
     model_id: Optional[str] = None
+    model_ids: Optional[List[str]] = None
     model_path: Optional[str] = None
+    model_paths: Optional[List[str]] = None
     workers: Optional[int] = None
     md_label_mode: Optional[str] = None  # assigned|halo
     keep_invalid: Optional[bool] = None

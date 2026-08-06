@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import pickle
 import re
@@ -34,7 +35,7 @@ from phase.potts.analysis_run import (
     _utc_now,
 )
 from phase.potts.metrics import js_divergence, marginals, pairwise_joints_on_edges
-from phase.potts.potts_model import interpolate_potts_models, load_potts_model, zero_sum_gauge_model
+from phase.potts.potts_model import add_potts_models, interpolate_potts_models, load_potts_model, zero_sum_gauge_model
 from phase.potts.sample_io import SAMPLE_NPZ_FILENAME, load_sample_npz, save_sample_npz
 from phase.services.project_store import ProjectStore
 
@@ -442,6 +443,21 @@ def _load_potts_analysis_model(model_path: str | Path) -> Any:
     return model
 
 
+def _load_additive_potts_analysis_model(model_paths: Sequence[str | Path]) -> Any:
+    paths = [str(Path(str(path)).resolve()) for path in model_paths if str(path or "").strip()]
+    if not paths:
+        raise ValueError("No Potts models were provided for energy evaluation.")
+    key = "additive:" + "|".join(paths)
+    cached = _POTTS_ANALYSIS_MODEL_CACHE.get(key)
+    if cached is not None:
+        return cached
+    model = _load_potts_analysis_model(paths[0])
+    for path in paths[1:]:
+        model = add_potts_models(model, _load_potts_analysis_model(path))
+    _POTTS_ANALYSIS_MODEL_CACHE[key] = model
+    return model
+
+
 def _skip_record_from_sample(sample_entry: dict[str, Any], *, stage: str, reason: str, info: dict[str, Any]) -> dict[str, Any]:
     payload = {
         "sample_id": str(sample_entry.get("sample_id") or ""),
@@ -458,12 +474,13 @@ def _skip_record_from_sample(sample_entry: dict[str, Any], *, stage: str, reason
 def _filter_potts_analysis_samples(
     samples: Sequence[dict[str, Any]],
     *,
-    model_id: str | None,
-    requested_sample_ids: Sequence[str] | None,
+    model_id: str | None = None,
+    model_ids: Sequence[str] | None = None,
+    requested_sample_ids: Sequence[str] | None = None,
 ) -> list[dict[str, Any]]:
     requested = {str(value).strip() for value in (requested_sample_ids or []) if str(value).strip()}
 
-    def model_ids(sample: dict[str, Any]) -> set[str]:
+    def model_ids_for_sample(sample: dict[str, Any]) -> set[str]:
         params = sample.get("params") if isinstance(sample.get("params"), dict) else {}
         raw = [sample.get("model_id"), params.get("model_id")]
         raw.extend(sample.get("model_ids") if isinstance(sample.get("model_ids"), list) else [])
@@ -472,8 +489,14 @@ def _filter_potts_analysis_samples(
 
     if requested:
         return [sample for sample in samples if str(sample.get("sample_id") or "") in requested]
+    selected_models = {str(value).strip() for value in (model_ids or []) if str(value).strip()}
+    if len(selected_models) > 1:
+        return [sample for sample in samples if model_ids_for_sample(sample) == selected_models]
+    if selected_models:
+        selected_model = next(iter(selected_models))
+        return [sample for sample in samples if selected_model in model_ids_for_sample(sample)]
     if model_id:
-        return [sample for sample in samples if str(model_id) in model_ids(sample)]
+        return [sample for sample in samples if str(model_id) in model_ids_for_sample(sample)]
     return list(samples)
 
 
@@ -483,6 +506,7 @@ def prepare_potts_analysis_batch(
     system_id: str,
     cluster_id: str,
     model_ref: str | None = None,
+    model_refs: Sequence[str] | None = None,
     comparison_sample_ids: Sequence[str] | None = None,
     md_label_mode: str = "assigned",
     drop_invalid: bool = True,
@@ -511,22 +535,51 @@ def prepare_potts_analysis_batch(
     md_samples = [s for s in samples if str(s.get("type") or "").strip().lower() == "md_eval"]
     other_samples = [s for s in samples if str(s.get("type") or "").strip().lower() != "md_eval"]
 
-    model = None
-    model_id = None
-    model_name = None
-    model_path = None
-    if model_ref:
-        model, model_id, model_name, model_path = _resolve_model_for_analysis(
+    refs = list(dict.fromkeys(str(value).strip() for value in (model_refs or []) if str(value).strip()))
+    if not refs and model_ref:
+        refs = [str(model_ref).strip()]
+    resolved_rows: list[tuple[Any, str | None, str, Path]] = []
+    for ref in refs:
+        resolved_model, resolved_id, resolved_name, resolved_path = _resolve_model_for_analysis(
             store=store,
             project_id=project_id,
             system_id=system_id,
             cluster_id=cluster_id,
-            model_ref=str(model_ref),
+            model_ref=ref,
         )
+        path = Path(resolved_path).resolve()
+        resolved_rows.append(
+            (resolved_model, str(resolved_id) if resolved_id else None, str(resolved_name or resolved_id or path.stem), path)
+        )
+    resolved_rows.sort(key=lambda row: str(row[1] or row[3]))
+    resolved_models = [row[0] for row in resolved_rows]
+    resolved_model_ids = [str(row[1]) for row in resolved_rows if row[1]]
+    resolved_model_names = [row[2] for row in resolved_rows]
+    resolved_model_paths = [row[3] for row in resolved_rows]
+
+    model = None
+    if resolved_models:
+        model = resolved_models[0]
+        for extra_model in resolved_models[1:]:
+            model = add_potts_models(model, extra_model)
+    if len(resolved_model_paths) == 1:
+        model_id = resolved_model_ids[0] if resolved_model_ids else None
+        model_name = resolved_model_names[0]
+    elif resolved_model_paths:
+        if len(resolved_model_ids) == len(resolved_model_paths):
+            model_id = "additive:" + "+".join(sorted(resolved_model_ids))
+        else:
+            digest = hashlib.sha256("|".join(sorted(map(str, resolved_model_paths))).encode("utf-8")).hexdigest()[:16]
+            model_id = f"additive:{digest}"
+        model_name = " + ".join(resolved_model_names)
+    else:
+        model_id = None
+        model_name = None
 
     other_samples = _filter_potts_analysis_samples(
         other_samples,
         model_id=model_id,
+        model_ids=resolved_model_ids,
         requested_sample_ids=comparison_sample_ids,
     )
 
@@ -632,7 +685,7 @@ def prepare_potts_analysis_batch(
                 }
             )
 
-    if model_path is not None:
+    if resolved_model_paths:
         for sample_entry in analysis_samples:
             sample_npz_path = _resolve_analysis_sample_npz_path(
                 store=store,
@@ -651,7 +704,7 @@ def prepare_potts_analysis_batch(
                         "method": sample_entry.get("method"),
                         "npz_path": str(sample_npz_path or ""),
                     },
-                    "model_path": str(Path(model_path).resolve()),
+                    "model_paths": [str(path) for path in resolved_model_paths],
                     "md_mode": str(sample_entry.get("type") or "").strip().lower() == "md_eval",
                     "md_label_mode": str(md_label_mode or "assigned"),
                     "drop_invalid": bool(drop_invalid),
@@ -673,8 +726,10 @@ def prepare_potts_analysis_batch(
         "system_id": system_id,
         "cluster_id": cluster_id,
         "model_id": model_id,
+        "model_ids": list(resolved_model_ids),
         "model_name": model_name,
-        "model_path": str(Path(model_path).resolve()) if model_path is not None else None,
+        "model_names": list(resolved_model_names),
+        "model_paths": [str(path) for path in resolved_model_paths],
         "md_label_mode": str(md_label_mode or "assigned"),
         "drop_invalid": bool(drop_invalid),
         "edges_for_metrics": [tuple(map(int, edge)) for edge in edges_for_metrics],
@@ -778,7 +833,7 @@ def _potts_analysis_payload_worker(payload: dict[str, Any]) -> dict[str, Any]:
                     info=dict(loaded.get("info") or {}),
                 ),
             }
-        model = _load_potts_analysis_model(str(payload.get("model_path") or ""))
+        model = _load_additive_potts_analysis_model(payload.get("model_paths") or [])
         energy_payload = compute_sample_energies(model, X)
         return {
             "kind": "model_energy",
@@ -806,7 +861,9 @@ def aggregate_potts_analysis_batch(
     comparisons_root = Path(str(prepared["comparisons_root"]))
     energies_root = Path(str(prepared["energies_root"]))
     model_id = prepared.get("model_id")
+    model_ids = [str(value) for value in (prepared.get("model_ids") or [])]
     model_name = prepared.get("model_name")
+    model_names = [str(value) for value in (prepared.get("model_names") or [])]
     md_label_mode = str(prepared.get("md_label_mode") or "assigned")
     drop_invalid = bool(prepared.get("drop_invalid", True))
     edges_for_metrics = [tuple(map(int, edge)) for edge in (prepared.get("edges_for_metrics") or [])]
@@ -854,7 +911,9 @@ def aggregate_potts_analysis_batch(
                 "sample_type": sample.get("type"),
                 "sample_method": sample.get("method"),
                 "model_id": model_id,
+                "model_ids": model_ids,
                 "model_name": model_name,
+                "model_names": model_names,
                 "drop_invalid": bool(drop_invalid),
                 "md_label_mode": md_label_mode,
                 "paths": {
@@ -880,7 +939,9 @@ def aggregate_potts_analysis_batch(
                 "system_id": prepared["system_id"],
                 "cluster_id": prepared["cluster_id"],
                 "model_id": model_id,
+                "model_ids": model_ids,
                 "model_name": model_name,
+                "model_names": model_names,
                 "sample_id": sample.get("sample_id"),
                 "sample_name": sample.get("name"),
                 "sample_type": sample.get("type"),
@@ -903,7 +964,9 @@ def aggregate_potts_analysis_batch(
         "comparisons_written": len(written_comparisons),
         "energies_written": len(written_energies),
         "model_id": model_id,
+        "model_ids": model_ids,
         "model_name": model_name,
+        "model_names": model_names,
         "edge_selection": edge_selection,
         "skipped_samples": skipped_samples,
         "workers_used": int(max(1, workers_used)),
