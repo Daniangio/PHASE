@@ -728,10 +728,10 @@ export default function SystemDetailPottsSection(props) {
             <button
               type="button"
               onClick={() => setSamplingOverlayOpen(true)}
-              className="inline-flex items-center gap-1 text-xs px-2 py-1 rounded-md border border-cyan-500 text-cyan-200 hover:bg-cyan-500/10"
+              className="inline-flex items-center gap-1 rounded-md border border-blue-800 bg-blue-700 px-3 py-2 text-xs font-semibold text-slate-50 shadow-sm hover:bg-blue-600"
             >
               <Plus className="h-4 w-4" />
-              New
+              New sample
             </button>
           </div>
           {!pottsFitClusterId && (
@@ -1707,8 +1707,8 @@ export default function SystemDetailPottsSection(props) {
 
       {samplingOverlayOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
-          <div className="w-full max-w-4xl bg-gray-900 border border-gray-700 rounded-lg p-4 space-y-4">
-            <div className="flex items-center justify-between">
+          <div className="max-h-[90vh] w-full max-w-4xl overflow-y-auto bg-gray-900 border border-gray-700 rounded-lg p-4 space-y-4">
+            <div className="sticky top-0 z-10 flex items-center justify-between border-b border-gray-800 bg-gray-900 pb-3">
               <div>
                 <h3 className="text-lg font-semibold text-white">Potts sampling</h3>
                 <p className="text-xs text-gray-500">Run sampling or upload results.</p>

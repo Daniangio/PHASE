@@ -2,6 +2,8 @@ import { useEffect, useMemo, useState } from 'react';
 import ErrorMessage from '../common/ErrorMessage';
 import { InfoTooltip } from '../system/SystemDetailWidgets';
 
+const MODEL_PAGE_SIZE = 10;
+
 export default function SimulationAnalysisForm({ clusterRuns, onSubmit }) {
   const [clusterId, setClusterId] = useState('');
   const [rexBetas, setRexBetas] = useState('');
@@ -30,6 +32,7 @@ export default function SimulationAnalysisForm({ clusterRuns, onSubmit }) {
   const [penaltySafety, setPenaltySafety] = useState('8.0');
   const [repair, setRepair] = useState('none');
   const [pottsModelIds, setPottsModelIds] = useState([]);
+  const [modelPage, setModelPage] = useState(0);
   const [samplingMethod, setSamplingMethod] = useState('gibbs');
   const [sampleName, setSampleName] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -66,6 +69,11 @@ export default function SimulationAnalysisForm({ clusterRuns, onSubmit }) {
     () => (selectedCluster?.samples || []).filter((sample) => String(sample?.type || '') === 'md_eval' && sample?.sample_id),
     [selectedCluster]
   );
+  const modelPageCount = Math.max(1, Math.ceil(modelOptions.length / MODEL_PAGE_SIZE));
+  const pagedModelOptions = useMemo(
+    () => modelOptions.slice(modelPage * MODEL_PAGE_SIZE, (modelPage + 1) * MODEL_PAGE_SIZE),
+    [modelOptions, modelPage]
+  );
 
   useEffect(() => {
     if (!clusterOptions.length) {
@@ -93,6 +101,14 @@ export default function SimulationAnalysisForm({ clusterRuns, onSubmit }) {
       setPottsModelIds([modelOptions[0].value]);
     }
   }, [modelOptions, pottsModelIds]);
+
+  useEffect(() => {
+    setModelPage(0);
+  }, [clusterId]);
+
+  useEffect(() => {
+    if (modelPage >= modelPageCount) setModelPage(modelPageCount - 1);
+  }, [modelPage, modelPageCount]);
 
   useEffect(() => {
     if (!mdSampleOptions.length) {
@@ -258,7 +274,12 @@ export default function SimulationAnalysisForm({ clusterRuns, onSubmit }) {
         )}
         {modelOptions.length > 0 && (
           <div className="space-y-2">
-            {modelOptions.map((opt) => {
+            <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-gray-500">
+              <span>{modelOptions.length} models · {pottsModelIds.length} selected</span>
+              <span>Page {modelPage + 1} of {modelPageCount}</span>
+            </div>
+            <div className="space-y-2 rounded-md border border-gray-700 bg-gray-950/30 p-2">
+            {pagedModelOptions.map((opt) => {
               const checked = pottsModelIds.includes(opt.value);
               return (
                 <label key={opt.value} className="flex items-center gap-2 text-xs text-gray-200">
@@ -288,6 +309,27 @@ export default function SimulationAnalysisForm({ clusterRuns, onSubmit }) {
                 </label>
               );
             })}
+            </div>
+            {modelPageCount > 1 && (
+              <div className="flex items-center justify-between gap-2">
+                <button
+                  type="button"
+                  onClick={() => setModelPage((page) => Math.max(0, page - 1))}
+                  disabled={modelPage === 0}
+                  className="rounded-md border border-gray-700 px-3 py-1.5 text-xs text-gray-300 hover:bg-gray-800 disabled:opacity-40"
+                >
+                  Previous
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setModelPage((page) => Math.min(modelPageCount - 1, page + 1))}
+                  disabled={modelPage >= modelPageCount - 1}
+                  className="rounded-md border border-gray-700 px-3 py-1.5 text-xs text-gray-300 hover:bg-gray-800 disabled:opacity-40"
+                >
+                  Next
+                </button>
+              </div>
+            )}
             <p className="text-xs text-gray-500">
               Select one or more models. Multiple selections will be combined (summed) for sampling.
             </p>
