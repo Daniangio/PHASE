@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
-import { Plus, RefreshCw } from 'lucide-react';
+import { CircleHelp, Play, Plus } from 'lucide-react';
 
 import Loader from '../components/common/Loader';
 import ErrorMessage from '../components/common/ErrorMessage';
+import HelpDrawer from '../components/common/HelpDrawer';
 import JsRangeFilterBuilder, {
   jsRulesFromPayload,
   jsRulesToRaw,
@@ -11,6 +12,7 @@ import JsRangeFilterBuilder, {
   passesAnyJsFilter,
 } from '../components/common/JsRangeFilterBuilder';
 import FilterSetupManager from '../components/common/FilterSetupManager';
+import DeltaJsWorkspaceTabs from '../components/potts/DeltaJsWorkspaceTabs';
 import { formatDeltaJsAnalysisDetails, formatDeltaJsAnalysisName, makeSampleNameById } from '../utils/deltaJsAnalysisLabels';
 import {
   fetchClusterAnalyses,
@@ -214,6 +216,7 @@ export default function DeltaJsTablePage() {
   const [newGroupName, setNewGroupName] = useState('');
   const [newGroupResidues, setNewGroupResidues] = useState('');
   const [groupHelpOpen, setGroupHelpOpen] = useState(false);
+  const [helpOpen, setHelpOpen] = useState(false);
 
   useEffect(() => {
     const run = async () => {
@@ -710,39 +713,40 @@ export default function DeltaJsTablePage() {
 
   return (
     <div className="space-y-4">
+      <HelpDrawer
+        open={helpOpen}
+        title="Delta JS ensemble comparison: Help"
+        docPath="/docs/delta_js_help.md"
+        onClose={() => setHelpOpen(false)}
+      />
       <div className="flex items-start justify-between gap-3">
         <div>
-          <button
-            type="button"
-            onClick={() => navigate(`/projects/${projectId}/systems/${systemId}/sampling/delta_js`)}
-            className="text-cyan-400 hover:text-cyan-300 text-sm"
-          >
-            ← Back to Delta JS Evaluation
-          </button>
-          <h1 className="text-2xl font-semibold text-white">Delta JS Residue Table</h1>
+          <h1 className="text-2xl font-semibold text-white">Delta JS Ensemble Comparison</h1>
           <p className="text-sm text-gray-400">Compare residue A/B-likeness across multiple trajectories in one grouped matrix table.</p>
         </div>
         <div className="flex items-center gap-2">
           <button
             type="button"
-            onClick={() => navigate(`/projects/${projectId}/systems/${systemId}/sampling/delta_js_3d${selectedClusterId ? `?cluster_id=${encodeURIComponent(selectedClusterId)}` : ''}`)}
-            className="text-xs px-3 py-2 rounded-md border border-gray-700 text-gray-200 hover:border-gray-500"
+            onClick={() => {
+              const query = new URLSearchParams({ new_analysis: '1' });
+              if (selectedClusterId) query.set('cluster_id', selectedClusterId);
+              navigate(`/projects/${projectId}/systems/${systemId}/sampling/delta_js?${query.toString()}`);
+            }}
+            className="inline-flex items-center gap-2 rounded-md bg-cyan-500 px-3 py-2 text-xs font-semibold text-slate-950 hover:bg-cyan-400"
           >
-            3D JS View
+            <Play className="h-4 w-4" /> New analysis
           </button>
           <button
             type="button"
-            onClick={async () => {
-              await loadClusterInfo();
-              await loadAnalyses();
-            }}
-            className="text-xs px-3 py-2 rounded-md border border-gray-700 text-gray-200 hover:border-gray-500 inline-flex items-center gap-2"
+            onClick={() => setHelpOpen(true)}
+            className="inline-flex items-center gap-2 rounded-md border border-gray-700 px-3 py-2 text-xs text-gray-200 hover:border-gray-500"
           >
-            <RefreshCw className="h-4 w-4" />
-            Refresh
+            <CircleHelp className="h-4 w-4" /> Help
           </button>
         </div>
       </div>
+
+      <DeltaJsWorkspaceTabs projectId={projectId} systemId={systemId} clusterId={selectedClusterId} active="comparison" />
 
       <div className="grid grid-cols-1 xl:grid-cols-[360px_1fr] gap-4">
         <aside className="space-y-3">

@@ -10,12 +10,12 @@ const MAIN_DESTINATIONS = [
   { key: 'potts', label: 'Potts models', icon: Boxes, suffix: '/potts' },
   { key: 'sampling', label: 'Sampling explorer', icon: Activity, suffix: '/sampling/visualize' },
   { key: 'model_pair', label: 'Model-pair analysis', icon: GitCompareArrows, suffix: '/sampling/delta_eval' },
+  { key: 'delta_js', label: 'Delta JS', icon: Network, suffix: '/sampling/delta_js' },
   { key: 'nearest', label: 'Nearest neighbours', icon: Waypoints, suffix: '/sampling/potts_nn_mapping' },
 ];
 
 const ANALYSIS_DESTINATIONS = [
   { label: 'More analyses...', suffix: '' },
-  { label: 'Delta JS', suffix: '/sampling/delta_js' },
   { label: 'NN mismatch graph', suffix: '/sampling/potts_nn_mapping_graph' },
   { label: 'Hamiltonian spectra', suffix: '/sampling/hamiltonian_spectral' },
   { label: 'Spectral pistons', suffix: '/sampling/spectral_intersection' },
@@ -35,6 +35,7 @@ function activeDestination(pathname, basePath) {
   if (pathname.startsWith(`${basePath}/potts`)) return 'potts';
   if (pathname.startsWith(`${basePath}/sampling/visualize`)) return 'sampling';
   if (pathname.startsWith(`${basePath}/sampling/delta_eval`) || pathname.startsWith(`${basePath}/sampling/delta_commitment_3d`)) return 'model_pair';
+  if (pathname.startsWith(`${basePath}/sampling/delta_js`)) return 'delta_js';
   if (pathname.startsWith(`${basePath}/sampling/potts_nn_mapping`)) return 'nearest';
   return '';
 }

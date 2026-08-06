@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
-import { CircleHelp, RefreshCw, X } from 'lucide-react';
+import { CircleHelp, Play, RefreshCw, X } from 'lucide-react';
 import { createPluginUI } from 'molstar/lib/mol-plugin-ui/index';
 import { renderReact18 } from 'molstar/lib/mol-plugin-ui/react18';
 import { Asset } from 'molstar/lib/mol-util/assets';
@@ -20,6 +20,7 @@ import JsRangeFilterBuilder, {
   passesAnyJsFilter,
 } from '../components/common/JsRangeFilterBuilder';
 import FilterSetupManager from '../components/common/FilterSetupManager';
+import DeltaJsWorkspaceTabs from '../components/potts/DeltaJsWorkspaceTabs';
 import ClusterPieChart, { clusterPieColor } from '../components/common/ClusterPieChart';
 import { formatDeltaJsAnalysisDetails, formatDeltaJsAnalysisName, makeSampleNameById } from '../utils/deltaJsAnalysisLabels';
 import {
@@ -1070,14 +1071,7 @@ export default function DeltaJs3DPage() {
       />
       <div className="flex items-start justify-between gap-3">
         <div>
-          <button
-            type="button"
-            onClick={() => navigate(`/projects/${projectId}/systems/${systemId}/sampling/delta_js`)}
-            className="text-cyan-400 hover:text-cyan-300 text-sm"
-          >
-            ← Back to Delta JS Evaluation
-          </button>
-          <h1 className="text-2xl font-semibold text-white">Delta JS (A/B/Other) 3D</h1>
+          <h1 className="text-2xl font-semibold text-white">Delta JS Structure View</h1>
           <p className="text-sm text-gray-400">
             Residue coloring from JS distance to A and B references: red=A-like, blue=B-like, green=similar to both, purple=far from both.
           </p>
@@ -1085,10 +1079,14 @@ export default function DeltaJs3DPage() {
         <div className="flex items-center gap-2">
           <button
             type="button"
-            onClick={() => navigate(`/projects/${projectId}/systems/${systemId}/sampling/delta_js_table${selectedClusterId ? `?cluster_id=${encodeURIComponent(selectedClusterId)}` : ''}`)}
-            className="text-xs px-3 py-2 rounded-md border border-gray-700 text-gray-200 hover:border-gray-500"
+            onClick={() => {
+              const query = new URLSearchParams({ new_analysis: '1' });
+              if (selectedClusterId) query.set('cluster_id', selectedClusterId);
+              navigate(`/projects/${projectId}/systems/${systemId}/sampling/delta_js?${query.toString()}`);
+            }}
+            className="inline-flex items-center gap-2 rounded-md bg-cyan-500 px-3 py-2 text-xs font-semibold text-slate-950 hover:bg-cyan-400"
           >
-            Multi-traj table
+            <Play className="h-4 w-4" /> New analysis
           </button>
           <button
             type="button"
@@ -1101,23 +1099,12 @@ export default function DeltaJs3DPage() {
         </div>
       </div>
 
+      <DeltaJsWorkspaceTabs projectId={projectId} systemId={systemId} clusterId={selectedClusterId} active="structure" />
+
       <div className="grid grid-cols-1 xl:grid-cols-[360px_1fr] gap-4">
         <aside className="space-y-3">
           <div className="rounded-lg border border-gray-800 bg-gray-900/40 p-3 space-y-3">
-            <div className="flex items-center justify-between">
-              <h2 className="text-sm font-semibold text-gray-200">Selection</h2>
-              <button
-                type="button"
-                onClick={async () => {
-                  await loadClusterInfo();
-                  await loadAnalyses();
-                }}
-                className="text-xs px-2 py-1 rounded-md border border-gray-700 text-gray-200 hover:border-gray-500 inline-flex items-center gap-2"
-              >
-                <RefreshCw className="h-3 w-3" />
-                Refresh
-              </button>
-            </div>
+            <h2 className="text-sm font-semibold text-gray-200">Analyses and display filters</h2>
             <div>
               <label className="block text-xs text-gray-400 mb-1">Cluster</label>
               <select

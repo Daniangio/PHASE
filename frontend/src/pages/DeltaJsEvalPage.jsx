@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useLocation, useNavigate, useParams } from 'react-router-dom';
-import { CircleHelp, Play, Plus, RefreshCw, X } from 'lucide-react';
+import { useLocation, useParams } from 'react-router-dom';
+import { CircleHelp, Play, X } from 'lucide-react';
 import Plot from 'react-plotly.js';
 
 import Loader from '../components/common/Loader';
@@ -13,6 +13,7 @@ import JsRangeFilterBuilder, {
   passesAnyJsFilter,
 } from '../components/common/JsRangeFilterBuilder';
 import FilterSetupManager from '../components/common/FilterSetupManager';
+import DeltaJsWorkspaceTabs from '../components/potts/DeltaJsWorkspaceTabs';
 import { formatDeltaJsAnalysisDetails, formatDeltaJsAnalysisName, makeSampleNameById } from '../utils/deltaJsAnalysisLabels';
 import {
   fetchClusterAnalyses,
@@ -125,7 +126,6 @@ function aboLabel(dA, dB) {
 export default function DeltaJsEvalPage() {
   const { projectId, systemId } = useParams();
   const location = useLocation();
-  const navigate = useNavigate();
 
   const [system, setSystem] = useState(null);
   const [loadingSystem, setLoadingSystem] = useState(true);
@@ -204,12 +204,6 @@ export default function DeltaJsEvalPage() {
     () => clusterOptions.find((c) => c.cluster_id === selectedClusterId) || null,
     [clusterOptions, selectedClusterId]
   );
-  const samplingSuffix = useMemo(() => {
-    const params = new URLSearchParams();
-    if (selectedClusterId) params.set('cluster_id', selectedClusterId);
-    const s = params.toString();
-    return s ? `?${s}` : '';
-  }, [selectedClusterId]);
   const sampleEntries = useMemo(() => selectedCluster?.samples || [], [selectedCluster]);
   const sampleNameById = useMemo(() => makeSampleNameById(sampleEntries), [sampleEntries]);
   const stateOptions = useMemo(() => {
@@ -868,6 +862,12 @@ export default function DeltaJsEvalPage() {
     return (contactStateIds.length > 0 || contactPdbList.length > 0) && Number(contactCutoff) > 0;
   }, [useModelPair, edgeMode, contactStateIds.length, contactPdbList.length, contactCutoff]);
 
+  useEffect(() => {
+    if (new URLSearchParams(location.search || '').get('new_analysis') === '1') {
+      setRunPanelOpen(true);
+    }
+  }, [location.search]);
+
   if (loadingSystem) return <Loader message="Loading delta JS analysis..." />;
   if (systemError) return <ErrorMessage message={systemError} />;
 
@@ -881,7 +881,7 @@ export default function DeltaJsEvalPage() {
       />
       <div className="flex items-start justify-between gap-3">
         <div>
-          <h1 className="text-2xl font-semibold text-white">Delta JS (A/B/Other)</h1>
+          <h1 className="text-2xl font-semibold text-white">Delta JS Analysis</h1>
           <p className="text-sm text-gray-400">
             Alternative to commitment: per-residue/per-edge JS distance to A and B references with 4-way color logic.
           </p>
@@ -890,9 +890,9 @@ export default function DeltaJsEvalPage() {
           <button
             type="button"
             onClick={() => setRunPanelOpen(true)}
-            className="text-xs px-3 py-2 rounded-md border border-cyan-700 text-cyan-200 hover:border-cyan-500 inline-flex items-center gap-2"
+            className="inline-flex items-center gap-2 rounded-md bg-cyan-500 px-3 py-2 text-xs font-semibold text-slate-950 hover:bg-cyan-400"
           >
-            <Plus className="h-4 w-4" />
+            <Play className="h-4 w-4" />
             New analysis
           </button>
           <button
@@ -903,22 +903,10 @@ export default function DeltaJsEvalPage() {
             <CircleHelp className="h-4 w-4" />
             Help
           </button>
-          <button
-            type="button"
-            onClick={() => navigate(`/projects/${projectId}/systems/${systemId}/sampling/delta_js_3d${samplingSuffix}`)}
-            className="text-xs px-3 py-2 rounded-md border border-gray-700 text-gray-200 hover:border-gray-500"
-          >
-            3D JS View
-          </button>
-          <button
-            type="button"
-            onClick={() => navigate(`/projects/${projectId}/systems/${systemId}/sampling/delta_js_table${samplingSuffix}`)}
-            className="text-xs px-3 py-2 rounded-md border border-gray-700 text-gray-200 hover:border-gray-500"
-          >
-            Multi-traj table
-          </button>
         </div>
       </div>
+
+      <DeltaJsWorkspaceTabs projectId={projectId} systemId={systemId} clusterId={selectedClusterId} active="analysis" />
 
       {runPanelOpen && (
         <div
@@ -930,7 +918,7 @@ export default function DeltaJsEvalPage() {
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center justify-between">
-              <h2 className="text-sm font-semibold text-white">Run New Delta JS Analysis</h2>
+              <h2 className="text-sm font-semibold text-white">New Delta JS analysis</h2>
               <button
                 type="button"
                 onClick={() => setRunPanelOpen(false)}
@@ -1216,20 +1204,7 @@ export default function DeltaJsEvalPage() {
       <div className="grid grid-cols-1 xl:grid-cols-[380px_1fr] gap-4">
         <aside className="space-y-3">
           <div className="rounded-lg border border-gray-800 bg-gray-900/40 p-3 space-y-3">
-            <div className="flex items-center justify-between">
-              <h2 className="text-sm font-semibold text-gray-200">Selection</h2>
-              <button
-                type="button"
-                onClick={async () => {
-                  await loadClusterInfo();
-                  await loadAnalyses();
-                }}
-                className="text-xs px-2 py-1 rounded-md border border-gray-700 text-gray-200 hover:border-gray-500 inline-flex items-center gap-2"
-              >
-                <RefreshCw className="h-3 w-3" />
-                Refresh
-              </button>
-            </div>
+            <h2 className="text-sm font-semibold text-gray-200">Analyses and filters</h2>
             <div>
               <label className="block text-xs text-gray-400">Cluster</label>
               <select
