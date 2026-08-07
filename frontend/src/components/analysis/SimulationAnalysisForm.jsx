@@ -297,7 +297,7 @@ export default function SimulationAnalysisForm({ clusterRuns, onSubmit }) {
                     <span className="flex items-center gap-2">
                       <span>{opt.label}</span>
                       {opt.isDelta && (
-                        <span className="px-1.5 py-0.5 rounded-full text-[10px] font-semibold text-cyan-200 border border-cyan-500/40 bg-cyan-500/10">
+                        <span className="px-1.5 py-0.5 rounded-full text-[10px] font-semibold text-cyan-400 border border-cyan-500/40 bg-cyan-500/10">
                           Δ patch
                         </span>
                       )}

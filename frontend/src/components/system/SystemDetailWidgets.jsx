@@ -82,7 +82,7 @@ export function AnalysisResultsList({ results, emptyLabel, onOpen, onOpenSimulat
               <button
                 type="button"
                 onClick={() => onOpenSimulation(result)}
-                className="text-xs text-cyan-300 hover:text-cyan-200"
+                className="text-xs text-cyan-300 hover:text-cyan-400"
               >
                 Sampling viz
               </button>

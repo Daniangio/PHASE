@@ -139,6 +139,13 @@ export function fetchPottsClusterInfo(projectId, systemId, clusterId, options = 
   );
 }
 
+export function fetchStateTrajectoryOverlay(projectId, systemId, clusterId, stateId, payload) {
+  return requestJSON(
+    `/projects/${projectId}/systems/${systemId}/metastable/clusters/${clusterId}/states/${stateId}/trajectory_overlay`,
+    { method: 'POST', body: payload }
+  );
+}
+
 export function fetchClusterAnalyses(projectId, systemId, clusterId, options = {}) {
   const { analysisType } = options;
   const query = analysisType ? `?analysis_type=${encodeURIComponent(analysisType)}` : '';

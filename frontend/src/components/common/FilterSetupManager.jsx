@@ -57,7 +57,7 @@ export default function FilterSetupManager({
           type="button"
           onClick={onSave}
           disabled={!String(newSetupName || '').trim()}
-          className="px-3 py-2 rounded-md border border-cyan-700 text-sm text-cyan-200 hover:border-cyan-500 disabled:opacity-50"
+          className="px-3 py-2 rounded-md border border-cyan-700 text-sm text-cyan-400 hover:border-cyan-500 disabled:opacity-50"
         >
           Save current
         </button>

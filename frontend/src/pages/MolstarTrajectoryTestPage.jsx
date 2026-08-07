@@ -174,7 +174,7 @@ export default function MolstarTrajectoryTestPage() {
               <button
                 type="button"
                 onClick={() => setSourceMode('state')}
-                className={`rounded-md px-3 py-1.5 text-xs border ${sourceMode === 'state' ? 'border-cyan-500 bg-cyan-950/50 text-cyan-100' : 'border-gray-700 text-gray-300 hover:bg-gray-800'}`}
+                className={`rounded-md px-3 py-1.5 text-xs border ${sourceMode === 'state' ? 'border-cyan-500 bg-cyan-950/50 text-cyan-400' : 'border-gray-700 text-gray-300 hover:bg-gray-800'}`}
               >
                 Stored PHASE state
               </button>
@@ -182,7 +182,7 @@ export default function MolstarTrajectoryTestPage() {
             <button
               type="button"
               onClick={() => setSourceMode('upload')}
-              className={`rounded-md px-3 py-1.5 text-xs border ${sourceMode === 'upload' ? 'border-cyan-500 bg-cyan-950/50 text-cyan-100' : 'border-gray-700 text-gray-300 hover:bg-gray-800'}`}
+              className={`rounded-md px-3 py-1.5 text-xs border ${sourceMode === 'upload' ? 'border-cyan-500 bg-cyan-950/50 text-cyan-400' : 'border-gray-700 text-gray-300 hover:bg-gray-800'}`}
             >
               Local files
             </button>

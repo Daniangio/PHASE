@@ -327,7 +327,7 @@ export default function GibbsRelaxationPage() {
                 )}&analysis_id=${encodeURIComponent(selectedAnalysisId || '')}`
               )
             }
-            className="text-xs px-3 py-2 rounded-md border border-cyan-700 text-cyan-200 hover:border-cyan-500"
+            className="text-xs px-3 py-2 rounded-md border border-cyan-700 text-cyan-400 hover:border-cyan-500"
           >
             Open 3D viewer
           </button>

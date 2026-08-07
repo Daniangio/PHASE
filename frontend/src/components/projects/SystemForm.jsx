@@ -49,7 +49,7 @@ export default function SystemForm({ onCreate }) {
       onSubmit={handleSubmit}
       className="bg-gray-800 rounded-lg border border-gray-700 p-4 space-y-4"
     >
-      <div className="rounded-md border border-cyan-900/70 bg-cyan-950/20 p-3 text-sm text-cyan-100">
+      <div className="rounded-md border border-cyan-900/70 bg-cyan-950/20 p-3 text-sm text-cyan-400">
         Create the system first, then open it and add states from the States panel. This matches the console workflow and avoids forcing an initial PDB upload.
       </div>
 

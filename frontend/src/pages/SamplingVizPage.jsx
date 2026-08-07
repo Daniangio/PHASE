@@ -1197,7 +1197,7 @@ export default function SamplingVizPage() {
                         <button
                           type="button"
                           onClick={() => setAnalysisInfoModelId((prev) => (prev === group.modelId ? '' : group.modelId))}
-                          className="text-gray-400 hover:text-cyan-200"
+                          className="text-gray-400 hover:text-cyan-400"
                           title="Show analysis metadata"
                           aria-label={`Show metadata for ${group.modelName}`}
                         >
@@ -1456,7 +1456,7 @@ export default function SamplingVizPage() {
             </div>
 
             {analysisJobStatus?.status === 'finished' && analysisSummary && (
-              <div className="rounded-md border border-cyan-800 bg-cyan-950/20 p-3 text-[12px] text-cyan-100 space-y-1">
+              <div className="rounded-md border border-cyan-800 bg-cyan-950/20 p-3 text-[12px] text-cyan-400 space-y-1">
                 <div>
                   Wrote {analysisSummary.comparisons_written ?? 0} MD-vs-sample analyses, {analysisSummary.energies_written ?? 0}{' '}
                   energy analyses.

@@ -232,7 +232,7 @@ export default function SpectralIntersection3DPage() {
       <div className="mx-auto max-w-7xl space-y-4 pb-16">
         <div className="flex items-start justify-between gap-3">
           <div>
-            <button type="button" onClick={() => navigate(`/projects/${projectId}/systems/${systemId}/sampling/spectral_intersection${selectedClusterId ? `?cluster_id=${encodeURIComponent(selectedClusterId)}` : ''}`)} className="text-xs text-cyan-300 hover:text-cyan-200">Back to intersection plots</button>
+            <button type="button" onClick={() => navigate(`/projects/${projectId}/systems/${systemId}/sampling/spectral_intersection${selectedClusterId ? `?cluster_id=${encodeURIComponent(selectedClusterId)}` : ''}`)} className="text-xs text-cyan-300 hover:text-cyan-400">Back to intersection plots</button>
             <h1 className="mt-2 text-2xl font-semibold text-white">Piston Classes 3D</h1>
             <p className="max-w-3xl text-sm text-gray-400">Base protein is shown as an opaque gray cartoon. Select pistons, scaffolds, transient switches, subthreshold overlaps, or thermodynamic bulk residues to color them on the structure.</p>
           </div>

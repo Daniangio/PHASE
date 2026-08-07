@@ -341,7 +341,7 @@ export default function SpectralIntersectionPage() {
           </div>
         </div>
         {error ? <ErrorMessage message={error} /> : null}
-        {job ? <div className="rounded-lg border border-cyan-800 bg-cyan-950/30 p-3 text-sm text-cyan-100">Job {job.job_id}: {jobStatus?.meta?.status || jobStatus?.status || 'queued'} · progress {Math.round(Number(jobStatus?.meta?.progress || jobStatus?.progress || 0))}%</div> : null}
+        {job ? <div className="rounded-lg border border-cyan-800 bg-cyan-950/30 p-3 text-sm text-cyan-400">Job {job.job_id}: {jobStatus?.meta?.status || jobStatus?.status || 'queued'} · progress {Math.round(Number(jobStatus?.meta?.progress || jobStatus?.progress || 0))}%</div> : null}
         <div className="grid grid-cols-1 gap-4 xl:grid-cols-[330px_minmax(0,1fr)]">
           <aside className="space-y-3 rounded-lg border border-gray-800 bg-gray-900 p-3">
             <label className="block text-xs text-gray-400">Cluster<select value={selectedClusterId} onChange={(e) => setSelectedClusterId(e.target.value)} className="mt-1 w-full rounded border border-gray-800 bg-gray-950 px-2 py-2 text-sm text-gray-100">{clusters.map((c) => <option key={c.cluster_id} value={c.cluster_id}>{c.name || c.cluster_id}</option>)}</select></label>

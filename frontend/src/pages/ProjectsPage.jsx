@@ -310,7 +310,7 @@ export default function ProjectsPage() {
               <button
                 type="button"
                 onClick={() => setShowSystemForm(true)}
-                className="text-xs text-cyan-300 hover:text-cyan-200"
+                className="text-xs text-cyan-300 hover:text-cyan-400"
               >
                 New system
               </button>

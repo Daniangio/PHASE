@@ -1,5 +1,6 @@
 import logging
 import json
+import tempfile
 import uuid
 import shutil
 from datetime import datetime
@@ -37,6 +38,7 @@ from phase.workflows.backmapping import build_backmapping_npz
 from backend.tasks import run_backmapping_job, run_cluster_job, run_sample_backmapping_job
 from phase.potts.potts_model import interpolate_potts_models, load_potts_model, save_potts_model, zero_sum_gauge_model
 from phase.potts.analysis_run import load_endpoint_framewise_payload
+from phase.common.slice_utils import descriptor_frame_to_source_frame
 
 
 router = APIRouter()
@@ -786,6 +788,147 @@ async def get_potts_cluster_info(
         "edges_source": edges_source,
         "model_id": model_id,
         "model_name": model_name,
+    }
+
+
+@router.post(
+    "/projects/{project_id}/systems/{system_id}/metastable/clusters/{cluster_id}/states/{state_id}/trajectory_overlay",
+    summary="Extract trajectory frames with aligned per-residue cluster assignments",
+)
+async def get_state_trajectory_overlay(
+    project_id: str,
+    system_id: str,
+    cluster_id: str,
+    state_id: str,
+    payload: Dict[str, Any],
+):
+    """Return a small set of PDB frames and cluster labels for browser overlays."""
+    raw_frames = (payload or {}).get("frame_indices") or []
+    raw_residues = (payload or {}).get("residue_indices") or []
+    if not isinstance(raw_frames, list) or not isinstance(raw_residues, list):
+        raise HTTPException(status_code=400, detail="frame_indices and residue_indices must be lists.")
+    try:
+        frame_indices = list(dict.fromkeys(int(v) for v in raw_frames))
+        residue_indices = list(dict.fromkeys(int(v) for v in raw_residues))
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="Frame and residue indices must be integers.") from exc
+    if not frame_indices:
+        raise HTTPException(status_code=400, detail="Select at least one frame.")
+    if len(frame_indices) > 500:
+        raise HTTPException(status_code=400, detail="At most 500 frames can be overlaid at once.")
+    if len(residue_indices) > 20:
+        raise HTTPException(status_code=400, detail="At most 20 residues can be colored at once.")
+    if any(v < 0 for v in frame_indices + residue_indices):
+        raise HTTPException(status_code=400, detail="Frame and residue indices must be non-negative.")
+
+    try:
+        system_meta = project_store.get_system(project_id, system_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="System not found.")
+    cluster_entry = get_cluster_entry(system_meta, cluster_id)
+    state_meta = (system_meta.states or {}).get(str(state_id))
+    if state_meta is None:
+        raise HTTPException(status_code=404, detail=f"State '{state_id}' not found.")
+    if not state_meta.pdb_file:
+        raise HTTPException(status_code=400, detail="The selected state has no topology PDB.")
+
+    samples = cluster_entry.get("samples") if isinstance(cluster_entry, dict) else []
+    candidates = [
+        item for item in (samples or [])
+        if isinstance(item, dict)
+        and str(item.get("type") or "") == "md_eval"
+        and str(item.get("state_id") or "") == str(state_id)
+    ]
+    if not candidates:
+        raise HTTPException(
+            status_code=400,
+            detail="This state has no MD cluster assignment for the selected cluster. Assign the state first.",
+        )
+    candidates.sort(key=lambda item: str(item.get("created_at") or ""))
+    sample_entry = candidates[-1]
+    paths = sample_entry.get("paths") if isinstance(sample_entry.get("paths"), dict) else {}
+    sample_ref = paths.get("summary_npz") or sample_entry.get("path")
+    if not sample_ref:
+        raise HTTPException(status_code=404, detail="The state MD sample has no NPZ path.")
+    sample_path = project_store.resolve_path(project_id, system_id, str(sample_ref))
+    if not sample_path.exists():
+        alt = project_store.ensure_cluster_directories(project_id, system_id, cluster_id)["cluster_dir"] / str(sample_ref)
+        if alt.exists():
+            sample_path = alt
+    if not sample_path.exists():
+        raise HTTPException(status_code=404, detail="The state MD sample NPZ is missing.")
+
+    try:
+        with np.load(sample_path, allow_pickle=True) as sample_npz:
+            if "labels" in sample_npz:
+                labels = np.asarray(sample_npz["labels"], dtype=np.int32)
+            elif "assigned__labels_assigned" in sample_npz:
+                labels = np.asarray(sample_npz["assigned__labels_assigned"], dtype=np.int32)
+            else:
+                raise ValueError("MD sample does not contain assigned labels.")
+            sample_frames = (
+                np.asarray(sample_npz["frame_indices"], dtype=np.int64)
+                if "frame_indices" in sample_npz
+                else np.arange(labels.shape[0], dtype=np.int64)
+            )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to load state cluster assignments: {exc}") from exc
+    if labels.ndim != 2 or sample_frames.shape[0] != labels.shape[0]:
+        raise HTTPException(status_code=500, detail="State cluster assignments are malformed.")
+    if any(v >= labels.shape[1] for v in residue_indices):
+        raise HTTPException(status_code=400, detail=f"Residue index must be below {labels.shape[1]}.")
+    label_rows = {int(frame): idx for idx, frame in enumerate(sample_frames.tolist())}
+
+    top_path = project_store.resolve_path(project_id, system_id, state_meta.pdb_file)
+    traj_ref = state_meta.trajectory_file or state_meta.pdb_file
+    traj_path = project_store.resolve_path(project_id, system_id, traj_ref)
+    if not top_path.exists() or not traj_path.exists():
+        raise HTTPException(status_code=404, detail="Stored topology or trajectory is missing on disk.")
+
+    def _extract() -> tuple[list[dict[str, Any]], int]:
+        import MDAnalysis as mda
+
+        universe = mda.Universe(str(top_path), str(traj_path))
+        source_count = len(universe.trajectory)
+        results: list[dict[str, Any]] = []
+        with tempfile.TemporaryDirectory(prefix="phase-overlay-") as tmp_dir:
+            for descriptor_frame in frame_indices:
+                source_frame = descriptor_frame_to_source_frame(
+                    descriptor_frame,
+                    getattr(state_meta, "slice_spec", None),
+                    source_count,
+                )
+                universe.trajectory[source_frame]
+                pdb_path = Path(tmp_dir) / f"frame-{descriptor_frame}.pdb"
+                universe.atoms.write(str(pdb_path))
+                row = label_rows.get(descriptor_frame)
+                cluster_labels = {
+                    str(residue_index): int(labels[row, residue_index]) if row is not None else -1
+                    for residue_index in residue_indices
+                }
+                results.append({
+                    "frame_index": descriptor_frame,
+                    "source_frame_index": source_frame,
+                    "clusters": cluster_labels,
+                    "pdb": pdb_path.read_text(encoding="utf-8", errors="replace"),
+                })
+        return results, source_count
+
+    try:
+        structures, source_frame_count = await run_in_threadpool(_extract)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to extract trajectory overlay: {exc}") from exc
+
+    return {
+        "cluster_id": cluster_id,
+        "state_id": state_id,
+        "sample_id": sample_entry.get("sample_id"),
+        "source_frame_count": source_frame_count,
+        "descriptor_frame_count": int(getattr(state_meta, "n_frames", 0) or labels.shape[0]),
+        "residue_indices": residue_indices,
+        "structures": structures,
     }
 
 

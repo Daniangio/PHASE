@@ -3,6 +3,29 @@ from __future__ import annotations
 from typing import Optional, Tuple
 
 
+def descriptor_frame_to_source_frame(frame_index: int, slice_spec: str | None, source_frame_count: int) -> int:
+    """Map a descriptor/sample row back to its frame in the stored trajectory."""
+    if source_frame_count <= 0:
+        raise ValueError("Trajectory has no frames.")
+    descriptor_index = int(frame_index)
+    if descriptor_index < 0:
+        raise ValueError("Frame indices must be non-negative.")
+    if not slice_spec:
+        if descriptor_index >= source_frame_count:
+            raise ValueError(f"Frame {descriptor_index} is outside the trajectory.")
+        return descriptor_index
+
+    parts = str(slice_spec).split(":")
+    parts += [""] * (3 - len(parts))
+    start = int(parts[0]) if parts[0] else None
+    stop = int(parts[1]) if parts[1] else None
+    step = int(parts[2]) if parts[2] else None
+    selected = range(*slice(start, stop, step).indices(source_frame_count))
+    if descriptor_index >= len(selected):
+        raise ValueError(f"Descriptor frame {descriptor_index} is outside the sliced trajectory.")
+    return int(selected[descriptor_index])
+
+
 def parse_slice_spec(raw_value: Optional[str]) -> Tuple[Optional[str], int]:
     """
     Parse a slice spec string in the form start:stop:step (each optional).

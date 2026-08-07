@@ -342,7 +342,7 @@ export default function HamiltonianSpectralPage() {
         {systemError ? <ErrorMessage message={systemError} /> : null}
         {dataError ? <ErrorMessage message={dataError} /> : null}
         {jobError ? <ErrorMessage message={jobError} /> : null}
-        {job ? <div className="rounded-lg border border-cyan-800 bg-cyan-950/30 p-3 text-sm text-cyan-100">Job {job.job_id}: {jobStatus?.meta?.status || jobStatus?.status || 'queued'} · progress {Math.round(Number(jobStatus?.meta?.progress || jobStatus?.progress || 0))}%</div> : null}
+        {job ? <div className="rounded-lg border border-cyan-800 bg-cyan-950/30 p-3 text-sm text-cyan-400">Job {job.job_id}: {jobStatus?.meta?.status || jobStatus?.status || 'queued'} · progress {Math.round(Number(jobStatus?.meta?.progress || jobStatus?.progress || 0))}%</div> : null}
 
         <div className="grid grid-cols-1 xl:grid-cols-[330px_minmax(0,1fr)] gap-4">
           <aside className="space-y-3">

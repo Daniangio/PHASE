@@ -10,6 +10,7 @@ import redis
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.exception_handlers import http_exception_handler
+from starlette.middleware.gzip import GZipMiddleware
 from rq import Queue
 
 try:
@@ -109,6 +110,7 @@ app = FastAPI(
     description="API for the PHASE analysis and sampling pipeline.",
     version="0.1.0",
 )
+app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 
 @app.middleware("http")

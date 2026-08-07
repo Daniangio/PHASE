@@ -93,7 +93,7 @@ export default function SystemList({ projectId, systems, onDelete, onClone }) {
                 <div className="pt-1">
                   <Link
                     to={`/projects/${projectId}/systems/${system.system_id}`}
-                    className="text-xs text-cyan-300 hover:text-cyan-200"
+                    className="text-xs text-cyan-300 hover:text-cyan-400"
                   >
                     Open system to add / modify / delete states
                   </Link>
