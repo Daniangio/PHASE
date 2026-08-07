@@ -97,13 +97,17 @@ export default function ResidueSelectionPage() {
   const [blocks, setBlocks] = useState([{ id: crypto.randomUUID(), name: 'block_A', start: '', end: '', residuesText: '' }]);
   const [selectedStateId, setSelectedStateId] = useState('');
   const [viewMode, setViewMode] = useState('reference');
+  const [frameSelectionMode, setFrameSelectionMode] = useState('explicit');
   const [frameSelection, setFrameSelection] = useState('0-100');
+  const [maxFramesPerCluster, setMaxFramesPerCluster] = useState('10');
   const [clusterResidueIndex, setClusterResidueIndex] = useState('0');
+  const [hideLicoriceHydrogens, setHideLicoriceHydrogens] = useState(true);
   const [overlaySummary, setOverlaySummary] = useState(null);
   const [trajectoryFile, setTrajectoryFile] = useState(null);
   const [uploadProgress, setUploadProgress] = useState(null);
   const [pickTarget, setPickTarget] = useState(null); // { blockId, field }
   const [status, setStatus] = useState('initializing');
+  const [viewerInitAttempt, setViewerInitAttempt] = useState(0);
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
   const containerRef = useRef(null);
@@ -139,15 +143,31 @@ export default function ResidueSelectionPage() {
         const plugin = await createPluginUI({ target: containerRef.current, render: renderReact18 });
         if (disposed) { plugin.dispose?.(); return; }
         pluginRef.current = plugin;
+        window.clearTimeout(watchdogTimer);
         setStatus('ready');
       } catch (err) {
+        window.clearTimeout(watchdogTimer);
         setStatus('error');
         setError(err.message || 'Mol* initialization failed.');
       }
     };
-    init();
-    return () => { disposed = true; try { pluginRef.current?.dispose?.(); } catch { /* noop */ } pluginRef.current = null; };
-  }, []);
+    // React StrictMode mounts effects twice in development. Deferring the
+    // expensive initialization avoids constructing and disposing two viewers.
+    const initTimer = window.setTimeout(init, 0);
+    const watchdogTimer = window.setTimeout(() => {
+      if (!disposed && !pluginRef.current) {
+        setStatus('error');
+        setError('Mol* did not initialize within 30 seconds. This happens before any trajectory is loaded and usually indicates a WebGL/browser initialization problem.');
+      }
+    }, 30000);
+    return () => {
+      disposed = true;
+      window.clearTimeout(initTimer);
+      window.clearTimeout(watchdogTimer);
+      try { pluginRef.current?.dispose?.(); } catch { /* noop */ }
+      pluginRef.current = null;
+    };
+  }, [viewerInitAttempt]);
 
   const selectedResidues = useMemo(
     () => selectedResiduesFromBlocks(blocks, clusterInfo?.residue_keys || []),
@@ -224,7 +244,7 @@ export default function ResidueSelectionPage() {
   const states = Object.values(system?.states || {}).filter((s) => s.pdb_file);
   const selectedState = states.find((state) => String(state.state_id) === String(selectedStateId)) || null;
 
-  const loadTrajectoryOverlay = useCallback(async () => {
+  const loadTrajectoryOverlay = useCallback(async ({ align = false } = {}) => {
     if (!selectedClusterId || !selectedStateId || !clusterInfo) return;
     const residueIndex = Number(clusterResidueIndex);
     if (!Number.isInteger(residueIndex) || residueIndex < 0) {
@@ -234,10 +254,15 @@ export default function ResidueSelectionPage() {
     setBusy(true);
     setError(null);
     try {
-      const frames = parseFrameSelection(frameSelection, Number(selectedState?.n_frames || 0));
+      const frames = frameSelectionMode === 'explicit'
+        ? parseFrameSelection(frameSelection, Number(selectedState?.n_frames || 0))
+        : [];
       const result = await fetchStateTrajectoryOverlay(projectId, systemId, selectedClusterId, selectedStateId, {
         frame_indices: frames,
         residue_indices: [residueIndex],
+        frame_selection_mode: frameSelectionMode,
+        max_frames_per_cluster: Number(maxFramesPerCluster),
+        alignment_resids: align ? selectedResidues : [],
       });
       const plugin = pluginRef.current;
       if (!plugin) throw new Error('Mol* is not ready.');
@@ -279,6 +304,7 @@ export default function ResidueSelectionPage() {
         if (residueComponent) {
           await plugin.builders.structure.representation.addRepresentation(residueComponent, {
             type: 'ball-and-stick',
+            typeParams: { ignoreHydrogens: hideLicoriceHydrogens, ignoreHydrogensVariant: 'all' },
             color: 'uniform',
             colorParams: { value: hexToInt(color) },
           });
@@ -290,7 +316,7 @@ export default function ResidueSelectionPage() {
     } finally {
       setBusy(false);
     }
-  }, [clusterInfo, clusterResidueIndex, frameSelection, projectId, selectedClusterId, selectedState, selectedStateId, systemId]);
+  }, [clusterInfo, clusterResidueIndex, frameSelection, frameSelectionMode, hideLicoriceHydrogens, maxFramesPerCluster, projectId, selectedClusterId, selectedResidues, selectedState, selectedStateId, systemId]);
 
   const uploadTrajectory = useCallback(async () => {
     if (!trajectoryFile || !selectedStateId) return;
@@ -316,20 +342,6 @@ export default function ResidueSelectionPage() {
       setBusy(false);
     }
   }, [projectId, selectedClusterId, selectedStateId, systemId, trajectoryFile]);
-
-  const refreshTrajectoryAssignment = useCallback(async () => {
-    if (!selectedClusterId || !selectedStateId) return;
-    setBusy(true);
-    setError(null);
-    try {
-      await assignClusterStates(projectId, systemId, selectedClusterId, [selectedStateId]);
-      setOverlaySummary(null);
-    } catch (err) {
-      setError(err.message || 'Failed to assign trajectory frames to the selected cluster.');
-    } finally {
-      setBusy(false);
-    }
-  }, [projectId, selectedClusterId, selectedStateId, systemId]);
 
   const updateBlock = (id, patch) => setBlocks((prev) => prev.map((b) => (b.id === id ? { ...b, ...patch } : b)));
   const loadSetup = (setup) => {
@@ -440,7 +452,8 @@ export default function ResidueSelectionPage() {
           <div className="rounded-lg border border-gray-800 bg-gray-900/60 p-3">
             <div className="mb-3 flex flex-wrap items-center gap-2">
               <button type="button" onClick={() => setViewMode('reference')} className={`rounded border px-3 py-2 text-xs ${viewMode === 'reference' ? 'border-cyan-500 bg-cyan-950/50 text-cyan-400' : 'border-gray-700 text-gray-300'}`}>Reference structure</button>
-              <button type="button" onClick={() => setViewMode('overlay')} className={`rounded border px-3 py-2 text-xs ${viewMode === 'overlay' ? 'border-cyan-500 bg-cyan-950/50 text-cyan-400' : 'border-gray-700 text-gray-300'}`}>Trajectory overlay</button>
+              <button type="button" onClick={() => setViewMode('overlay')} className={`rounded border px-3 py-2 text-xs ${viewMode === 'overlay' ? 'border-cyan-500 bg-cyan-950/50 text-cyan-400' : 'border-gray-700 text-gray-300'}`}>Trajectory overlay (manual load)</button>
+              <span className="text-[11px] text-gray-500">Initially only the state PDB is loaded. The complete XTC is never downloaded into Mol* automatically.</span>
             </div>
             <div className="mb-3 grid gap-3 rounded border border-gray-800 bg-gray-950/40 p-3 lg:grid-cols-2">
               <label className="text-xs text-gray-400">
@@ -457,10 +470,25 @@ export default function ResidueSelectionPage() {
               ) : (
                 <>
                   <label className="text-xs text-gray-400">
-                    Frames (end-exclusive, maximum 500)
-                    <input value={frameSelection} onChange={(e) => setFrameSelection(e.target.value)} placeholder="0-100 or 0,5,10" className="mt-1 w-full rounded bg-gray-950 border border-gray-700 px-2 py-2 text-sm text-gray-100" />
-                    <span className="mt-1 block text-[11px] text-gray-500">`0-100` loads 100 frames; `500-1000` loads 500. Change the range and refresh.</span>
+                    Frame selection
+                    <select value={frameSelectionMode} onChange={(e) => setFrameSelectionMode(e.target.value)} className="mt-1 w-full rounded bg-gray-950 border border-gray-700 px-2 py-2 text-sm text-gray-100">
+                      <option value="explicit">Explicit frame range</option>
+                      <option value="per_cluster">Up to X frames per residue cluster</option>
+                    </select>
                   </label>
+                  {frameSelectionMode === 'explicit' ? (
+                    <label className="text-xs text-gray-400">
+                      Frames (end-exclusive, maximum 500)
+                      <input value={frameSelection} onChange={(e) => setFrameSelection(e.target.value)} placeholder="0-100 or 0,5,10" className="mt-1 w-full rounded bg-gray-950 border border-gray-700 px-2 py-2 text-sm text-gray-100" />
+                      <span className="mt-1 block text-[11px] text-gray-500">`0-100` loads 100 frames; `500-1000` loads 500.</span>
+                    </label>
+                  ) : (
+                    <label className="text-xs text-gray-400">
+                      Maximum frames per cluster
+                      <input type="number" min="1" max="500" value={maxFramesPerCluster} onChange={(e) => setMaxFramesPerCluster(e.target.value)} className="mt-1 w-full rounded bg-gray-950 border border-gray-700 px-2 py-2 text-sm text-gray-100" />
+                      <span className="mt-1 block text-[11px] text-gray-500">Frames are spread across each assigned cluster; the complete overlay remains capped at 500.</span>
+                    </label>
+                  )}
                   <label className="text-xs text-gray-400">
                     Residue colored by cluster
                     <select value={clusterResidueIndex} onChange={(e) => setClusterResidueIndex(e.target.value)} className="mt-1 w-full rounded bg-gray-950 border border-gray-700 px-2 py-2 text-sm text-gray-100">
@@ -471,9 +499,13 @@ export default function ResidueSelectionPage() {
                       ))}
                     </select>
                   </label>
+                  <label className="flex items-center gap-2 text-xs text-gray-300">
+                    <input type="checkbox" checked={hideLicoriceHydrogens} onChange={(e) => setHideLicoriceHydrogens(e.target.checked)} className="h-4 w-4 rounded border-gray-600 bg-gray-900 text-cyan-500" />
+                    Hide hydrogens in residue licorice
+                  </label>
                   <div className="flex flex-wrap items-end gap-2">
-                    <button type="button" onClick={loadTrajectoryOverlay} disabled={busy} className="rounded bg-cyan-600 px-4 py-2 text-sm font-semibold text-white hover:bg-cyan-500 disabled:opacity-50">Refresh overlay</button>
-                    <button type="button" onClick={refreshTrajectoryAssignment} disabled={busy} title="Recompute this state's cluster labels after replacing descriptors or a trajectory." className="rounded border border-gray-700 px-3 py-2 text-xs text-gray-200 disabled:opacity-50">Reassign clusters</button>
+                    <button type="button" onClick={() => loadTrajectoryOverlay()} disabled={busy} className="rounded bg-cyan-600 px-4 py-2 text-sm font-semibold text-white hover:bg-cyan-500 disabled:opacity-50">Refresh overlay</button>
+                    <button type="button" onClick={() => loadTrajectoryOverlay({ align: true })} disabled={busy || selectedResidues.length === 0} title={selectedResidues.length ? `Align all frames on ${selectedResidues.length} currently selected residue(s).` : 'Create or load a residue selection first.'} className="rounded border border-cyan-500/70 px-3 py-2 text-xs text-cyan-200 disabled:opacity-40">Align on selection & refresh</button>
                   </div>
                 </>
               )}
@@ -491,6 +523,8 @@ export default function ResidueSelectionPage() {
             {viewMode === 'overlay' && overlaySummary ? (
               <div className="mb-3 rounded border border-gray-800 bg-gray-950/50 p-3 text-xs text-gray-300">
                 <div className="font-semibold text-gray-100">{overlaySummary.residueKey} across {overlaySummary.structures?.length || 0} structures</div>
+                {overlaySummary.frame_selection_mode === 'per_cluster' ? <p className="mt-1 text-gray-400">Balanced frame selection: {Object.entries(overlaySummary.selected_cluster_counts || {}).map(([clusterId, count]) => `c${clusterId}: ${count}`).join(' · ')}</p> : null}
+                {overlaySummary.alignment_resids?.length ? <p className="mt-1 text-cyan-300">Aligned on current residue selection: {overlaySummary.alignment_resids.join(', ')}</p> : null}
                 <div className="mt-2 flex flex-wrap gap-3">
                   {Array.from(new Set((overlaySummary.structures || []).map((item) => Number(item?.clusters?.[String(overlaySummary.residueIndex)] ?? -1)))).sort((a, b) => a - b).map((clusterId) => (
                     <span key={clusterId} className="inline-flex items-center gap-1.5">
@@ -503,7 +537,13 @@ export default function ResidueSelectionPage() {
               </div>
             ) : null}
             <div className="relative h-[70vh] min-h-[520px] overflow-hidden rounded border border-gray-800 bg-black/30">
-              {(status !== 'ready' || busy) ? <div className="absolute inset-0 z-10 flex items-center justify-center bg-black/50"><Loader message={busy ? (uploadProgress !== null ? 'Uploading and assigning trajectory...' : 'Loading structures...') : 'Initializing viewer...'} /></div> : null}
+              {(status === 'initializing' || busy) ? <div className="absolute inset-0 z-10 flex items-center justify-center bg-black/50"><Loader message={busy ? (uploadProgress !== null ? 'Uploading and assigning trajectory...' : 'Loading selected trajectory frames...') : 'Initializing Mol* for the reference PDB (trajectory not loaded)...'} /></div> : null}
+              {status === 'error' ? (
+                <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 bg-black/70 px-6 text-center">
+                  <p className="max-w-xl text-sm text-red-200">Mol* could not initialize. No trajectory has been requested at this stage.</p>
+                  <button type="button" onClick={() => { setError(null); setStatus('initializing'); setViewerInitAttempt((value) => value + 1); }} className="rounded border border-cyan-500 px-3 py-2 text-xs text-cyan-200">Retry viewer</button>
+                </div>
+              ) : null}
               <div ref={containerRef} className="h-full w-full" />
             </div>
           </div>

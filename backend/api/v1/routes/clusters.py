@@ -39,6 +39,7 @@ from backend.tasks import run_backmapping_job, run_cluster_job, run_sample_backm
 from phase.potts.potts_model import interpolate_potts_models, load_potts_model, save_potts_model, zero_sum_gauge_model
 from phase.potts.analysis_run import load_endpoint_framewise_payload
 from phase.common.slice_utils import descriptor_frame_to_source_frame
+from phase.common.frame_utils import select_frames_per_cluster
 
 
 router = APIRouter()
@@ -805,20 +806,30 @@ async def get_state_trajectory_overlay(
     """Return a small set of PDB frames and cluster labels for browser overlays."""
     raw_frames = (payload or {}).get("frame_indices") or []
     raw_residues = (payload or {}).get("residue_indices") or []
-    if not isinstance(raw_frames, list) or not isinstance(raw_residues, list):
-        raise HTTPException(status_code=400, detail="frame_indices and residue_indices must be lists.")
+    raw_alignment_resids = (payload or {}).get("alignment_resids") or []
+    selection_mode = str((payload or {}).get("frame_selection_mode") or "explicit").strip().lower()
+    if selection_mode not in {"explicit", "per_cluster"}:
+        raise HTTPException(status_code=400, detail="frame_selection_mode must be explicit or per_cluster.")
+    if not isinstance(raw_frames, list) or not isinstance(raw_residues, list) or not isinstance(raw_alignment_resids, list):
+        raise HTTPException(status_code=400, detail="Frame, residue, and alignment selections must be lists.")
     try:
         frame_indices = list(dict.fromkeys(int(v) for v in raw_frames))
         residue_indices = list(dict.fromkeys(int(v) for v in raw_residues))
+        alignment_resids = list(dict.fromkeys(int(v) for v in raw_alignment_resids))
+        max_frames_per_cluster = int((payload or {}).get("max_frames_per_cluster") or 10)
     except (TypeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail="Frame and residue indices must be integers.") from exc
-    if not frame_indices:
+    if selection_mode == "explicit" and not frame_indices:
         raise HTTPException(status_code=400, detail="Select at least one frame.")
     if len(frame_indices) > 500:
         raise HTTPException(status_code=400, detail="At most 500 frames can be overlaid at once.")
+    if max_frames_per_cluster < 1 or max_frames_per_cluster > 500:
+        raise HTTPException(status_code=400, detail="max_frames_per_cluster must be between 1 and 500.")
     if len(residue_indices) > 20:
         raise HTTPException(status_code=400, detail="At most 20 residues can be colored at once.")
-    if any(v < 0 for v in frame_indices + residue_indices):
+    if len(alignment_resids) > 500:
+        raise HTTPException(status_code=400, detail="At most 500 residues can define the alignment selection.")
+    if any(v < 0 for v in frame_indices + residue_indices + alignment_resids):
         raise HTTPException(status_code=400, detail="Frame and residue indices must be non-negative.")
 
     try:
@@ -877,6 +888,22 @@ async def get_state_trajectory_overlay(
         raise HTTPException(status_code=500, detail="State cluster assignments are malformed.")
     if any(v >= labels.shape[1] for v in residue_indices):
         raise HTTPException(status_code=400, detail=f"Residue index must be below {labels.shape[1]}.")
+    selected_cluster_counts: Dict[int, int] = {}
+    if selection_mode == "per_cluster":
+        if len(residue_indices) != 1:
+            raise HTTPException(status_code=400, detail="Per-cluster frame loading requires one selected residue.")
+        try:
+            frame_indices, selected_cluster_counts = select_frames_per_cluster(
+                labels,
+                sample_frames,
+                residue_index=residue_indices[0],
+                max_per_cluster=max_frames_per_cluster,
+                max_total=500,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if not frame_indices:
+            raise HTTPException(status_code=400, detail="The selected residue has no assigned cluster frames.")
     label_rows = {int(frame): idx for idx, frame in enumerate(sample_frames.tolist())}
 
     top_path = project_store.resolve_path(project_id, system_id, state_meta.pdb_file)
@@ -887,18 +914,45 @@ async def get_state_trajectory_overlay(
 
     def _extract() -> tuple[list[dict[str, Any]], int]:
         import MDAnalysis as mda
+        from MDAnalysis.analysis import align as mda_align
 
         universe = mda.Universe(str(top_path), str(traj_path))
         source_count = len(universe.trajectory)
+        source_frames = [
+            descriptor_frame_to_source_frame(
+                descriptor_frame,
+                getattr(state_meta, "slice_spec", None),
+                source_count,
+            )
+            for descriptor_frame in frame_indices
+        ]
+        alignment_group = None
+        reference_center = None
+        reference_coordinates = None
+        if alignment_resids:
+            resid_tokens = " ".join(str(v) for v in alignment_resids)
+            alignment_group = universe.select_atoms(f"backbone and resid {resid_tokens}")
+            if alignment_group.n_atoms < 3:
+                alignment_group = universe.select_atoms(f"name CA and resid {resid_tokens}")
+            if alignment_group.n_atoms < 3:
+                raise ValueError("Alignment selection must contain at least three backbone/CA atoms.")
+            universe.trajectory[source_frames[0]]
+            reference_center = alignment_group.positions.mean(axis=0)
+            reference_coordinates = alignment_group.positions.copy() - reference_center
         results: list[dict[str, Any]] = []
         with tempfile.TemporaryDirectory(prefix="phase-overlay-") as tmp_dir:
-            for descriptor_frame in frame_indices:
-                source_frame = descriptor_frame_to_source_frame(
-                    descriptor_frame,
-                    getattr(state_meta, "slice_spec", None),
-                    source_count,
-                )
+            for descriptor_frame, source_frame in zip(frame_indices, source_frames):
                 universe.trajectory[source_frame]
+                alignment_rmsd = None
+                if alignment_group is not None and reference_coordinates is not None and reference_center is not None:
+                    mobile_center = alignment_group.positions.mean(axis=0)
+                    rotation, alignment_rmsd = mda_align.rotation_matrix(
+                        alignment_group.positions - mobile_center,
+                        reference_coordinates,
+                    )
+                    universe.atoms.translate(-mobile_center)
+                    universe.atoms.rotate(rotation)
+                    universe.atoms.translate(reference_center)
                 pdb_path = Path(tmp_dir) / f"frame-{descriptor_frame}.pdb"
                 universe.atoms.write(str(pdb_path))
                 row = label_rows.get(descriptor_frame)
@@ -909,6 +963,7 @@ async def get_state_trajectory_overlay(
                 results.append({
                     "frame_index": descriptor_frame,
                     "source_frame_index": source_frame,
+                    "alignment_rmsd": float(alignment_rmsd) if alignment_rmsd is not None else None,
                     "clusters": cluster_labels,
                     "pdb": pdb_path.read_text(encoding="utf-8", errors="replace"),
                 })
@@ -928,6 +983,10 @@ async def get_state_trajectory_overlay(
         "source_frame_count": source_frame_count,
         "descriptor_frame_count": int(getattr(state_meta, "n_frames", 0) or labels.shape[0]),
         "residue_indices": residue_indices,
+        "frame_selection_mode": selection_mode,
+        "max_frames_per_cluster": max_frames_per_cluster if selection_mode == "per_cluster" else None,
+        "selected_cluster_counts": {str(k): int(v) for k, v in selected_cluster_counts.items()},
+        "alignment_resids": alignment_resids,
         "structures": structures,
     }
 
