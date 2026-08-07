@@ -807,6 +807,8 @@ async def get_state_trajectory_overlay(
     raw_frames = (payload or {}).get("frame_indices") or []
     raw_residues = (payload or {}).get("residue_indices") or []
     raw_alignment_resids = (payload or {}).get("alignment_resids") or []
+    labels_only = bool((payload or {}).get("labels_only", False))
+    map_source_frames = bool((payload or {}).get("map_source_frames", True))
     selection_mode = str((payload or {}).get("frame_selection_mode") or "explicit").strip().lower()
     if selection_mode not in {"explicit", "per_cluster"}:
         raise HTTPException(status_code=400, detail="frame_selection_mode must be explicit or per_cluster.")
@@ -819,9 +821,9 @@ async def get_state_trajectory_overlay(
         max_frames_per_cluster = int((payload or {}).get("max_frames_per_cluster") or 10)
     except (TypeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail="Frame and residue indices must be integers.") from exc
-    if selection_mode == "explicit" and not frame_indices:
+    if selection_mode == "explicit" and not frame_indices and not labels_only:
         raise HTTPException(status_code=400, detail="Select at least one frame.")
-    if len(frame_indices) > 500:
+    if len(frame_indices) > 500 and not labels_only:
         raise HTTPException(status_code=400, detail="At most 500 frames can be overlaid at once.")
     if max_frames_per_cluster < 1 or max_frames_per_cluster > 500:
         raise HTTPException(status_code=400, detail="max_frames_per_cluster must be between 1 and 500.")
@@ -889,7 +891,9 @@ async def get_state_trajectory_overlay(
     if any(v >= labels.shape[1] for v in residue_indices):
         raise HTTPException(status_code=400, detail=f"Residue index must be below {labels.shape[1]}.")
     selected_cluster_counts: Dict[int, int] = {}
-    if selection_mode == "per_cluster":
+    if labels_only:
+        frame_indices = [int(v) for v in sample_frames.tolist()]
+    elif selection_mode == "per_cluster":
         if len(residue_indices) != 1:
             raise HTTPException(status_code=400, detail="Per-cluster frame loading requires one selected residue.")
         try:
@@ -905,6 +909,31 @@ async def get_state_trajectory_overlay(
         if not frame_indices:
             raise HTTPException(status_code=400, detail="The selected residue has no assigned cluster frames.")
     label_rows = {int(frame): idx for idx, frame in enumerate(sample_frames.tolist())}
+
+    if labels_only and not map_source_frames:
+        frame_labels = []
+        for descriptor_frame in frame_indices:
+            row = label_rows.get(descriptor_frame)
+            frame_labels.append({
+                "frame_index": descriptor_frame,
+                "source_frame_index": None,
+                "clusters": {
+                    str(residue_index): int(labels[row, residue_index]) if row is not None else -1
+                    for residue_index in residue_indices
+                },
+            })
+        return {
+            "cluster_id": cluster_id,
+            "state_id": state_id,
+            "sample_id": sample_entry.get("sample_id"),
+            "source_frame_count": None,
+            "descriptor_frame_count": int(getattr(state_meta, "n_frames", 0) or labels.shape[0]),
+            "residue_indices": residue_indices,
+            "frame_selection_mode": "all",
+            "alignment_resids": [],
+            "structures": [],
+            "frame_labels": frame_labels,
+        }
 
     top_path = project_store.resolve_path(project_id, system_id, state_meta.pdb_file)
     traj_ref = state_meta.trajectory_file or state_meta.pdb_file
@@ -926,6 +955,19 @@ async def get_state_trajectory_overlay(
             )
             for descriptor_frame in frame_indices
         ]
+        if labels_only:
+            frame_labels = []
+            for descriptor_frame, source_frame in zip(frame_indices, source_frames):
+                row = label_rows.get(descriptor_frame)
+                frame_labels.append({
+                    "frame_index": descriptor_frame,
+                    "source_frame_index": source_frame,
+                    "clusters": {
+                        str(residue_index): int(labels[row, residue_index]) if row is not None else -1
+                        for residue_index in residue_indices
+                    },
+                })
+            return frame_labels, source_count
         alignment_group = None
         reference_center = None
         reference_coordinates = None
@@ -987,7 +1029,8 @@ async def get_state_trajectory_overlay(
         "max_frames_per_cluster": max_frames_per_cluster if selection_mode == "per_cluster" else None,
         "selected_cluster_counts": {str(k): int(v) for k, v in selected_cluster_counts.items()},
         "alignment_resids": alignment_resids,
-        "structures": structures,
+        "structures": [] if labels_only else structures,
+        "frame_labels": structures if labels_only else [],
     }
 
 
