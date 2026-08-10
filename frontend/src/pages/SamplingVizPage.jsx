@@ -526,17 +526,40 @@ export default function SamplingVizPage() {
     [mdVsSampleAnalyses, mdLabelMode, dropInvalid]
   );
 
+  const analyzedSamplesByModel = useMemo(() => {
+    const byModel = new Map();
+    const sampleById = new Map(sampleEntries.map((sample) => [String(sample.sample_id || ''), sample]));
+    mdVsSampleAnalyses.forEach((analysis) => {
+      const modelId = String(analysis.model_id || '').trim();
+      const sampleId = String(analysis.sample_id || '').trim();
+      const mode = String(analysis.md_label_mode || 'assigned').toLowerCase();
+      if (!modelId || !sampleId || mode !== mdLabelMode || Boolean(analysis.drop_invalid) !== Boolean(dropInvalid)) return;
+      if (!byModel.has(modelId)) byModel.set(modelId, new Map());
+      const sample = sampleById.get(sampleId) || {
+        sample_id: sampleId,
+        name: analysis.sample_name || sampleId,
+        type: analysis.sample_type || 'sample',
+        method: analysis.sample_method || '',
+      };
+      if (String(sample.type || '').toLowerCase() !== 'md_eval') {
+        byModel.get(modelId).set(sampleId, sample);
+      }
+    });
+    return new Map(Array.from(byModel.entries()).map(([modelId, samples]) => [modelId, Array.from(samples.values())]));
+  }, [dropInvalid, mdLabelMode, mdVsSampleAnalyses, sampleEntries]);
+
   const makeDefaultPair = useCallback(
     (modelId) => {
       const modelAnalyses = mdVsSampleAnalyses.filter((a) => a.model_id === modelId);
       const first = modelAnalyses[0];
+      const modelSamples = analyzedSamplesByModel.get(modelId) || [];
       return {
         id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
         mdSampleId: first?.md_sample_id || mdSamples[0]?.sample_id || '',
-        sampleId: first?.sample_id || selectableSamples[0]?.sample_id || '',
+        sampleId: first?.sample_id || modelSamples[0]?.sample_id || '',
       };
     },
-    [mdSamples, mdVsSampleAnalyses, selectableSamples]
+    [analyzedSamplesByModel, mdSamples, mdVsSampleAnalyses]
   );
 
   useEffect(() => {
@@ -544,9 +567,10 @@ export default function SamplingVizPage() {
       const selected = new Set(selectedAnalysisModelIds);
       const next = {};
       selectedAnalysisModelIds.forEach((modelId) => {
+        const modelSamples = analyzedSamplesByModel.get(modelId) || [];
         const retained = Array.isArray(prev[modelId]) ? prev[modelId].filter((pair) => {
           const mdOk = mdSamples.some((s) => s.sample_id === pair.mdSampleId);
-          const sampleOk = selectableSamples.some((s) => s.sample_id === pair.sampleId);
+          const sampleOk = modelSamples.some((s) => s.sample_id === pair.sampleId);
           return mdOk && sampleOk;
         }) : [];
         next[modelId] = retained.length ? retained : [makeDefaultPair(modelId)];
@@ -557,7 +581,7 @@ export default function SamplingVizPage() {
       });
       return next;
     });
-  }, [selectedAnalysisModelIds, mdSamples, selectableSamples, makeDefaultPair]);
+  }, [analyzedSamplesByModel, selectedAnalysisModelIds, mdSamples, makeDefaultPair]);
 
   const jsComparisonItems = useMemo(() => {
     const items = [];
@@ -1345,6 +1369,7 @@ export default function SamplingVizPage() {
             )}
             {selectedAnalysisGroups.map((group) => {
               const pairs = Array.isArray(pairSelections[group.modelId]) ? pairSelections[group.modelId] : [];
+              const modelSelectableSamples = analyzedSamplesByModel.get(group.modelId) || [];
               return (
                 <div key={`pairs:${group.modelId}`} className="rounded-md border border-gray-800 bg-gray-950/40 p-2 space-y-2">
                   <div className="flex items-center justify-between gap-2">
@@ -1396,8 +1421,11 @@ export default function SamplingVizPage() {
                           }))}
                           className="w-full bg-gray-950 border border-gray-700 rounded px-2 py-1.5 text-xs text-white"
                         >
-                          {selectableSamples.map((sample) => <option key={sample.sample_id} value={sample.sample_id}>{sample.name || sample.sample_id}</option>)}
+                          {modelSelectableSamples.map((sample) => <option key={sample.sample_id} value={sample.sample_id}>{sample.name || sample.sample_id}</option>)}
                         </select>
+                        {!modelSelectableSamples.length ? (
+                          <p className="text-[10px] text-amber-300">This analysis has no remaining sampled trajectories.</p>
+                        ) : null}
                         {!meta && (
                           <p className="text-[10px] text-amber-300">No stored JS analysis for this pair/model.</p>
                         )}
