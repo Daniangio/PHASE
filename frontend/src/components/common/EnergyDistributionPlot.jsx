@@ -156,6 +156,8 @@ export function EnergySeriesSelectorButton({
   series,
   selectedIds,
   onChange,
+  onColorChange = null,
+  showColors = false,
   dark = false,
   label = 'Select trajectories',
 }) {
@@ -167,6 +169,7 @@ export function EnergySeriesSelectorButton({
         label: s?.label || s?.name || `series ${idx + 1}`,
         type: s?.type || s?.kind || s?.sample_type || 'sample',
         isMd: isMdEnergySeries(s),
+        color: s?.color || pickEnergyColor(idx),
       })),
     [series]
   );
@@ -232,7 +235,7 @@ export function EnergySeriesSelectorButton({
               ) : (
                 <div className="space-y-2">
                   {entries.map((entry) => (
-                    <label
+                    <div
                       key={entry.id}
                       className="flex items-center justify-between gap-3 rounded-md border border-gray-800 bg-gray-900/60 px-3 py-2 text-sm text-gray-100"
                     >
@@ -240,12 +243,25 @@ export function EnergySeriesSelectorButton({
                         <span className="block truncate">{entry.label}</span>
                         <span className="text-[11px] uppercase tracking-wide text-gray-500">{entry.type}</span>
                       </span>
-                      <input
-                        type="checkbox"
-                        checked={selectedSet.has(entry.id)}
-                        onChange={(event) => setEntry(entry.id, event.target.checked)}
-                      />
-                    </label>
+                      <span className="flex items-center gap-3">
+                        {showColors && onColorChange ? (
+                          <input
+                            type="color"
+                            value={entry.color}
+                            onChange={(event) => onColorChange(entry.id, event.target.value)}
+                            className="h-7 w-9 cursor-pointer rounded border border-gray-700 bg-transparent p-0.5"
+                            title={`Color for ${entry.label}`}
+                            aria-label={`Color for ${entry.label}`}
+                          />
+                        ) : null}
+                        <input
+                          type="checkbox"
+                          checked={selectedSet.has(entry.id)}
+                          onChange={(event) => setEntry(entry.id, event.target.checked)}
+                          aria-label={`Show ${entry.label}`}
+                        />
+                      </span>
+                    </div>
                   ))}
                 </div>
               )}

@@ -9,6 +9,7 @@ import HelpDrawer from '../components/common/HelpDrawer';
 import EnergyDistributionPlot, {
   EnergySeriesSelectorButton,
   buildEnergyDistributionPlot,
+  pickEnergyColor,
   useEnergySeriesSelection,
 } from '../components/common/EnergyDistributionPlot';
 import { deleteClusterAnalysis, fetchClusterAnalyses, fetchClusterAnalysisData, fetchClusterUiSetups, fetchPottsClusterInfo, fetchSystem } from '../api/projects';
@@ -191,6 +192,7 @@ export default function DeltaEvalPage() {
   const [residueLimit, setResidueLimit] = useState(60);
   const [edgeLimit, setEdgeLimit] = useState(80);
   const [deltaEnergyGraphMode, setDeltaEnergyGraphMode] = useState('histogram');
+  const [deltaEnergySeriesColors, setDeltaEnergySeriesColors] = useState({});
   const [activeTab, setActiveTab] = useState('delta_energy');
   const [runPanelOpen, setRunPanelOpen] = useState(false);
   const [deltaEnergySeed, setDeltaEnergySeed] = useState(0);
@@ -770,16 +772,20 @@ export default function DeltaEvalPage() {
       : [];
     const hist = Array.isArray(analysisData?.data?.delta_energy_hist) ? analysisData.data.delta_energy_hist : [];
     if (bins.length < 2 || !hist.length) return [];
-    return hist.map((row, idx) => ({
-      id: sampleIds[idx] || `sample-${idx + 1}`,
-      sample_id: sampleIds[idx] || '',
-      label: sampleLabels[idx] || sampleIds[idx] || `sample ${idx + 1}`,
-      kind: sampleTypes[idx] || 'sample',
-      type: sampleTypes[idx] || 'sample',
-      bins,
-      density: Array.isArray(row) ? row.map(Number) : [],
-    }));
-  }, [analysisData, sampleLabels, sampleIds, sampleTypes]);
+    return hist.map((row, idx) => {
+      const id = sampleIds[idx] || `sample-${idx + 1}`;
+      return {
+        id,
+        sample_id: sampleIds[idx] || '',
+        label: sampleLabels[idx] || sampleIds[idx] || `sample ${idx + 1}`,
+        kind: sampleTypes[idx] || 'sample',
+        type: sampleTypes[idx] || 'sample',
+        bins,
+        density: Array.isArray(row) ? row.map(Number) : [],
+        color: deltaEnergySeriesColors[id] || pickEnergyColor(idx),
+      };
+    });
+  }, [analysisData, deltaEnergySeriesColors, sampleLabels, sampleIds, sampleTypes]);
 
   const {
     selectedIds: selectedDeltaEnergySeriesIds,
@@ -1382,6 +1388,11 @@ export default function DeltaEvalPage() {
                       series={deltaEnergySeries}
                       selectedIds={selectedDeltaEnergySeriesIds}
                       onChange={setSelectedDeltaEnergySeriesIds}
+                      showColors
+                      onColorChange={(seriesId, color) => setDeltaEnergySeriesColors((previous) => ({
+                        ...previous,
+                        [seriesId]: color,
+                      }))}
                       dark
                     />
                   </div>
