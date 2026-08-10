@@ -173,6 +173,7 @@ export default function SamplingVizPage() {
   const [analysisContactCutoff, setAnalysisContactCutoff] = useState('10');
   const [analysisContactAtomMode, setAnalysisContactAtomMode] = useState('CA');
   const [edgeDisplayMode, setEdgeDisplayMode] = useState('all');
+  const [edgeColorScale, setEdgeColorScale] = useState('Viridis');
 
   const [selectedMdSampleId, setSelectedMdSampleId] = useState('');
   const [selectedSampleId, setSelectedSampleId] = useState('');
@@ -1480,6 +1481,24 @@ export default function SamplingVizPage() {
                 >
                   Edges
                 </button>
+                {activeJsSubtab === 'edges' ? (
+                  <label className="flex items-center gap-2 text-xs text-gray-400">
+                    Color scale
+                    <select
+                      value={edgeColorScale}
+                      onChange={(event) => setEdgeColorScale(event.target.value)}
+                      className="rounded-md border border-gray-700 bg-gray-950 px-2 py-1.5 text-xs text-gray-100"
+                    >
+                      <option value="Viridis">Viridis</option>
+                      <option value="Cividis">Cividis</option>
+                      <option value="Plasma">Plasma</option>
+                      <option value="Inferno">Inferno</option>
+                      <option value="Magma">Magma</option>
+                      <option value="Turbo">Turbo</option>
+                      <option value="Blues">Blues</option>
+                    </select>
+                  </label>
+                ) : null}
               </div>
             </div>
 
@@ -1568,7 +1587,7 @@ export default function SamplingVizPage() {
                                   x: residueLabels,
                                   y: residueLabels,
                                   type: 'heatmap',
-                                  colorscale: 'Viridis',
+                                  colorscale: edgeColorScale,
                                   zmin: 0,
                                   zmax: globalEdgeJsMax,
                                   hovertemplate: 'x: %{x}<br>y: %{y}<br>JS: %{z:.4f}<extra></extra>',
@@ -1596,7 +1615,7 @@ export default function SamplingVizPage() {
                               x: residueLabels,
                               y: residueLabels,
                               type: 'heatmap',
-                              colorscale: 'Viridis',
+                              colorscale: edgeColorScale,
                               zmin: 0,
                               zmax: globalEdgeJsMax,
                               colorbar: { title: 'JS' },
