@@ -65,7 +65,7 @@ This avoids the old failure mode where parameters were projected in place after 
 ## Standard fit parameters
 
 - `plm-epochs`: number of PLM epochs.
-- `plm-lr`: Adam learning rate.
+- `plm-lr`: AdamW learning rate (default `1e-3`).
 - `plm-lr-min`: minimum learning rate for cosine decay.
 - `plm-lr-schedule`: `cosine` or `none`.
 - `plm-l2`: L2 penalty weight on the effective PLM parameters.
@@ -78,12 +78,14 @@ This avoids the old failure mode where parameters were projected in place after 
 - `plm-init-model`: model used when `plm-init=model`.
 - `plm-resume-model`: continue optimizing an existing model in place.
 - `plm-val-frac`: optional validation fraction. When set, PHASE keeps the best validation checkpoint.
+
+PHASE uses AdamW for both standard and delta Potts fitting with `betas=(0.9, 0.999)`, `eps=1e-8`, and decoupled `weight_decay=1e-2`. Explicit PLM/delta L2 and group penalties remain separate model regularizers.
 - `unassigned-policy`: how `-1` labels are handled before fitting.
 
 ## Delta fit parameters
 
 - `delta-epochs`: number of epochs.
-- `delta-lr`: Adam learning rate.
+- `delta-lr`: AdamW learning rate (default `1e-3`).
 - `delta-lr-min`: minimum learning rate for cosine decay.
 - `delta-lr-schedule`: `cosine` or `none`.
 - `delta-batch-size`: micro-batch size.

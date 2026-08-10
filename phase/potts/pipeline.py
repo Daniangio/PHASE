@@ -1113,8 +1113,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--fit", default="pmi+plm", choices=["pmi", "plm", "pmi+plm"])
     ap.add_argument("--beta", type=float, default=1.0)
     ap.add_argument("--plm-epochs", type=int, default=200)
-    ap.add_argument("--plm-lr", type=float, default=1e-2)
-    ap.add_argument("--plm-lr-min", type=float, default=1e-3)
+    ap.add_argument("--plm-lr", type=float, default=1e-3)
+    ap.add_argument("--plm-lr-min", type=float, default=1e-5)
     ap.add_argument("--plm-lr-schedule", type=str, default="cosine", choices=["cosine", "none"])
     ap.add_argument("--plm-l2", type=float, default=1e-5)
     ap.add_argument("--plm-lambda", type=float, default=1e-3)
@@ -1577,6 +1577,8 @@ def run_pipeline(
                     "plm_init_model": plm_init_model or None,
                     "plm_resume_model": plm_resume_model or None,
                     "plm_val_frac": float(plm_val_frac),
+                    "optimizer": "AdamW",
+                    "optimizer_weight_decay": 1e-2,
                 }
                 best_model_path = model_out_path
                 if show_batch_progress:
@@ -1671,6 +1673,8 @@ def run_pipeline(
         "plm_init_model": plm_init_model or None,
         "plm_resume_model": plm_resume_model or None,
         "plm_val_frac": float(plm_val_frac),
+        "optimizer": "AdamW" if args.fit in ("plm", "pmi+plm") else None,
+        "optimizer_weight_decay": 1e-2 if args.fit in ("plm", "pmi+plm") else None,
     }
     if best_plm_loss is not None:
         metadata["plm_best_loss"] = float(best_plm_loss)

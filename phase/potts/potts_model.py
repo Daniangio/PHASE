@@ -295,8 +295,8 @@ def fit_potts_pseudolikelihood_torch(
     l2: float = 1e-5,
     lambda_J_block: float = 1e-4,
     zero_sum_gauge: bool = True,
-    lr: float = 1e-2,
-    lr_min: float = 1e-4,
+    lr: float = 1e-3,
+    lr_min: float = 1e-5,
     lr_schedule: str = "cosine",
     epochs: int = 200,
     batch_size: int = 512,
@@ -379,8 +379,15 @@ def fit_potts_pseudolikelihood_torch(
             raise ValueError("val_labels must match shape (T_val, N).")
         X_val = torch.tensor(val_labels, dtype=torch.long, device=torch_device)
 
-    opt_weight_decay = 0.0 if zero_sum_gauge else float(l2)
-    opt = torch.optim.Adam(list(h_params) + list(J_params.values()), lr=lr, weight_decay=opt_weight_decay)
+    # Keep model regularizers in the objective and use AdamW's standard
+    # decoupled weight decay independently of the selected gauge.
+    opt = torch.optim.AdamW(
+        list(h_params) + list(J_params.values()),
+        lr=lr,
+        betas=(0.9, 0.999),
+        eps=1e-8,
+        weight_decay=1e-2,
+    )
     schedule = lr_schedule.lower() if lr_schedule else "none"
     scheduler = None
     if schedule == "cosine":
@@ -430,7 +437,7 @@ def fit_potts_pseudolikelihood_torch(
     def _loss_for_batch(xb: "torch.Tensor") -> "torch.Tensor":
         h_view, J_view = _parameter_views()
         loss = _data_loss_from_views(xb, h_view, J_view)
-        if zero_sum_gauge and l2 > 0:
+        if l2 > 0:
             reg_l2 = torch.tensor(0.0, device=torch_device)
             for hr in h_view:
                 reg_l2 = reg_l2 + torch.sum(hr * hr)
@@ -717,7 +724,13 @@ def fit_potts_delta_pseudolikelihood_torch(
     X = torch.tensor(labels, dtype=torch.long, device=torch_device)
     loss_fn = torch.nn.CrossEntropyLoss()
 
-    opt = torch.optim.Adam(list(delta_h) + list(delta_J.values()), lr=lr, weight_decay=0.0)
+    opt = torch.optim.AdamW(
+        list(delta_h) + list(delta_J.values()),
+        lr=lr,
+        betas=(0.9, 0.999),
+        eps=1e-8,
+        weight_decay=1e-2,
+    )
     schedule = lr_schedule.lower() if lr_schedule else "none"
     scheduler = None
     if schedule == "cosine":

@@ -270,6 +270,8 @@ def main(argv: list[str] | None = None) -> int:
         rel_model_path = _relativize_path(str(model_path), system_dir)
 
         params = {
+            "optimizer": "AdamW",
+            "optimizer_weight_decay": 1e-2,
             "fit_mode": "delta",
             "delta_kind": kind,
             "base_model": _relativize_path(str(base_model_path), system_dir),
