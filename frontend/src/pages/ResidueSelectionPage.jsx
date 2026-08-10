@@ -295,7 +295,12 @@ export default function ResidueSelectionPage() {
     [blocks, clusterInfo]
   );
 
-  const getBase = useCallback(() => pluginRef.current?.managers?.structure?.hierarchy?.current?.structures?.[0]?.components?.[0]?.cell || null, []);
+  const getBase = useCallback(() => {
+    const components = pluginRef.current?.managers?.structure?.hierarchy?.current?.structures?.[0]?.components;
+    if (!Array.isArray(components)) return null;
+    // Overpaint helpers expect the hierarchy component wrapper, not its cell.
+    return components.find((component) => Array.isArray(component?.representations)) || null;
+  }, []);
 
   const applyHighlight = useCallback(async () => {
     const plugin = pluginRef.current;
@@ -313,10 +318,17 @@ export default function ResidueSelectionPage() {
       const sel = Script.getStructureSelection(expression, rootStructure);
       if (StructureSelection.unionStructure(sel).elementCount === 0) return;
     }
-    await setStructureOverpaint(plugin, [base], hexToInt('#22d3ee'), async (structure) => {
-      const sel = Script.getStructureSelection(expression, structure);
-      return StructureSelection.toLociWithSourceUnits(sel);
-    }, ['cartoon']);
+    try {
+      await setStructureOverpaint(plugin, [base], hexToInt('#22d3ee'), async (structure) => {
+        const sel = Script.getStructureSelection(expression, structure);
+        return StructureSelection.toLociWithSourceUnits(sel);
+      }, ['cartoon']);
+    } catch (err) {
+      // Ignore a stale hierarchy while Mol* is replacing the reference model.
+      if (pluginRef.current === plugin && status === 'ready') {
+        console.warn('Failed to update residue-selection overpaint', err);
+      }
+    }
   }, [getBase, selectedResidues, status, viewMode]);
 
   const loadStructure = useCallback(async () => {
