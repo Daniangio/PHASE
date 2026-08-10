@@ -450,15 +450,48 @@ export function buildEnergyDistributionPlot({
   };
 }
 
-export default function EnergyDistributionPlot({ plot, height = 300, foreground = 'auto' }) {
+export default function EnergyDistributionPlot({ plot, height = 300, foreground = 'auto', frameMarker = null }) {
   if (!plot) return null;
   const transparentOrDark = String(plot.layout?.paper_bgcolor || '').toLowerCase() !== '#ffffff';
   const useDarkForeground = foreground === 'dark' || (foreground === 'auto' && !transparentOrDark);
+  const markerValue = Number(frameMarker?.value);
+  const markerColor = frameMarker?.color || '#f59e0b';
+  const markerVisible = Number.isFinite(markerValue);
+  const markerShapes = markerVisible ? [{
+    type: 'line',
+    xref: 'x',
+    yref: 'paper',
+    x0: markerValue,
+    x1: markerValue,
+    y0: 0,
+    y1: 1,
+    line: { color: markerColor, width: 3, dash: 'dash' },
+  }] : [];
+  const markerAnnotations = markerVisible ? [{
+    x: markerValue,
+    y: 1,
+    xref: 'x',
+    yref: 'paper',
+    xanchor: 'left',
+    yanchor: 'bottom',
+    text: frameMarker?.label || `Current frame: ${markerValue.toFixed(3)}`,
+    showarrow: false,
+    font: { size: 11, color: markerColor },
+    bgcolor: transparentOrDark ? 'rgba(17,24,39,0.9)' : 'rgba(255,255,255,0.9)',
+    bordercolor: markerColor,
+    borderwidth: 1,
+    borderpad: 3,
+  }] : [];
   return (
     <div className={`energy-distribution-plot ${useDarkForeground ? 'energy-distribution-plot--dark-foreground' : 'energy-distribution-plot--light-foreground'}`}>
       <Plot
         data={plot.data}
-        layout={{ ...plot.layout, height }}
+        layout={{
+          ...plot.layout,
+          height,
+          shapes: [...(plot.layout?.shapes || []), ...markerShapes],
+          annotations: [...(plot.layout?.annotations || []), ...markerAnnotations],
+        }}
         config={plot.config || { displayModeBar: false, responsive: true }}
         useResizeHandler
         style={{ width: '100%', height: `${height}px` }}

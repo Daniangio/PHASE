@@ -187,6 +187,8 @@ export function fetchClusterAnalysisData(projectId, systemId, clusterId, analysi
   if (options?.sampleSeed != null) params.set('sample_seed', String(Number(options.sampleSeed)));
   if (options?.summaryOnly) params.set('summary_only', '1');
   if (options?.residueSelectionSetupId) params.set('residue_selection_setup_id', String(options.residueSelectionSetupId));
+  if (options?.includeFrameValues) params.set('include_frame_values', '1');
+  if (options?.sampleId) params.set('sample_id', String(options.sampleId));
   const q = params.toString();
   return requestJSON(
     `/projects/${projectId}/systems/${systemId}/metastable/clusters/${clusterId}/analyses/${analysisType}/${analysisId}/data${q ? `?${q}` : ''}`

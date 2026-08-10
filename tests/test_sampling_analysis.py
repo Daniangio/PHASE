@@ -442,7 +442,10 @@ def test_run_potts_analysis_job_uses_distributed_rq_workers(tmp_path, monkeypatc
 
 
 def test_downsample_model_energy_payload_limits_rows_and_is_reproducible():
-    payload = {"energies": np.arange(100, dtype=float)}
+    payload = {
+        "energies": np.arange(100, dtype=float),
+        "frame_indices": np.arange(100, dtype=np.int64) * 5,
+    }
     out_a = downsample_model_energy_payload(payload, row_limit=15, seed=7)
     out_b = downsample_model_energy_payload(payload, row_limit=15, seed=7)
 
@@ -450,6 +453,10 @@ def test_downsample_model_energy_payload_limits_rows_and_is_reproducible():
     assert np.asarray(out_a["sampled_row_indices"]).shape == (15,)
     assert np.array_equal(np.asarray(out_a["energies"]), np.asarray(out_b["energies"]))
     assert np.array_equal(np.asarray(out_a["sampled_row_indices"]), np.asarray(out_b["sampled_row_indices"]))
+    assert np.array_equal(
+        np.asarray(out_a["frame_indices"]),
+        np.asarray(out_a["sampled_row_indices"], dtype=np.int64) * 5,
+    )
     assert int(np.asarray(out_a["sampled_row_count"]).ravel()[0]) == 15
     assert int(np.asarray(out_a["original_row_count"]).ravel()[0]) == 100
     assert int(np.asarray(out_a["downsampled"]).ravel()[0]) == 1

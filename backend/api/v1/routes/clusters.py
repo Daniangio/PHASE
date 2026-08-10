@@ -38,6 +38,7 @@ from phase.workflows.backmapping import build_backmapping_npz
 from backend.tasks import run_backmapping_job, run_cluster_job, run_sample_backmapping_job
 from phase.potts.potts_model import interpolate_potts_models, load_potts_model, save_potts_model, zero_sum_gauge_model
 from phase.potts.analysis_run import load_endpoint_framewise_payload
+from phase.potts.sample_io import load_sample_npz
 from phase.common.slice_utils import descriptor_frame_to_source_frame
 from phase.common.frame_utils import select_frames_per_cluster
 
@@ -1321,6 +1322,8 @@ async def get_cluster_analysis_data(
     sample_seed: int = 0,
     summary_only: bool = False,
     residue_selection_setup_id: str | None = None,
+    include_frame_values: bool = False,
+    sample_id: str | None = None,
 ):
     try:
         project_store.get_system(project_id, system_id)
@@ -1342,12 +1345,39 @@ async def get_cluster_analysis_data(
     try:
         with np.load(npz_path, allow_pickle=False) as data:
             payload_np: dict[str, np.ndarray] = {key: np.asarray(data[key]) for key in data.files}
-            if str(analysis_type or "").strip().lower() == "potts_nn_mapping":
+            normalized_type = str(analysis_type or "").strip().lower()
+            if normalized_type == "model_energy" and "frame_indices" not in payload_np:
+                # Older energy analyses predate persisted frame indices. Rebuild
+                # the exact row mapping from the source sample so animated
+                # trajectory markers also work for those analyses.
+                energy_rows = int(np.asarray(payload_np.get("energies", [])).shape[0])
+                source_sample_id = str(meta.get("sample_id") or "").strip()
+                if source_sample_id and energy_rows:
+                    try:
+                        sample_entry = project_store.get_sample_entry(project_id, system_id, cluster_id, source_sample_id)
+                        sample_paths = sample_entry.get("paths") if isinstance(sample_entry.get("paths"), dict) else {}
+                        sample_ref = sample_paths.get("summary_npz") or sample_entry.get("path")
+                        sample_path = project_store.resolve_path(project_id, system_id, str(sample_ref))
+                        sample = load_sample_npz(sample_path)
+                        source_frames = (
+                            np.asarray(sample.frame_indices, dtype=np.int64)
+                            if sample.frame_indices is not None and sample.frame_indices.shape[0] == sample.labels.shape[0]
+                            else np.arange(sample.labels.shape[0], dtype=np.int64)
+                        )
+                        if bool(meta.get("drop_invalid", True)) and sample.invalid_mask is not None:
+                            keep = ~np.asarray(sample.invalid_mask, dtype=bool)
+                            if keep.shape[0] == source_frames.shape[0]:
+                                source_frames = source_frames[keep]
+                        if source_frames.shape[0] == energy_rows:
+                            payload_np["frame_indices"] = source_frames
+                    except Exception:
+                        pass
+            if normalized_type == "potts_nn_mapping":
                 if bool(summary_only):
                     payload_np = compact_potts_nn_payload(payload_np)
                 elif max_rows is not None:
                     payload_np = downsample_potts_nn_payload(payload_np, row_limit=int(max_rows), seed=int(sample_seed))
-            elif str(analysis_type or "").strip().lower() == "model_energy" and max_rows is not None:
+            elif normalized_type == "model_energy" and max_rows is not None:
                 payload_np = downsample_model_energy_payload(payload_np, row_limit=int(max_rows), seed=int(sample_seed))
             payload: dict[str, Any] = {}
             for key, value in payload_np.items():
@@ -1365,6 +1395,47 @@ async def get_cluster_analysis_data(
                     payload=payload,
                     energy_bins=int(meta.get("energy_bins") or 80),
                 )
+            if normalized_type == "delta_energy" and include_frame_values and str(sample_id or "").strip():
+                requested_sample_id = str(sample_id).strip()
+                sample_ids = [str(value) for value in payload.get("sample_ids") or []]
+                if requested_sample_id not in sample_ids:
+                    raise HTTPException(status_code=404, detail="Selected sample is not part of this delta-energy analysis.")
+                component_map = meta.get("component_sample_paths") if isinstance(meta.get("component_sample_paths"), dict) else {}
+                component_ref = str(component_map.get(requested_sample_id) or "")
+                if not component_ref:
+                    raise HTTPException(status_code=404, detail="Delta-energy frame components are unavailable for this sample.")
+                component_path = Path(component_ref)
+                if not component_path.is_absolute():
+                    component_path = cluster_dirs["system_dir"] / component_ref
+                if not component_path.exists():
+                    raise HTTPException(status_code=404, detail="Delta-energy frame component file is missing.")
+                with np.load(component_path, allow_pickle=False) as component:
+                    frame_energy = np.asarray(component["delta_energy"], dtype=float)
+                    if "source_frame_indices" in component.files:
+                        source_frames = np.asarray(component["source_frame_indices"], dtype=np.int64)
+                    else:
+                        local_rows = (
+                            np.asarray(component["selected_frame_indices"], dtype=np.int64)
+                            if "selected_frame_indices" in component.files
+                            else np.arange(frame_energy.shape[0], dtype=np.int64)
+                        )
+                        sample_entry = project_store.get_sample_entry(project_id, system_id, cluster_id, requested_sample_id)
+                        sample_paths = sample_entry.get("paths") if isinstance(sample_entry.get("paths"), dict) else {}
+                        sample_ref = sample_paths.get("summary_npz") or sample_entry.get("path")
+                        source_sample = load_sample_npz(project_store.resolve_path(project_id, system_id, str(sample_ref)))
+                        base_frames = (
+                            np.asarray(source_sample.frame_indices, dtype=np.int64)
+                            if source_sample.frame_indices is not None and source_sample.frame_indices.shape[0] == source_sample.labels.shape[0]
+                            else np.arange(source_sample.labels.shape[0], dtype=np.int64)
+                        )
+                        if bool(meta.get("drop_invalid", True)) and source_sample.invalid_mask is not None:
+                            keep = ~np.asarray(source_sample.invalid_mask, dtype=bool)
+                            if keep.shape[0] == base_frames.shape[0]:
+                                base_frames = base_frames[keep]
+                        source_frames = base_frames[local_rows] if local_rows.size and int(np.max(local_rows)) < base_frames.shape[0] else local_rows
+                payload["selected_sample_id"] = requested_sample_id
+                payload["selected_sample_delta_energy"] = frame_energy.tolist()
+                payload["selected_sample_frame_indices"] = source_frames.tolist()
     except HTTPException:
         raise
     except Exception as exc:

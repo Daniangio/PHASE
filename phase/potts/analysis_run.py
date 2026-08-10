@@ -2284,8 +2284,27 @@ def _endpoint_load_labels(
     md_label_mode: str,
     drop_invalid: bool,
 ) -> tuple[np.ndarray, int]:
+    labels, invalid_count, _ = _endpoint_load_labels_with_frames(
+        sample_path=sample_path,
+        md_label_mode=md_label_mode,
+        drop_invalid=drop_invalid,
+    )
+    return labels, invalid_count
+
+
+def _endpoint_load_labels_with_frames(
+    *,
+    sample_path: Path,
+    md_label_mode: str,
+    drop_invalid: bool,
+) -> tuple[np.ndarray, int, np.ndarray]:
     s = load_sample_npz(sample_path)
     X = s.labels
+    frame_indices = (
+        np.asarray(s.frame_indices, dtype=np.int64)
+        if s.frame_indices is not None and s.frame_indices.shape[0] == X.shape[0]
+        else np.arange(X.shape[0], dtype=np.int64)
+    )
     invalid_count = 0
     if md_label_mode in {"halo", "labels_halo"} and s.labels_halo is not None:
         X = s.labels_halo
@@ -2295,7 +2314,8 @@ def _endpoint_load_labels(
         keep = ~invalid_mask
         if keep.shape[0] == X.shape[0]:
             X = X[keep]
-    return np.asarray(X, dtype=int), invalid_count
+            frame_indices = frame_indices[keep]
+    return np.asarray(X, dtype=int), invalid_count, np.asarray(frame_indices, dtype=np.int64)
 
 
 def _endpoint_frustration_sample_worker(payload: dict[str, Any]) -> dict[str, Any]:
@@ -2986,7 +3006,7 @@ def _delta_energy_sample_worker(payload: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("Model sizes do not match.")
     n_residues = int(len(model_a.h))
 
-    labels, invalid_count = _endpoint_load_labels(
+    labels, invalid_count, source_frame_indices = _endpoint_load_labels_with_frames(
         sample_path=sample_path,
         md_label_mode=md_label_mode,
         drop_invalid=drop_invalid,
@@ -3006,6 +3026,7 @@ def _delta_energy_sample_worker(payload: dict[str, Any]) -> dict[str, Any]:
         rng = np.random.default_rng(seed + int(zlib.adler32(sample_id.encode("utf-8"))))
         selected_indices = np.sort(rng.choice(available_frames, size=frame_limit, replace=False)).astype(np.int32)
         labels = labels[selected_indices]
+        source_frame_indices = source_frame_indices[selected_indices]
 
     node_delta, edge_delta, edge_index = _compute_delta_energy_components(labels, model_a, model_b)
     delta_energy = np.asarray(node_delta.sum(axis=1) + edge_delta.sum(axis=1), dtype=np.float32)
@@ -3018,6 +3039,7 @@ def _delta_energy_sample_worker(payload: dict[str, Any]) -> dict[str, Any]:
         "invalid_count": int(invalid_count),
         "frame_limit": int(frame_limit),
         "selected_frame_indices": np.asarray(selected_indices, dtype=np.int32),
+        "source_frame_indices": np.asarray(source_frame_indices, dtype=np.int64),
         "delta_energy": delta_energy,
         "delta_node_energy": node_delta,
         "delta_edge_energy": edge_delta,
@@ -3263,6 +3285,7 @@ def upsert_delta_energy_analysis(
             component_path,
             sample_id=np.asarray([sid], dtype=str),
             selected_frame_indices=np.asarray(row.get("selected_frame_indices", np.zeros((0,), dtype=np.int32)), dtype=np.int32),
+            source_frame_indices=np.asarray(row.get("source_frame_indices", np.zeros((0,), dtype=np.int64)), dtype=np.int64),
             delta_energy=np.asarray(row["delta_energy"], dtype=np.float32),
             delta_node_energy=np.asarray(row.get("delta_node_energy", np.zeros((0, 0), dtype=np.float32)), dtype=np.float32),
             delta_edge_energy=np.asarray(row.get("delta_edge_energy", np.zeros((0, 0), dtype=np.float32)), dtype=np.float32),

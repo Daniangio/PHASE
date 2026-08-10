@@ -106,6 +106,9 @@ def downsample_model_energy_payload(payload_np: dict[str, np.ndarray], *, row_li
     keep_rows = np.sort(rng.choice(row_count, size=int(row_limit), replace=False).astype(np.int32))
     out = dict(payload_np)
     out["energies"] = np.asarray(energies[keep_rows], dtype=energies.dtype)
+    frame_indices = np.asarray(out.get("frame_indices", np.asarray([], dtype=np.int64)))
+    if frame_indices.ndim == 1 and frame_indices.shape[0] == row_count:
+        out["frame_indices"] = np.asarray(frame_indices[keep_rows], dtype=frame_indices.dtype)
     out["sampled_row_indices"] = np.asarray(keep_rows, dtype=np.int32)
     out["sampled_row_count"] = np.asarray([int(keep_rows.shape[0])], dtype=np.int32)
     out["original_row_count"] = np.asarray([row_count], dtype=np.int32)

@@ -409,6 +409,11 @@ def _load_potts_analysis_labels(
         labels = np.asarray(sample_npz.labels_halo, dtype=int)
     else:
         labels = np.asarray(sample_npz.labels, dtype=int)
+    frame_indices = (
+        np.asarray(sample_npz.frame_indices, dtype=np.int64)
+        if sample_npz.frame_indices is not None and sample_npz.frame_indices.shape[0] == labels.shape[0]
+        else np.arange(labels.shape[0], dtype=np.int64)
+    )
     n_frames_total = int(labels.shape[0]) if labels.ndim == 2 else 0
     invalid_count = int(np.count_nonzero(sample_npz.invalid_mask)) if sample_npz.invalid_mask is not None else 0
     reason = None
@@ -416,12 +421,14 @@ def _load_potts_analysis_labels(
         keep = ~np.asarray(sample_npz.invalid_mask, dtype=bool)
         if keep.shape[0] == labels.shape[0]:
             labels = labels[keep]
+            frame_indices = frame_indices[keep]
             if labels.shape[0] == 0 and n_frames_total > 0:
                 reason = "all_frames_invalid"
     if labels.size == 0 and reason is None:
         reason = "empty_labels"
     result = {
         "labels": np.asarray(labels, dtype=int),
+        "frame_indices": np.asarray(frame_indices, dtype=np.int64),
         "reason": reason,
         "info": {
             "n_frames_total": n_frames_total,
@@ -839,6 +846,7 @@ def _potts_analysis_payload_worker(payload: dict[str, Any]) -> dict[str, Any]:
             "kind": "model_energy",
             "sample": sample,
             "energies": np.asarray(energy_payload["energies"], dtype=float),
+            "frame_indices": np.asarray(loaded.get("frame_indices"), dtype=np.int64),
             "summary": {
                 "energy_mean": float(energy_payload["energy_mean"]),
                 "energy_median": float(energy_payload["energy_median"]),
@@ -929,7 +937,11 @@ def aggregate_potts_analysis_batch(
             analysis_dir = energies_root / analysis_id
             analysis_dir.mkdir(parents=True, exist_ok=True)
             npz_path = analysis_dir / "analysis.npz"
-            np.savez_compressed(npz_path, energies=np.asarray(row.get("energies"), dtype=float))
+            np.savez_compressed(
+                npz_path,
+                energies=np.asarray(row.get("energies"), dtype=float),
+                frame_indices=np.asarray(row.get("frame_indices"), dtype=np.int64),
+            )
             sample = row.get("sample") or {}
             meta = {
                 "analysis_id": analysis_id,

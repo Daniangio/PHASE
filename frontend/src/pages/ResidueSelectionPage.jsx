@@ -14,9 +14,12 @@ import 'molstar/build/viewer/molstar.css';
 import Loader from '../components/common/Loader';
 import ErrorMessage from '../components/common/ErrorMessage';
 import ClusterPieChart, { clusterPieColor } from '../components/common/ClusterPieChart';
+import EnergyDistributionPlot, { buildEnergyDistributionPlot } from '../components/common/EnergyDistributionPlot';
 import {
   assignClusterStates,
   deleteClusterUiSetup,
+  fetchClusterAnalyses,
+  fetchClusterAnalysisData,
   fetchClusterUiSetups,
   fetchPottsClusterInfo,
   fetchStateTrajectoryOverlay,
@@ -25,12 +28,36 @@ import {
   uploadStateTrajectory,
 } from '../api/projects';
 
+function energyModelKey(analysis) {
+  const ids = Array.isArray(analysis?.model_ids) && analysis.model_ids.length
+    ? analysis.model_ids.map(String)
+    : [String(analysis?.model_id || '')].filter(Boolean);
+  return `${ids.join('+')}|${analysis?.md_label_mode || 'assigned'}|${Boolean(analysis?.drop_invalid)}`;
+}
+
+function energyModelLabel(analysis) {
+  const names = Array.isArray(analysis?.model_names) && analysis.model_names.length
+    ? analysis.model_names
+    : [analysis?.model_name || analysis?.model_id].filter(Boolean);
+  return names.join(' + ') || 'Unnamed Potts model';
+}
+
 function inferCoordinateFormat(name = '') {
   const extension = String(name || '').split('?')[0].toLowerCase().split('.').pop();
   if (extension === 'dcd') return 'dcd';
   if (extension === 'trr') return 'trr';
   if (extension === 'nc' || extension === 'nctraj') return 'nctraj';
   return 'xtc';
+}
+
+function trajectoryFrameIndex(model) {
+  if (!model) return 0;
+  try {
+    return Number(Model.TrajectoryInfo.get(model)?.index || 0);
+  } catch {
+    // Mol* briefly exposes an incomplete hierarchy while changing frames.
+    return 0;
+  }
 }
 
 function createTrajectoryClusterTheme(frameLabels, residueIndexByResid) {
@@ -52,7 +79,7 @@ function createTrajectoryClusterTheme(frameLabels, residueIndexByResid) {
       location.element = element;
       const resid = Number(StructureProperties.residue.auth_seq_id(location));
       const residueIndex = residueIndexByResid.get(resid);
-      const sourceFrame = Number(Model.TrajectoryInfo.get(unit.model)?.index || 0);
+      const sourceFrame = trajectoryFrameIndex(unit.model);
       const clusterId = Number(labelsBySourceFrame.get(sourceFrame)?.[String(residueIndex)] ?? -1);
       return Color(hexToInt(clusterId >= 0 ? clusterPieColor(clusterId) : '#64748b'));
     };
@@ -65,7 +92,7 @@ function createTrajectoryClusterTheme(frameLabels, residueIndexByResid) {
         return Color(hexToInt('#64748b'));
       },
       props,
-      contextHash: Number(Model.TrajectoryInfo.get(ctx.structure?.models?.[0])?.index || 0),
+      contextHash: trajectoryFrameIndex(ctx.structure?.models?.[0]),
       description: 'Colors selected residues by their PHASE cluster in the current trajectory frame.',
     };
   };
@@ -155,6 +182,16 @@ export default function ResidueSelectionPage() {
   const [overlaySummary, setOverlaySummary] = useState(null);
   const [wholeTrajectoryLoaded, setWholeTrajectoryLoaded] = useState(false);
   const [trajectoryClusterHighlight, setTrajectoryClusterHighlight] = useState(null);
+  const [currentTrajectoryFrame, setCurrentTrajectoryFrame] = useState(0);
+  const [energyAnalyses, setEnergyAnalyses] = useState([]);
+  const [deltaEnergyAnalyses, setDeltaEnergyAnalyses] = useState([]);
+  const [energyAnalysisLoading, setEnergyAnalysisLoading] = useState(false);
+  const [energyViewMode, setEnergyViewMode] = useState('none');
+  const [selectedEnergyModelKey, setSelectedEnergyModelKey] = useState('');
+  const [selectedDeltaEnergyId, setSelectedDeltaEnergyId] = useState('');
+  const [animatedEnergyData, setAnimatedEnergyData] = useState(null);
+  const [animatedEnergyLoading, setAnimatedEnergyLoading] = useState(false);
+  const [animatedEnergyError, setAnimatedEnergyError] = useState(null);
   const [selectionPieProfiles, setSelectionPieProfiles] = useState([]);
   const [pieProfilesLoading, setPieProfilesLoading] = useState(false);
   const [pieProfilesError, setPieProfilesError] = useState(null);
@@ -190,6 +227,17 @@ export default function ResidueSelectionPage() {
     fetchClusterUiSetups(projectId, systemId, selectedClusterId, { setupType: 'residue_selection' })
       .then((res) => setSetups(Array.isArray(res?.setups) ? res.setups : []))
       .catch(() => setSetups([]));
+    setEnergyAnalysisLoading(true);
+    Promise.all([
+      fetchClusterAnalyses(projectId, systemId, selectedClusterId, { analysisType: 'model_energy' }),
+      fetchClusterAnalyses(projectId, systemId, selectedClusterId, { analysisType: 'delta_energy' }),
+    ])
+      .then(([energyResult, deltaResult]) => {
+        setEnergyAnalyses(Array.isArray(energyResult?.analyses) ? energyResult.analyses : []);
+        setDeltaEnergyAnalyses(Array.isArray(deltaResult?.analyses) ? deltaResult.analyses : []);
+      })
+      .catch((err) => setAnimatedEnergyError(err.message || 'Failed to list existing energy analyses.'))
+      .finally(() => setEnergyAnalysisLoading(false));
   }, [projectId, systemId, selectedClusterId]);
 
   useEffect(() => {
@@ -200,10 +248,18 @@ export default function ResidueSelectionPage() {
         const plugin = await createPluginUI({ target: containerRef.current, render: renderReact18 });
         if (disposed) { plugin.dispose?.(); return; }
         pluginRef.current = plugin;
-        window.clearTimeout(watchdogTimer);
         setStatus('ready');
       } catch (err) {
-        window.clearTimeout(watchdogTimer);
+        if (disposed) return;
+        // The first WebGL/plugin construction can fail while development
+        // assets are still being evaluated. A fresh construction succeeds
+        // immediately, so perform that recovery without requiring a click.
+        if (viewerInitAttempt < 1) {
+          setStatus('initializing');
+          setError(null);
+          setViewerInitAttempt((value) => value + 1);
+          return;
+        }
         setStatus('error');
         setError(err.message || 'Mol* initialization failed.');
       }
@@ -211,16 +267,9 @@ export default function ResidueSelectionPage() {
     // React StrictMode mounts effects twice in development. Deferring the
     // expensive initialization avoids constructing and disposing two viewers.
     const initTimer = window.setTimeout(init, 0);
-    const watchdogTimer = window.setTimeout(() => {
-      if (!disposed && !pluginRef.current) {
-        setStatus('error');
-        setError('Mol* did not initialize within 30 seconds. This happens before any trajectory is loaded and usually indicates a WebGL/browser initialization problem.');
-      }
-    }, 30000);
     return () => {
       disposed = true;
       window.clearTimeout(initTimer);
-      window.clearTimeout(watchdogTimer);
       try { pluginRef.current?.dispose?.(); } catch { /* noop */ }
       pluginRef.current = null;
     };
@@ -299,9 +348,160 @@ export default function ResidueSelectionPage() {
     return () => { try { sub?.unsubscribe?.(); } catch { /* noop */ } };
   }, [pickTarget, status]);
 
+  useEffect(() => {
+    if (status !== 'ready' || viewMode !== 'trajectory' || !wholeTrajectoryLoaded) return undefined;
+    let previous = -1;
+    const updateFrame = () => {
+      const model = pluginRef.current?.managers?.structure?.hierarchy?.current?.structures?.[0]?.cell?.obj?.data?.models?.[0];
+      if (!model) return;
+      const frame = trajectoryFrameIndex(model);
+      if (Number.isInteger(frame) && frame !== previous) {
+        previous = frame;
+        setCurrentTrajectoryFrame(frame);
+      }
+    };
+    updateFrame();
+    const timer = window.setInterval(updateFrame, 120);
+    return () => window.clearInterval(timer);
+  }, [status, viewMode, wholeTrajectoryLoaded]);
+
   const clusters = (system?.metastable_clusters || []).filter((c) => c.path && c.status !== 'failed');
   const states = Object.values(system?.states || {}).filter((s) => s.pdb_file);
   const selectedState = states.find((state) => String(state.state_id) === String(selectedStateId)) || null;
+  const selectedCluster = clusters.find((cluster) => String(cluster.cluster_id) === String(selectedClusterId)) || null;
+  const selectedStateMdSample = useMemo(() => {
+    const candidates = (selectedCluster?.samples || []).filter(
+      (sample) => String(sample?.type || '').toLowerCase() === 'md_eval'
+        && String(sample?.state_id || sample?.summary?.state_id || '') === String(selectedStateId)
+    );
+    return [...candidates].sort((a, b) => String(a?.created_at || '').localeCompare(String(b?.created_at || ''))).pop() || null;
+  }, [selectedCluster, selectedStateId]);
+
+  const eligibleEnergyModelGroups = useMemo(() => {
+    if (!selectedStateMdSample?.sample_id) return [];
+    const groups = new Map();
+    energyAnalyses.forEach((analysis) => {
+      if (String(analysis?.sample_id || '') !== String(selectedStateMdSample.sample_id)) return;
+      const key = energyModelKey(analysis);
+      if (!groups.has(key)) groups.set(key, { key, label: energyModelLabel(analysis), anchor: analysis });
+    });
+    return Array.from(groups.values()).sort((a, b) => a.label.localeCompare(b.label));
+  }, [energyAnalyses, selectedStateMdSample]);
+
+  const eligibleDeltaEnergyAnalyses = useMemo(() => {
+    if (!selectedStateMdSample?.sample_id) return [];
+    return deltaEnergyAnalyses.filter((analysis) => (
+      Array.isArray(analysis?.sample_ids) && analysis.sample_ids.map(String).includes(String(selectedStateMdSample.sample_id))
+    ));
+  }, [deltaEnergyAnalyses, selectedStateMdSample]);
+
+  useEffect(() => {
+    if (energyViewMode === 'single') {
+      const allowed = eligibleEnergyModelGroups.map((group) => group.key);
+      if (!allowed.includes(selectedEnergyModelKey)) setSelectedEnergyModelKey(allowed[0] || '');
+    }
+    if (energyViewMode === 'delta') {
+      const allowed = eligibleDeltaEnergyAnalyses.map((analysis) => String(analysis.analysis_id));
+      if (!allowed.includes(selectedDeltaEnergyId)) setSelectedDeltaEnergyId(allowed[0] || '');
+    }
+  }, [eligibleDeltaEnergyAnalyses, eligibleEnergyModelGroups, energyViewMode, selectedDeltaEnergyId, selectedEnergyModelKey]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      setAnimatedEnergyData(null);
+      setAnimatedEnergyError(null);
+      if (!selectedStateMdSample?.sample_id || energyViewMode === 'none') return;
+      setAnimatedEnergyLoading(true);
+      try {
+        if (energyViewMode === 'single' && selectedEnergyModelKey) {
+          const matching = energyAnalyses.filter((analysis) => energyModelKey(analysis) === selectedEnergyModelKey);
+          const payloadRows = await Promise.all(matching.map(async (analysis) => ({
+            analysis,
+            payload: await fetchClusterAnalysisData(
+              projectId,
+              systemId,
+              selectedClusterId,
+              'model_energy',
+              analysis.analysis_id,
+              String(analysis.sample_id) === String(selectedStateMdSample.sample_id) ? {} : { maxRows: 1500, sampleSeed: 0 }
+            ),
+          })));
+          if (cancelled) return;
+          const series = payloadRows.map(({ analysis, payload }) => ({
+            id: analysis.sample_id,
+            label: analysis.sample_name || analysis.sample_id,
+            kind: analysis.sample_type || 'sample',
+            values: payload?.data?.energies || [],
+          })).filter((entry) => entry.values.length);
+          const current = payloadRows.find(({ analysis }) => String(analysis.sample_id) === String(selectedStateMdSample.sample_id));
+          setAnimatedEnergyData({
+            kind: 'single',
+            title: energyModelLabel(current?.analysis || matching[0]),
+            series,
+            frameIndices: current?.payload?.data?.frame_indices || [],
+            frameValues: current?.payload?.data?.energies || [],
+          });
+        } else if (energyViewMode === 'delta' && selectedDeltaEnergyId) {
+          const analysis = eligibleDeltaEnergyAnalyses.find((item) => String(item.analysis_id) === String(selectedDeltaEnergyId));
+          const payload = await fetchClusterAnalysisData(
+            projectId,
+            systemId,
+            selectedClusterId,
+            'delta_energy',
+            selectedDeltaEnergyId,
+            { includeFrameValues: true, sampleId: selectedStateMdSample.sample_id }
+          );
+          if (cancelled) return;
+          const bins = payload?.data?.delta_energy_bins || [];
+          const hist = payload?.data?.delta_energy_hist || [];
+          const ids = payload?.data?.sample_ids || [];
+          const labels = payload?.data?.sample_labels || [];
+          const types = payload?.data?.sample_types || [];
+          setAnimatedEnergyData({
+            kind: 'delta',
+            title: `${analysis?.model_a_name || analysis?.model_a_id || 'Model A'} − ${analysis?.model_b_name || analysis?.model_b_id || 'Model B'}`,
+            series: hist.map((density, index) => ({
+              id: ids[index] || `sample-${index}`,
+              label: labels[index] || ids[index] || `sample ${index + 1}`,
+              kind: types[index] || 'sample',
+              bins,
+              density,
+            })),
+            frameIndices: payload?.data?.selected_sample_frame_indices || [],
+            frameValues: payload?.data?.selected_sample_delta_energy || [],
+          });
+        }
+      } catch (err) {
+        if (!cancelled) setAnimatedEnergyError(err.message || 'Failed to load framewise energy data.');
+      } finally {
+        if (!cancelled) setAnimatedEnergyLoading(false);
+      }
+    };
+    load();
+    return () => { cancelled = true; };
+  }, [eligibleDeltaEnergyAnalyses, energyAnalyses, energyViewMode, projectId, selectedClusterId, selectedDeltaEnergyId, selectedEnergyModelKey, selectedStateMdSample, systemId]);
+
+  const currentFrameEnergy = useMemo(() => {
+    const frames = animatedEnergyData?.frameIndices || [];
+    const values = animatedEnergyData?.frameValues || [];
+    const row = frames.findIndex((frame) => Number(frame) === Number(currentTrajectoryFrame));
+    return row >= 0 && Number.isFinite(Number(values[row])) ? Number(values[row]) : null;
+  }, [animatedEnergyData, currentTrajectoryFrame]);
+
+  const animatedEnergyPlot = useMemo(() => {
+    if (!animatedEnergyData?.series?.length) return null;
+    return buildEnergyDistributionPlot({
+      series: animatedEnergyData.series,
+      mode: 'curves',
+      title: animatedEnergyData.kind === 'delta'
+        ? `Delta energy · ${animatedEnergyData.title}`
+        : `Energy · ${animatedEnergyData.title}`,
+      xTitle: animatedEnergyData.kind === 'delta' ? 'ΔE = E_model_A - E_model_B' : 'Energy',
+      height: 330,
+      background: 'dark',
+    });
+  }, [animatedEnergyData]);
   useEffect(() => {
     let cancelled = false;
     const residueRows = selectedResidues
@@ -441,6 +641,7 @@ export default function ResidueSelectionPage() {
       await plugin.clear();
       const topologyUrl = `/api/v1/projects/${projectId}/systems/${systemId}/structures/${encodeURIComponent(selectedStateId)}`;
       const coordinatesUrl = `/api/v1/projects/${projectId}/systems/${systemId}/states/${encodeURIComponent(selectedStateId)}/trajectory/raw`;
+      let combinedTrajectory = null;
       await plugin.dataTransaction(async () => {
         const modelData = await plugin.builders.data.download(
           { url: Asset.Url(topologyUrl), label: selectedState.pdb_file || 'structure.pdb' },
@@ -456,15 +657,28 @@ export default function ResidueSelectionPage() {
         const provider = plugin.dataFormats.get(format);
         if (!provider) throw new Error(`Mol* does not support trajectory format '${format}'.`);
         const coordinates = await provider.parse(plugin, coordinateData);
-        const trajectory = await plugin.build().toRoot()
+        combinedTrajectory = await plugin.build().toRoot()
           .apply(StateTransforms.Model.TrajectoryFromModelAndCoordinates, {
             modelRef: model.ref,
             coordinatesRef: coordinates.ref,
           }, { dependsOn: [model.ref, coordinates.ref] })
           .commit();
-        await plugin.builders.structure.hierarchy.applyPreset(trajectory, 'default');
       });
+      // Apply the visual preset only after the trajectory transaction commits.
+      // Doing this inside the transaction races Mol*'s hierarchy manager for
+      // large coordinate sets and can leave a valid trajectory with no visible
+      // structure.
+      if (!combinedTrajectory) throw new Error('Mol* did not create the combined trajectory.');
+      await plugin.builders.structure.hierarchy.applyPreset(combinedTrajectory, 'default');
+      await new Promise((resolve) => window.setTimeout(resolve, 0));
+      const loadedStructure = plugin.managers.structure.hierarchy.current.structures?.[0]?.cell?.obj?.data;
+      if (!loadedStructure || !loadedStructure.elementCount) {
+        throw new Error('Mol* loaded the trajectory coordinates but did not create a visible structure.');
+      }
+      plugin.managers.camera.reset(undefined, 0);
+      plugin.canvas3d?.requestDraw?.();
       setWholeTrajectoryLoaded(true);
+      setCurrentTrajectoryFrame(0);
       setOverlaySummary(null);
       setTrajectoryClusterHighlight(null);
     } catch (err) {
@@ -741,6 +955,37 @@ export default function ResidueSelectionPage() {
                     <button type="button" onClick={highlightAnimatedTrajectory} disabled={busy || !wholeTrajectoryLoaded || selectedResidues.length === 0} title={selectedResidues.length ? 'Color the current selection by its cluster at every animated frame.' : 'Create or load a residue selection first.'} className="rounded border border-cyan-500/70 px-3 py-2 text-xs text-cyan-200 disabled:opacity-40">Highlight selection by cluster</button>
                   </div>
                   {trajectoryClusterHighlight ? <p className="text-xs text-cyan-300">Dynamic coloring active for {trajectoryClusterHighlight.residueRows.length} residue(s), with assignments for {trajectoryClusterHighlight.frameCount} descriptor frames.</p> : null}
+                  <label className="text-xs text-gray-400">
+                    Current-frame energy overlay
+                    <select value={energyViewMode} onChange={(e) => setEnergyViewMode(e.target.value)} className="mt-1 w-full rounded bg-gray-950 border border-gray-700 px-2 py-2 text-sm text-gray-100">
+                      <option value="none">None</option>
+                      <option value="single" disabled={!eligibleEnergyModelGroups.length}>Potts energy</option>
+                      <option value="delta" disabled={!eligibleDeltaEnergyAnalyses.length}>Pairwise delta energy</option>
+                    </select>
+                  </label>
+                  {energyViewMode === 'single' ? (
+                    <label className="text-xs text-gray-400">
+                      Existing Sampling Explorer energy model
+                      <select value={selectedEnergyModelKey} onChange={(e) => setSelectedEnergyModelKey(e.target.value)} className="mt-1 w-full rounded bg-gray-950 border border-gray-700 px-2 py-2 text-sm text-gray-100">
+                        {eligibleEnergyModelGroups.map((group) => <option key={group.key} value={group.key}>{group.label}</option>)}
+                      </select>
+                    </label>
+                  ) : null}
+                  {energyViewMode === 'delta' ? (
+                    <label className="text-xs text-gray-400">
+                      Existing model-pair energy analysis
+                      <select value={selectedDeltaEnergyId} onChange={(e) => setSelectedDeltaEnergyId(e.target.value)} className="mt-1 w-full rounded bg-gray-950 border border-gray-700 px-2 py-2 text-sm text-gray-100">
+                        {eligibleDeltaEnergyAnalyses.map((analysis) => (
+                          <option key={analysis.analysis_id} value={analysis.analysis_id}>
+                            {analysis.model_a_name || analysis.model_a_id || 'Model A'} − {analysis.model_b_name || analysis.model_b_id || 'Model B'}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  ) : null}
+                  {!energyAnalysisLoading && !eligibleEnergyModelGroups.length && !eligibleDeltaEnergyAnalyses.length ? (
+                    <p className="text-xs text-gray-500">No existing energy analysis includes this state's assigned MD sample. Run Sampling Explorer or model-pair delta energy first.</p>
+                  ) : null}
                 </>
               )}
             </div>
@@ -781,6 +1026,35 @@ export default function ResidueSelectionPage() {
               <div ref={containerRef} className="h-full w-full" />
             </div>
           </div>
+          {viewMode === 'trajectory' && energyViewMode !== 'none' ? (
+            <section className="rounded-lg border border-gray-800 bg-gray-900/60 p-4">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <h2 className="text-sm font-semibold text-white">Animated-frame energy</h2>
+                  <p className="mt-1 text-xs text-gray-400">
+                    Mol* frame {currentTrajectoryFrame}. The dashed amber marker follows the currently displayed trajectory frame.
+                  </p>
+                </div>
+                <div className="rounded border border-amber-500/40 bg-amber-950/20 px-3 py-2 text-xs text-amber-200">
+                  {currentFrameEnergy === null ? 'This frame has no stored energy value' : `${animatedEnergyData?.kind === 'delta' ? 'ΔE' : 'E'} = ${currentFrameEnergy.toFixed(4)}`}
+                </div>
+              </div>
+              {animatedEnergyLoading ? <div className="py-8"><Loader message="Loading existing energy analysis..." /></div> : null}
+              {animatedEnergyError ? <div className="mt-3"><ErrorMessage message={animatedEnergyError} /></div> : null}
+              {!animatedEnergyLoading && animatedEnergyPlot ? (
+                <div className="mt-3 overflow-hidden rounded border border-gray-800 bg-gray-950/40">
+                  <EnergyDistributionPlot
+                    plot={animatedEnergyPlot}
+                    height={330}
+                    frameMarker={currentFrameEnergy === null ? null : {
+                      value: currentFrameEnergy,
+                      label: `Frame ${currentTrajectoryFrame}: ${animatedEnergyData?.kind === 'delta' ? 'ΔE' : 'E'} ${currentFrameEnergy.toFixed(4)}`,
+                    }}
+                  />
+                </div>
+              ) : null}
+            </section>
+          ) : null}
           <section className="rounded-lg border border-gray-800 bg-gray-900/60 p-4">
             <div>
               <h2 className="text-sm font-semibold text-white">Selected-residue cluster distributions</h2>
