@@ -198,7 +198,7 @@ export default function ResidueSelectionPage() {
   const [trajectoryFile, setTrajectoryFile] = useState(null);
   const [uploadProgress, setUploadProgress] = useState(null);
   const [pickTarget, setPickTarget] = useState(null); // { blockId, field }
-  const [status, setStatus] = useState('initializing');
+  const [status, setStatus] = useState('idle');
   const [viewerInitAttempt, setViewerInitAttempt] = useState(0);
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -206,6 +206,7 @@ export default function ResidueSelectionPage() {
   const pluginRef = useRef(null);
   const trajectoryThemeProviderRef = useRef(null);
   const trajectoryHighlightComponentRef = useRef(null);
+  const viewerGenerationRef = useRef(0);
 
   useEffect(() => {
     fetchSystem(projectId, systemId)
@@ -213,7 +214,9 @@ export default function ResidueSelectionPage() {
         setSystem(data);
         const clusters = (data?.metastable_clusters || []).filter((c) => c.path && c.status !== 'failed');
         if (!selectedClusterId && clusters[0]?.cluster_id) setSelectedClusterId(clusters[0].cluster_id);
-        const states = Object.values(data?.states || {}).filter((s) => s.pdb_file);
+        const states = Object.entries(data?.states || {})
+          .map(([stateId, state]) => ({ ...state, state_id: state?.state_id || stateId }))
+          .filter((state) => state.pdb_file);
         if (states[0]?.state_id) setSelectedStateId(states[0].state_id);
       })
       .catch((err) => setError(err.message || 'Failed to load system.'));
@@ -240,26 +243,37 @@ export default function ResidueSelectionPage() {
       .finally(() => setEnergyAnalysisLoading(false));
   }, [projectId, systemId, selectedClusterId]);
 
+  const viewerCanInitialize = Boolean(selectedStateId);
+
   useEffect(() => {
+    if (!viewerCanInitialize) return undefined;
     let disposed = false;
+    const generation = viewerGenerationRef.current + 1;
+    viewerGenerationRef.current = generation;
     const init = async () => {
       if (!containerRef.current || pluginRef.current) return;
+      setStatus('initializing');
       try {
-        const plugin = await createPluginUI({ target: containerRef.current, render: renderReact18 });
-        if (disposed) { plugin.dispose?.(); return; }
+        let timedOut = false;
+        let timeoutId;
+        const pluginPromise = createPluginUI({ target: containerRef.current, render: renderReact18 })
+          .then((plugin) => {
+            if (timedOut || disposed || generation !== viewerGenerationRef.current) plugin.dispose?.();
+            return plugin;
+          });
+        const timeoutPromise = new Promise((_, reject) => {
+          timeoutId = window.setTimeout(() => {
+            timedOut = true;
+            reject(new Error('Mol* initialization timed out.'));
+          }, 30000);
+        });
+        const plugin = await Promise.race([pluginPromise, timeoutPromise]);
+        window.clearTimeout(timeoutId);
+        if (disposed || generation !== viewerGenerationRef.current) { plugin.dispose?.(); return; }
         pluginRef.current = plugin;
         setStatus('ready');
       } catch (err) {
-        if (disposed) return;
-        // The first WebGL/plugin construction can fail while development
-        // assets are still being evaluated. A fresh construction succeeds
-        // immediately, so perform that recovery without requiring a click.
-        if (viewerInitAttempt < 1) {
-          setStatus('initializing');
-          setError(null);
-          setViewerInitAttempt((value) => value + 1);
-          return;
-        }
+        if (disposed || generation !== viewerGenerationRef.current) return;
         setStatus('error');
         setError(err.message || 'Mol* initialization failed.');
       }
@@ -269,11 +283,12 @@ export default function ResidueSelectionPage() {
     const initTimer = window.setTimeout(init, 0);
     return () => {
       disposed = true;
+      viewerGenerationRef.current += 1;
       window.clearTimeout(initTimer);
       try { pluginRef.current?.dispose?.(); } catch { /* noop */ }
       pluginRef.current = null;
     };
-  }, [viewerInitAttempt]);
+  }, [viewerCanInitialize, viewerInitAttempt]);
 
   const selectedResidues = useMemo(
     () => selectedResiduesFromBlocks(blocks, clusterInfo?.residue_keys || []),
@@ -317,7 +332,6 @@ export default function ResidueSelectionPage() {
         const trajectory = await plugin.builders.structure.parseTrajectory(data, 'pdb');
         await plugin.builders.structure.hierarchy.applyPreset(trajectory, 'default');
       });
-      await applyHighlight();
       setOverlaySummary(null);
       setWholeTrajectoryLoaded(false);
       setTrajectoryClusterHighlight(null);
@@ -326,7 +340,7 @@ export default function ResidueSelectionPage() {
     } finally {
       setBusy(false);
     }
-  }, [applyHighlight, projectId, selectedStateId, systemId]);
+  }, [projectId, selectedStateId, systemId]);
 
   useEffect(() => { if (status === 'ready' && selectedStateId && viewMode === 'reference') loadStructure(); }, [status, selectedStateId, viewMode, loadStructure]);
   useEffect(() => { applyHighlight(); }, [applyHighlight]);
@@ -366,7 +380,9 @@ export default function ResidueSelectionPage() {
   }, [status, viewMode, wholeTrajectoryLoaded]);
 
   const clusters = (system?.metastable_clusters || []).filter((c) => c.path && c.status !== 'failed');
-  const states = Object.values(system?.states || {}).filter((s) => s.pdb_file);
+  const states = Object.entries(system?.states || {})
+    .map(([stateId, state]) => ({ ...state, state_id: state?.state_id || stateId }))
+    .filter((state) => state.pdb_file);
   const selectedState = states.find((state) => String(state.state_id) === String(selectedStateId)) || null;
   const selectedCluster = clusters.find((cluster) => String(cluster.cluster_id) === String(selectedClusterId)) || null;
   const selectedStateMdSample = useMemo(() => {
@@ -1016,7 +1032,7 @@ export default function ResidueSelectionPage() {
               </div>
             ) : null}
             <div className="relative h-[70vh] min-h-[520px] overflow-hidden rounded border border-gray-800 bg-black/30">
-              {(status === 'initializing' || busy) ? <div className="absolute inset-0 z-10 flex items-center justify-center bg-black/50"><Loader message={busy ? (uploadProgress !== null ? 'Uploading and assigning trajectory...' : 'Loading selected trajectory frames...') : 'Initializing Mol* for the reference PDB (trajectory not loaded)...'} /></div> : null}
+              {(status === 'initializing' || busy) ? <div className="absolute inset-0 z-10 flex items-center justify-center bg-black/50"><Loader message={busy ? (uploadProgress !== null ? 'Uploading and assigning trajectory...' : (viewMode === 'reference' ? 'Loading reference PDB...' : 'Loading selected trajectory frames...')) : 'Initializing Mol*...'} /></div> : null}
               {status === 'error' ? (
                 <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 bg-black/70 px-6 text-center">
                   <p className="max-w-xl text-sm text-red-200">Mol* could not initialize. No trajectory has been requested at this stage.</p>
