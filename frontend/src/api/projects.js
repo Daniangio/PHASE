@@ -189,6 +189,10 @@ export function fetchClusterAnalysisData(projectId, systemId, clusterId, analysi
   if (options?.residueSelectionSetupId) params.set('residue_selection_setup_id', String(options.residueSelectionSetupId));
   if (options?.includeFrameValues) params.set('include_frame_values', '1');
   if (options?.sampleId) params.set('sample_id', String(options.sampleId));
+  if (options?.includeRegionalMap) params.set('include_regional_map', '1');
+  if (options?.regionXSetupId) params.set('region_x_setup_id', String(options.regionXSetupId));
+  if (options?.regionYSetupId) params.set('region_y_setup_id', String(options.regionYSetupId));
+  if (options?.regionalMaxPoints != null) params.set('regional_max_points', String(Number(options.regionalMaxPoints)));
   const q = params.toString();
   return requestJSON(
     `/projects/${projectId}/systems/${systemId}/metastable/clusters/${clusterId}/analyses/${analysisType}/${analysisId}/data${q ? `?${q}` : ''}`

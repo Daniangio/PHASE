@@ -15,6 +15,14 @@ export function pickEnergyColor(index) {
   return palette[index % palette.length];
 }
 
+function hexToTransparent(hex, alpha) {
+  const clean = String(hex || '#64748b').replace('#', '');
+  const normalized = clean.length === 3 ? clean.split('').map((value) => `${value}${value}`).join('') : clean;
+  const parsed = Number.parseInt(normalized, 16);
+  if (!Number.isFinite(parsed)) return `rgba(100,116,139,${alpha})`;
+  return `rgba(${(parsed >> 16) & 255},${(parsed >> 8) & 255},${parsed & 255},${alpha})`;
+}
+
 function finiteValues(values) {
   return (Array.isArray(values) ? values : []).map(Number).filter((v) => Number.isFinite(v));
 }
@@ -366,12 +374,13 @@ export function buildEnergyDistributionPlot({
           type: 'histogram',
           histnorm: 'probability density',
           name: `${label} histogram`,
-          opacity: 0.18,
-          marker: { color: '#6b7280', line: { color: '#374151', width: 0.5 } },
+          opacity: 0.16,
+          marker: { color, line: { color: hexToTransparent(color, 0.68), width: 0.7 } },
           autobinx: false,
           xbins: { start: globalMin, end: globalMax, size: binSize },
           bingroup: 'energy-distribution',
           showlegend: false,
+          hovertemplate: `${label}<br>energy: %{x:.3f}<br>density: %{y:.4f}<extra></extra>`,
         });
       } else if (Array.isArray(s.bins)) {
         const density = s.density || s.hist || s.histogram || [];
@@ -389,9 +398,10 @@ export function buildEnergyDistributionPlot({
           width: widths,
           type: 'bar',
           name: `${label} histogram`,
-          opacity: 0.16,
-          marker: { color: '#6b7280', line: { color: '#374151', width: 0.4 } },
+          opacity: 0.14,
+          marker: { color, line: { color: hexToTransparent(color, 0.68), width: 0.6 } },
           showlegend: false,
+          hovertemplate: `${label}<br>energy: %{x:.3f}<br>density: %{y:.4f}<extra></extra>`,
         });
       }
     }
@@ -408,6 +418,7 @@ export function buildEnergyDistributionPlot({
         line: { color, width: 2.5 },
         fill: mode === 'curves' ? 'tozeroy' : undefined,
         fillcolor: mode === 'curves' ? `${color}22` : undefined,
+        hovertemplate: `${label}<br>energy: %{x:.3f}<br>density: %{y:.4f}<extra></extra>`,
       });
     } else {
       const smooth = smoothHistogramCurve(s.bins, s.density || s.hist || s.histogram || []);
@@ -421,6 +432,7 @@ export function buildEnergyDistributionPlot({
           line: { color, width: 2.5 },
           fill: mode === 'curves' ? 'tozeroy' : undefined,
           fillcolor: mode === 'curves' ? `${color}22` : undefined,
+          hovertemplate: `${label}<br>energy: %{x:.3f}<br>density: %{y:.4f}<extra></extra>`,
         });
       }
     }
@@ -437,14 +449,15 @@ export function buildEnergyDistributionPlot({
       height,
       margin: { l: 52, r: 18, t: title ? 34 : 12, b: 48 },
       paper_bgcolor: dark ? 'rgba(0,0,0,0)' : '#ffffff',
-      plot_bgcolor: dark ? 'rgba(0,0,0,0)' : '#ffffff',
+      plot_bgcolor: dark ? 'rgba(2,6,23,0.36)' : '#ffffff',
       font: { color: textColor },
       barmode: 'overlay',
       xaxis: {
         title: { text: xTitle, font: { color: textColor } },
         tickfont: { color: mutedTextColor },
         color: textColor,
-        gridcolor: gridColor,
+        gridcolor: dark ? 'rgba(148,163,184,0.14)' : gridColor,
+        griddash: 'dot',
         zerolinecolor: gridColor,
         zeroline: true,
         range: [x0, x1],
@@ -453,13 +466,23 @@ export function buildEnergyDistributionPlot({
         title: { text: 'Density', font: { color: textColor } },
         tickfont: { color: mutedTextColor },
         color: textColor,
-        gridcolor: gridColor,
+        gridcolor: dark ? 'rgba(148,163,184,0.14)' : gridColor,
+        griddash: 'dot',
         zerolinecolor: gridColor,
         rangemode: 'tozero',
       },
       shapes,
       annotations,
-      legend: { orientation: 'h', y: -0.22, font: { color: textColor } },
+      legend: {
+        orientation: 'h',
+        y: -0.22,
+        x: 0.5,
+        xanchor: 'center',
+        font: { color: textColor },
+        bgcolor: dark ? 'rgba(15,23,42,0.72)' : 'rgba(255,255,255,0.88)',
+        bordercolor: gridColor,
+        borderwidth: 1,
+      },
       hoverlabel: { bgcolor: dark ? '#111827' : '#ffffff', bordercolor: gridColor, font: { color: textColor } },
     },
     config: { displayModeBar: false, responsive: true },

@@ -306,7 +306,12 @@ def _load_residue_selection_setup(project_id: str, system_id: str, cluster_id: s
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to read residue selection setup: {exc}") from exc
     payload = obj.get("payload") if isinstance(obj, dict) else None
-    return payload if isinstance(payload, dict) else {}
+    if not isinstance(payload, dict):
+        return {}
+    result = dict(payload)
+    result.setdefault("name", str(obj.get("name") or sid))
+    result.setdefault("setup_id", sid)
+    return result
 
 
 def _selected_residue_indices_from_setup(payload: dict[str, Any], residue_keys: list[str]) -> set[int]:
@@ -354,6 +359,118 @@ def _selected_residue_indices_from_setup(payload: dict[str, Any], residue_keys: 
                 if idx is not None:
                     selected.add(idx)
     return selected
+
+
+def _regional_delta_energy(
+    node: np.ndarray,
+    edge: np.ndarray,
+    edge_index: np.ndarray,
+    selected: set[int],
+) -> np.ndarray:
+    """Sum node terms in a region and every edge touching that region."""
+    if node.ndim != 2:
+        raise ValueError("Delta-energy node components must be a 2D array.")
+    node_cols = sorted(idx for idx in selected if 0 <= idx < node.shape[1])
+    values = np.sum(node[:, node_cols], axis=1) if node_cols else np.zeros((node.shape[0],), dtype=np.float32)
+    if edge.ndim == 2 and edge_index.ndim == 2 and edge_index.shape[1] == 2 and edge.shape[1] == edge_index.shape[0]:
+        mask = np.asarray([(int(r) in selected) or (int(s) in selected) for r, s in edge_index.tolist()], dtype=bool)
+        if np.any(mask):
+            values = values + np.sum(edge[:, mask], axis=1)
+    return np.asarray(values, dtype=np.float32)
+
+
+def _build_delta_energy_regional_map(
+    *,
+    project_id: str,
+    system_id: str,
+    cluster_id: str,
+    x_setup_id: str,
+    y_setup_id: str,
+    meta: dict[str, Any],
+    payload: dict[str, Any],
+    max_points: int = 1500,
+    seed: int = 0,
+) -> dict[str, Any]:
+    """Load saved frame components and return paired regional scores for plotting."""
+    residue_keys = [str(v) for v in payload.get("residue_keys") or []]
+    if not residue_keys:
+        raise HTTPException(status_code=400, detail="This analysis has no regional energy components. Rerun delta-energy analysis.")
+
+    def resolve_region(setup_id: str, axis_label: str) -> tuple[set[int], str]:
+        sid = str(setup_id or "").strip()
+        if not sid:
+            return set(range(len(residue_keys))), "Whole protein"
+        setup = _load_residue_selection_setup(project_id, system_id, cluster_id, sid)
+        selected = _selected_residue_indices_from_setup(setup, residue_keys)
+        if not selected:
+            raise HTTPException(status_code=400, detail=f"The {axis_label} residue selection did not match this cluster.")
+        return selected, str(setup.get("name") or setup.get("selection_name") or sid)
+
+    selected_x, name_x = resolve_region(x_setup_id, "horizontal")
+    selected_y, name_y = resolve_region(y_setup_id, "vertical")
+    sample_ids = [str(v) for v in payload.get("sample_ids") or []]
+    component_paths = [str(v) for v in payload.get("component_sample_paths") or []]
+    if not component_paths:
+        component_map = meta.get("component_sample_paths") if isinstance(meta.get("component_sample_paths"), dict) else {}
+        component_paths = [str(component_map.get(sid) or "") for sid in sample_ids]
+    if len(component_paths) < len(sample_ids):
+        raise HTTPException(status_code=400, detail="Delta-energy component files are incomplete. Rerun the analysis.")
+
+    system_dir = project_store.ensure_cluster_directories(project_id, system_id, cluster_id)["system_dir"]
+    limit = max(100, min(10000, int(max_points or 1500)))
+    x_values: list[list[float]] = []
+    y_values: list[list[float]] = []
+    x_means: list[float] = []
+    y_means: list[float] = []
+    frame_counts: list[int] = []
+    edge_index_common = np.asarray(payload.get("edge_index") or [], dtype=np.int32)
+    for sample_index, sid in enumerate(sample_ids):
+        rel = component_paths[sample_index]
+        if not rel:
+            raise HTTPException(status_code=400, detail=f"Missing component path for sample {sid}.")
+        path = Path(rel)
+        if not path.is_absolute():
+            path = system_dir / rel
+        if not path.exists():
+            raise HTTPException(status_code=404, detail=f"Missing component file for sample {sid}.")
+        with np.load(path, allow_pickle=False) as data:
+            node = np.asarray(data["delta_node_energy"], dtype=np.float32)
+            edge = np.asarray(data["delta_edge_energy"], dtype=np.float32)
+            edge_index = np.asarray(data["edge_index"], dtype=np.int32) if "edge_index" in data.files else edge_index_common
+        try:
+            values_x = _regional_delta_energy(node, edge, edge_index, selected_x)
+            values_y = _regional_delta_energy(node, edge, edge_index, selected_y)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid regional components for sample {sid}: {exc}") from exc
+        count = min(values_x.shape[0], values_y.shape[0])
+        values_x, values_y = values_x[:count], values_y[:count]
+        frame_counts.append(int(count))
+        x_means.append(float(np.mean(values_x)) if count else np.nan)
+        y_means.append(float(np.mean(values_y)) if count else np.nan)
+        if count > limit:
+            rng = np.random.default_rng(int(seed) + sample_index * 104729)
+            indices = np.sort(rng.choice(count, size=limit, replace=False))
+            values_x, values_y = values_x[indices], values_y[indices]
+        x_values.append(values_x.astype(float).tolist())
+        y_values.append(values_y.astype(float).tolist())
+
+    return {
+        "regional_map": {
+            "x_setup_id": str(x_setup_id or ""),
+            "y_setup_id": str(y_setup_id or ""),
+            "x_name": name_x,
+            "y_name": name_y,
+            "x_residue_indices": sorted(selected_x),
+            "y_residue_indices": sorted(selected_y),
+            "sample_ids": sample_ids,
+            "x_values": x_values,
+            "y_values": y_values,
+            "x_means": x_means,
+            "y_means": y_means,
+            "frame_counts": frame_counts,
+            "max_points_per_sample": limit,
+        }
+    }
 
 
 def _apply_delta_energy_residue_selection(
@@ -1324,6 +1441,10 @@ async def get_cluster_analysis_data(
     residue_selection_setup_id: str | None = None,
     include_frame_values: bool = False,
     sample_id: str | None = None,
+    include_regional_map: bool = False,
+    region_x_setup_id: str | None = None,
+    region_y_setup_id: str | None = None,
+    regional_max_points: int = 1500,
 ):
     try:
         project_store.get_system(project_id, system_id)
@@ -1395,6 +1516,18 @@ async def get_cluster_analysis_data(
                     payload=payload,
                     energy_bins=int(meta.get("energy_bins") or 80),
                 )
+            if normalized_type == "delta_energy" and include_regional_map:
+                payload.update(_build_delta_energy_regional_map(
+                    project_id=project_id,
+                    system_id=system_id,
+                    cluster_id=cluster_id,
+                    x_setup_id=str(region_x_setup_id or ""),
+                    y_setup_id=str(region_y_setup_id or ""),
+                    meta=meta,
+                    payload=payload,
+                    max_points=int(regional_max_points),
+                    seed=int(sample_seed),
+                ))
             if normalized_type == "delta_energy" and include_frame_values and str(sample_id or "").strip():
                 requested_sample_id = str(sample_id).strip()
                 sample_ids = [str(value) for value in payload.get("sample_ids") or []]

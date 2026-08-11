@@ -161,6 +161,112 @@ function makeHorizontalBar(values, labels, colors, title, xTitle, limit) {
   };
 }
 
+function hexToRgba(hex, alpha) {
+  const clean = String(hex || '#2563eb').replace('#', '');
+  const value = Number.parseInt(clean.length === 3 ? clean.split('').map((c) => `${c}${c}`).join('') : clean, 16);
+  const r = (value >> 16) & 255;
+  const g = (value >> 8) & 255;
+  const b = value & 255;
+  return `rgba(${r},${g},${b},${alpha})`;
+}
+
+function buildRegionalDeltaEnergyPlot(regionalMap, series, selectedIds) {
+  if (!regionalMap || !Array.isArray(regionalMap.sample_ids)) return null;
+  const selected = new Set(selectedIds || []);
+  const seriesById = new Map((series || []).map((entry) => [String(entry.id || entry.sample_id), entry]));
+  const traces = [];
+  const meanRows = [];
+  regionalMap.sample_ids.forEach((rawId, index) => {
+    const id = String(rawId);
+    if (!selected.has(id)) return;
+    const entry = seriesById.get(id) || {};
+    const x = (regionalMap.x_values?.[index] || []).map(Number).filter(Number.isFinite);
+    const y = (regionalMap.y_values?.[index] || []).map(Number).filter(Number.isFinite);
+    const count = Math.min(x.length, y.length);
+    if (!count) return;
+    const pairedX = x.slice(0, count);
+    const pairedY = y.slice(0, count);
+    const color = entry.color || pickEnergyColor(index);
+    const label = entry.label || id;
+    if (count >= 8 && (Math.max(...pairedX) > Math.min(...pairedX) || Math.max(...pairedY) > Math.min(...pairedY))) {
+      traces.push({
+        type: 'histogram2dcontour',
+        x: pairedX,
+        y: pairedY,
+        name: `${label} density`,
+        ncontours: 5,
+        contours: { coloring: 'lines', showlabels: false },
+        line: { color, width: 1.8 },
+        colorscale: [[0, hexToRgba(color, 0)], [1, hexToRgba(color, 0.42)]],
+        opacity: 0.72,
+        showscale: false,
+        showlegend: false,
+        hoverinfo: 'skip',
+      });
+    }
+    meanRows.push({
+      id,
+      label,
+      color,
+      x: Number(regionalMap.x_means?.[index]),
+      y: Number(regionalMap.y_means?.[index]),
+      frames: Number(regionalMap.frame_counts?.[index] || count),
+    });
+  });
+  meanRows.filter((row) => Number.isFinite(row.x) && Number.isFinite(row.y)).forEach((row) => {
+    traces.push({
+      type: 'scatter',
+      mode: 'markers',
+      x: [row.x],
+      y: [row.y],
+      name: row.label,
+      marker: { size: 13, color: row.color, line: { color: '#f8fafc', width: 2 }, symbol: 'circle' },
+      customdata: [[row.frames]],
+      hovertemplate: `<b>${row.label}</b><br>${regionalMap.x_name}: %{x:.3f}<br>${regionalMap.y_name}: %{y:.3f}<br>frames: %{customdata[0]}<extra></extra>`,
+    });
+  });
+  if (!traces.length) return null;
+
+  return {
+    data: traces,
+    layout: {
+      height: 590,
+      paper_bgcolor: 'rgba(0,0,0,0)',
+      plot_bgcolor: 'rgba(0,0,0,0)',
+      font: { color: '#e2e8f0', family: 'IBM Plex Sans, sans-serif' },
+      margin: { l: 76, r: 28, t: 24, b: 76 },
+      hovermode: 'closest',
+      xaxis: {
+        title: `Mean regional ΔE · ${regionalMap.x_name}`,
+        gridcolor: 'rgba(148,163,184,0.14)',
+        griddash: 'dot',
+        zeroline: true,
+        zerolinecolor: 'rgba(248,250,252,0.55)',
+        zerolinewidth: 1.5,
+      },
+      yaxis: {
+        title: `Mean regional ΔE · ${regionalMap.y_name}`,
+        gridcolor: 'rgba(148,163,184,0.14)',
+        griddash: 'dot',
+        zeroline: true,
+        zerolinecolor: 'rgba(248,250,252,0.55)',
+        zerolinewidth: 1.5,
+      },
+      legend: {
+        orientation: 'h',
+        y: -0.18,
+        x: 0.5,
+        xanchor: 'center',
+        bgcolor: 'rgba(15,23,42,0.72)',
+        bordercolor: 'rgba(148,163,184,0.22)',
+        borderwidth: 1,
+      },
+      hoverlabel: { bgcolor: '#0f172a', bordercolor: '#475569', font: { color: '#f8fafc' } },
+    },
+    config: { displaylogo: false, responsive: true, modeBarButtonsToRemove: ['lasso2d', 'select2d'] },
+  };
+}
+
 export default function DeltaEvalPage() {
   const { projectId, systemId } = useParams();
   const location = useLocation();
@@ -199,6 +305,11 @@ export default function DeltaEvalPage() {
   const [deltaEnergyBins, setDeltaEnergyBins] = useState(80);
   const [residueSelectionSetups, setResidueSelectionSetups] = useState([]);
   const [selectedResidueSelectionId, setSelectedResidueSelectionId] = useState('');
+  const [regionalXSelectionId, setRegionalXSelectionId] = useState('');
+  const [regionalYSelectionId, setRegionalYSelectionId] = useState('');
+  const [regionalMapData, setRegionalMapData] = useState(null);
+  const [regionalMapLoading, setRegionalMapLoading] = useState(false);
+  const [regionalMapError, setRegionalMapError] = useState(null);
   const [sampleFrameModes, setSampleFrameModes] = useState({});
   const [sampleFrameLimits, setSampleFrameLimits] = useState({});
   const [helpOpen, setHelpOpen] = useState(false);
@@ -210,6 +321,7 @@ export default function DeltaEvalPage() {
   const [analysisDataLoading, setAnalysisDataLoading] = useState(false);
   const [deletingAnalysisId, setDeletingAnalysisId] = useState('');
   const analysisDataCacheRef = useRef({});
+  const regionalDefaultsInitializedRef = useRef(false);
 
   const [job, setJob] = useState(null);
   const [jobStatus, setJobStatus] = useState(null);
@@ -352,6 +464,10 @@ export default function DeltaEvalPage() {
     setSelectedSampleId('');
     setResidueSelectionSetups([]);
     setSelectedResidueSelectionId('');
+    setRegionalXSelectionId('');
+    setRegionalYSelectionId('');
+    setRegionalMapData(null);
+    regionalDefaultsInitializedRef.current = false;
     loadClusterInfo();
     loadAnalyses();
     fetchClusterUiSetups(projectId, systemId, selectedClusterId, { setupType: 'residue_selection' })
@@ -419,6 +535,46 @@ export default function DeltaEvalPage() {
     };
     run();
   }, [selectedAnalysisMeta, loadAnalysisData]);
+
+  useEffect(() => {
+    if (regionalDefaultsInitializedRef.current || !residueSelectionSetups.length) return;
+    regionalDefaultsInitializedRef.current = true;
+    setRegionalXSelectionId(String(residueSelectionSetups[0]?.setup_id || ''));
+    setRegionalYSelectionId(String(residueSelectionSetups[1]?.setup_id || ''));
+  }, [residueSelectionSetups]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadRegionalMap = async () => {
+      setRegionalMapData(null);
+      setRegionalMapError(null);
+      if (activeTab !== 'delta_energy' || !selectedAnalysisMeta?.analysis_id) return;
+      setRegionalMapLoading(true);
+      try {
+        const response = await fetchClusterAnalysisData(
+          projectId,
+          systemId,
+          selectedClusterId,
+          'delta_energy',
+          selectedAnalysisMeta.analysis_id,
+          {
+            includeRegionalMap: true,
+            regionXSetupId: regionalXSelectionId || undefined,
+            regionYSetupId: regionalYSelectionId || undefined,
+            regionalMaxPoints: 1500,
+            sampleSeed: 0,
+          }
+        );
+        if (!cancelled) setRegionalMapData(response?.data?.regional_map || null);
+      } catch (err) {
+        if (!cancelled) setRegionalMapError(err.message || 'Failed to compute the regional delta-energy map.');
+      } finally {
+        if (!cancelled) setRegionalMapLoading(false);
+      }
+    };
+    loadRegionalMap();
+    return () => { cancelled = true; };
+  }, [activeTab, projectId, regionalXSelectionId, regionalYSelectionId, selectedAnalysisMeta, selectedClusterId, systemId]);
 
   useEffect(() => {
     if (!job?.job_id) return;
@@ -801,6 +957,11 @@ export default function DeltaEvalPage() {
     height: 340,
     background: 'dark',
   }), [visibleDeltaEnergySeries, deltaEnergyGraphMode]);
+
+  const regionalDeltaEnergyPlot = useMemo(
+    () => buildRegionalDeltaEnergyPlot(regionalMapData, deltaEnergySeries, selectedDeltaEnergySeriesIds),
+    [deltaEnergySeries, regionalMapData, selectedDeltaEnergySeriesIds]
+  );
 
   const analysisSummary = selectedAnalysisMeta?.summary || {};
 
@@ -1402,6 +1563,70 @@ export default function DeltaEvalPage() {
                     <p className="py-16 text-center text-sm text-gray-400">No selected trajectories.</p>
                   )}
                 </div>
+              ) : null}
+
+              {activeTab === 'delta_energy' && !!deltaEnergySeries.length ? (
+                <section className="overflow-hidden rounded-lg border border-gray-700 bg-gray-800">
+                  <div className="border-b border-gray-700 px-4 py-4">
+                    <div className="flex flex-wrap items-start justify-between gap-4">
+                      <div className="max-w-3xl">
+                        <p className="text-[10px] font-semibold uppercase tracking-[0.24em] text-cyan-400">Regional endpoint map</p>
+                        <h2 className="mt-1 text-base font-semibold text-gray-100">Where is conformational preference encoded?</h2>
+                        <p className="mt-1 text-xs leading-5 text-gray-400">
+                          Every marker is an ensemble mean. Matching colored contours summarize its paired per-frame regional distribution.
+                          Negative regional ΔE favors model A; positive regional ΔE favors model B. Edges are included when either endpoint belongs to the region.
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => navigate(`/projects/${projectId}/systems/${systemId}/residue_selections${selectedClusterId ? `?cluster_id=${encodeURIComponent(selectedClusterId)}` : ''}`)}
+                        className="rounded-md border border-gray-700 bg-gray-900 px-3 py-2 text-xs font-medium text-gray-100 hover:border-cyan-500"
+                      >
+                        Manage regional selections
+                      </button>
+                    </div>
+                    <div className="mt-4 grid gap-3 md:grid-cols-2">
+                      <label className="rounded-lg border border-gray-700 bg-gray-900/60 p-3 text-xs text-gray-400">
+                        Horizontal region
+                        <select
+                          value={regionalXSelectionId}
+                          onChange={(event) => setRegionalXSelectionId(event.target.value)}
+                          className="mt-2 w-full rounded-md border border-gray-700 bg-gray-950 px-2 py-2 text-sm text-gray-100"
+                        >
+                          <option value="">Whole protein</option>
+                          {residueSelectionSetups.map((setup) => <option key={setup.setup_id} value={setup.setup_id}>{setup.name || setup.setup_id}</option>)}
+                        </select>
+                      </label>
+                      <label className="rounded-lg border border-gray-700 bg-gray-900/60 p-3 text-xs text-gray-400">
+                        Vertical region
+                        <select
+                          value={regionalYSelectionId}
+                          onChange={(event) => setRegionalYSelectionId(event.target.value)}
+                          className="mt-2 w-full rounded-md border border-gray-700 bg-gray-950 px-2 py-2 text-sm text-gray-100"
+                        >
+                          <option value="">Whole protein</option>
+                          {residueSelectionSetups.map((setup) => <option key={setup.setup_id} value={setup.setup_id}>{setup.name || setup.setup_id}</option>)}
+                        </select>
+                      </label>
+                    </div>
+                  </div>
+                  <div className="p-3 md:p-4">
+                    {regionalMapLoading ? <div className="py-24"><Loader message="Building paired regional distributions..." /></div> : null}
+                    {regionalMapError ? <ErrorMessage message={regionalMapError} /> : null}
+                    {!regionalMapLoading && regionalDeltaEnergyPlot ? (
+                      <Plot
+                        data={regionalDeltaEnergyPlot.data}
+                        layout={regionalDeltaEnergyPlot.layout}
+                        config={regionalDeltaEnergyPlot.config}
+                        useResizeHandler
+                        style={{ width: '100%', height: '590px' }}
+                      />
+                    ) : null}
+                    {!regionalMapLoading && !regionalMapError && !regionalDeltaEnergyPlot ? (
+                      <p className="py-20 text-center text-sm text-slate-400">Select at least one trajectory to draw the regional map.</p>
+                    ) : null}
+                  </div>
+                </section>
               ) : null}
 
               {activeTab === 'commitment' ? (
