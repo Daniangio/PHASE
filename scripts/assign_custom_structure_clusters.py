@@ -38,7 +38,7 @@ except Exception as exc:  # pragma: no cover - import guard
 DIHEDRAL_KEYS = ("phi", "psi", "omega", "chi1", "chi2")
 
 CHI2_DESCRIPTOR_INDEX = 4
-SYMMETRIC_CHI2_RESNAMES = frozenset({"ASP", "LEU", "PHE", "TYR"})
+SYMMETRIC_CHI2_RESNAMES = frozenset({"ASP", "PHE", "TYR"})
 
 
 def _fold_samples_for_model_symmetry(

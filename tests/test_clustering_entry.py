@@ -56,16 +56,16 @@ def test_symmetric_chi2_folding_is_not_applied_to_non_symmetric_residue():
 
 
 def test_numeric_residue_keys_can_be_augmented_for_symmetry_detection():
-    keys = _build_residue_symmetry_keys(["res_54", "res_55"], residue_resnames={"res_54": "LEU", "res_55": "ALA"})
+    keys = _build_residue_symmetry_keys(["res_54", "res_55"], residue_resnames={"res_54": "PHE", "res_55": "ALA"})
 
-    assert keys == ["res_54_LEU", "res_55_ALA"]
+    assert keys == ["res_54_PHE", "res_55_ALA"]
     folded, meta = _fold_symmetric_chi2_for_clustering(
         np.asarray([[0.0, 0.0, 0.0, 0.0, -np.pi / 2.0]], dtype=float),
         keys[0],
     )
 
     assert meta["enabled"] is True
-    assert meta["resname"] == "LEU"
+    assert meta["resname"] == "PHE"
     assert np.isclose(folded[0, 4], np.pi)
 
 

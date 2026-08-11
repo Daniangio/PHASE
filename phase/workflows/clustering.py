@@ -84,7 +84,7 @@ def build_cluster_entry(
 # For aromatic ring flips, chi2 and chi2 + 180 degrees are physically equivalent
 # for the coarse cluster assignment. Raw descriptors remain untouched; only the
 # coordinate used by density-peak clustering and later prediction is folded.
-SYMMETRIC_CHI2_RESNAMES = frozenset({"PHE", "TYR", "LEU", "ASP"})
+SYMMETRIC_CHI2_RESNAMES = frozenset({"PHE", "TYR", "ASP"})
 CHI2_DESCRIPTOR_INDEX = 4
 
 
