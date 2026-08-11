@@ -94,7 +94,10 @@ SAMPLE_ROWS="$(offline_choose_multi "Select trajectories for delta-energy analys
 
 SAMPLE_IDS_ARR=()
 FRAME_LIMIT_ARGS=()
-while IFS= read -r row; do
+# Read selected rows from a dedicated descriptor. The prompts inside this loop
+# must keep reading from the terminal/stdin; otherwise each prompt consumes the
+# next selected row and only every other trajectory is processed.
+while IFS= read -r -u 3 row; do
   [ -z "$(trim "$row")" ] && continue
   sid="$(sample_id_from_row "$row" || true)"
   [ -z "$sid" ] && continue
@@ -108,7 +111,7 @@ while IFS= read -r row; do
       FRAME_LIMIT_ARGS+=(--frame-limit "${sid}:${limit}")
     fi
   fi
-done <<< "$SAMPLE_ROWS"
+done 3<<< "$SAMPLE_ROWS"
 [ "${#SAMPLE_IDS_ARR[@]}" -eq 0 ] && echo "No samples selected." >&2 && exit 1
 SAMPLE_IDS="$(IFS=','; echo "${SAMPLE_IDS_ARR[*]}")"
 echo "Selected ${#SAMPLE_IDS_ARR[@]} sample(s): $SAMPLE_IDS"
