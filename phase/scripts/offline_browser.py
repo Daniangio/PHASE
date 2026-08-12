@@ -120,7 +120,17 @@ def list_models(root: Path, project_id: str, system_id: str) -> None:
             if not abs_path.exists():
                 continue
             model_name = model.get("name") or Path(model_rel).stem
-            rows.append([model.get("model_id") or "", f"{cluster_name} :: {model_name}", str(abs_path), cluster_id])
+            params = model.get("params") if isinstance(model.get("params"), dict) else {}
+            delta_kind = str(params.get("delta_kind") or "")
+            fit_mode = str(params.get("fit_mode") or "")
+            rows.append([
+                model.get("model_id") or "",
+                f"{cluster_name} :: {model_name}",
+                str(abs_path),
+                cluster_id,
+                delta_kind,
+                fit_mode,
+            ])
     _print_rows(rows)
 
 

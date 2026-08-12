@@ -94,6 +94,8 @@ if [ -z "$OFFLINE_SYSTEM_ID" ]; then
 fi
 MODEL_ROW="$(offline_select_model)"
 BASE_MODEL="$(printf "%s" "$MODEL_ROW" | awk -F'|' '{print $3}')"
+SELECTED_DELTA_KIND="$(printf "%s" "$MODEL_ROW" | awk -F'|' '{print $5}')"
+SELECTED_FIT_MODE="$(printf "%s" "$MODEL_ROW" | awk -F'|' '{print $6}')"
 if [ -z "$CLUSTER_ID" ]; then
   CLUSTER_ID="$(printf "%s" "$MODEL_ROW" | awk -F'|' '{print $4}')"
 fi
@@ -103,15 +105,23 @@ if [ -z "$BASE_MODEL" ] || [ ! -f "$BASE_MODEL" ]; then
 fi
 
 RESUME_MODEL=""
-MODEL_LINES="$(python -m phase.scripts.offline_browser --root "$OFFLINE_ROOT" list-models --project-id "$OFFLINE_PROJECT_ID" --system-id "$OFFLINE_SYSTEM_ID" || true)"
-MODEL_LINES="$(printf "%s\n" "$MODEL_LINES" | awk -F'|' -v cid="$CLUSTER_ID" '$4==cid')"
-if [ -n "$MODEL_LINES" ] && prompt_bool "Resume from existing delta model? (y/N)" "N"; then
-  RESUME_ROW="$(offline_choose_one "Available Potts models:" "$MODEL_LINES")"
-  RESUME_MODEL="$(printf "%s" "$RESUME_ROW" | awk -F'|' '{print $3}')"
-  if [ -z "$RESUME_MODEL" ]; then
-    echo "No resume model selected."
-    exit 1
-  fi
+if [ "$SELECTED_FIT_MODE" = "delta" ] || [ "$SELECTED_DELTA_KIND" = "delta_patch" ] || [ "$SELECTED_DELTA_KIND" = "model_patch" ]; then
+  DELTA_ACTION="$(prompt "Selected model is delta-derived: resume it in place or fit a new delta over it? (resume/new)" "resume")"
+  DELTA_ACTION="$(printf "%s" "$DELTA_ACTION" | tr '[:upper:]' '[:lower:]')"
+  case "$DELTA_ACTION" in
+    resume|r)
+      # The Python runner resolves a selected combined model back to its paired
+      # delta and frozen base, then overwrites both existing checkpoints.
+      RESUME_MODEL="$BASE_MODEL"
+      ;;
+    new|n)
+      # Treat the selected delta/combined model as a new frozen base.
+      ;;
+    *)
+      echo "Choose either 'resume' or 'new'." >&2
+      exit 1
+      ;;
+  esac
 fi
 
 MODEL_NAME="$(prompt "Model name (base for delta models)" "")"
@@ -181,8 +191,12 @@ fi
 
 CMD+=(--npz "$NPZ_PATH" --state-ids "$STATE_IDS")
 
-if prompt_bool "Skip saving combined models? (y/N)" "N"; then
-  CMD+=(--no-combined)
+if [ -z "$RESUME_MODEL" ]; then
+  if prompt_bool "Skip saving combined models? (y/N)" "N"; then
+    CMD+=(--no-combined)
+  fi
+else
+  echo "Resume mode will overwrite the existing delta and paired combined checkpoints."
 fi
 
 echo "Running delta Potts fit..."

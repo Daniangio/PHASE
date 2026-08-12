@@ -143,6 +143,7 @@ Delta details:
 * Delta fitting uses the same AdamW defaults as standard PLM fitting.
 * When gauge fixing is enabled, penalties are applied to projected `Δh` and `ΔJ`, not raw tensors.
 * This keeps delta magnitudes interpretable as minimal rewiring rather than gauge artifacts.
+* In `phase_console`, selecting a delta or combined-delta model offers two distinct operations: `resume` reloads its delta checkpoint, keeps its original frozen base, and updates the existing delta/combined pair in place; `new` treats the selected model itself as a new frozen base and creates a separate delta/combined pair.
 
 ### Local fitting
 

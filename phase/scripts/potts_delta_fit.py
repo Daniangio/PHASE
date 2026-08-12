@@ -80,6 +80,144 @@ def _relativize_path(value: str, system_dir: Path) -> str:
         return value
 
 
+def _model_params(entry: dict | None) -> dict:
+    if not isinstance(entry, dict):
+        return {}
+    params = entry.get("params")
+    return params if isinstance(params, dict) else {}
+
+
+def _is_delta_model_entry(entry: dict | None) -> bool:
+    params = _model_params(entry)
+    return str(params.get("fit_mode") or "") == "delta" or str(params.get("delta_kind") or "") in {
+        "delta_patch",
+        "model_patch",
+    }
+
+
+def _same_state_ids(left: dict | None, right: dict | None) -> bool:
+    def normalize(entry: dict | None) -> tuple[str, ...]:
+        raw = _model_params(entry).get("state_ids") or []
+        if isinstance(raw, str):
+            raw = raw.split(",")
+        return tuple(sorted(str(value).strip() for value in raw if str(value).strip()))
+
+    return normalize(left) == normalize(right)
+
+
+def _resolve_model_entry_path(entry: dict, store: ProjectStore, project_id: str, system_id: str) -> Path:
+    raw = str(entry.get("path") or "").strip()
+    if not raw:
+        raise SystemExit(f"Potts model '{entry.get('model_id')}' has no path.")
+    path = Path(raw)
+    return path if path.is_absolute() else store.resolve_path(project_id, system_id, raw)
+
+
+def _find_model_entry_by_path(models: list[dict], path: Path, store: ProjectStore, project_id: str, system_id: str) -> dict | None:
+    target = path.resolve()
+    for entry in models:
+        if not isinstance(entry, dict):
+            continue
+        try:
+            if _resolve_model_entry_path(entry, store, project_id, system_id).resolve() == target:
+                return entry
+        except Exception:
+            continue
+    return None
+
+
+def _resolve_resume_pair(
+    selected_entry: dict,
+    models: list[dict],
+    store: ProjectStore,
+    project_id: str,
+    system_id: str,
+) -> tuple[dict, dict | None, Path]:
+    """Resolve selected delta/combined metadata to delta, combined, and frozen base."""
+    params = _model_params(selected_entry)
+    kind = str(params.get("delta_kind") or "")
+    by_id = {str(entry.get("model_id") or ""): entry for entry in models if isinstance(entry, dict)}
+
+    def choose_legacy_pair(candidates: list[dict], source: dict, source_suffix: str, target_suffix: str) -> dict | None:
+        if not candidates:
+            return None
+        source_name = str(source.get("name") or "")
+        expected_name = source_name.replace(source_suffix, target_suffix) if source_suffix in source_name else ""
+        exact = [entry for entry in candidates if expected_name and str(entry.get("name") or "") == expected_name]
+        if len(exact) == 1:
+            return exact[0]
+        if len(candidates) == 1:
+            return candidates[0]
+        try:
+            source_time = datetime.fromisoformat(str(source.get("created_at") or "").replace("Z", "+00:00")).timestamp()
+            ranked = sorted(
+                candidates,
+                key=lambda entry: abs(
+                    datetime.fromisoformat(str(entry.get("created_at") or "").replace("Z", "+00:00")).timestamp()
+                    - source_time
+                ),
+            )
+            if len(ranked) == 1 or str(ranked[0].get("created_at")) != str(ranked[1].get("created_at")):
+                return ranked[0]
+        except (TypeError, ValueError):
+            pass
+        return None
+
+    if kind == "delta_patch":
+        delta_entry = selected_entry
+        combined_entry = by_id.get(str(params.get("combined_model_id") or ""))
+    elif kind == "model_patch":
+        combined_entry = selected_entry
+        delta_entry = by_id.get(str(params.get("delta_model_id") or ""))
+        if not isinstance(delta_entry, dict):
+            # Legacy delta fits predate explicit pair IDs. Match only a delta
+            # checkpoint with the same frozen base and training states.
+            base_ref = str(params.get("base_model") or "")
+            candidates = [
+                entry
+                for entry in models
+                if isinstance(entry, dict)
+                and str(_model_params(entry).get("delta_kind") or "") == "delta_patch"
+                and str(_model_params(entry).get("base_model") or "") == base_ref
+                and _same_state_ids(entry, selected_entry)
+            ]
+            delta_entry = choose_legacy_pair(candidates, selected_entry, "(combined)", "(delta)")
+            if delta_entry is None:
+                raise SystemExit(
+                    "Cannot unambiguously locate the delta checkpoint paired with this combined model. "
+                    "Choose the corresponding '(delta)' model directly."
+                )
+    else:
+        raise SystemExit("The selected resume model is not a delta or combined-delta model.")
+
+    if not isinstance(delta_entry, dict):
+        raise SystemExit("The paired delta checkpoint is missing from system metadata.")
+    delta_params = _model_params(delta_entry)
+    if combined_entry is None:
+        paired_id = str(delta_params.get("combined_model_id") or "")
+        combined_entry = by_id.get(paired_id)
+    if combined_entry is None:
+        candidates = [
+            entry
+            for entry in models
+            if isinstance(entry, dict)
+            and str(_model_params(entry).get("delta_kind") or "") == "model_patch"
+            and str(_model_params(entry).get("base_model") or "") == str(delta_params.get("base_model") or "")
+            and _same_state_ids(entry, delta_entry)
+        ]
+        combined_entry = choose_legacy_pair(candidates, delta_entry, "(delta)", "(combined)")
+
+    base_ref = str(delta_params.get("base_model") or "").strip()
+    if not base_ref:
+        raise SystemExit("The selected delta model does not record its frozen base model.")
+    base_path = Path(base_ref)
+    if not base_path.is_absolute():
+        base_path = store.resolve_path(project_id, system_id, base_ref)
+    if not base_path.exists():
+        raise SystemExit(f"Frozen base model for resumed delta does not exist: {base_path}")
+    return delta_entry, combined_entry, base_path
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
 
@@ -99,29 +237,61 @@ def main(argv: list[str] | None = None) -> int:
     if not isinstance(cluster_entry, dict):
         raise SystemExit(f"Cluster '{cluster_id}' not found in system metadata.")
 
-    base_model_path = Path(str(args.base_model))
-    if not base_model_path.is_absolute():
-        base_model_path = store.resolve_path(project_id, system_id, str(args.base_model))
-    if not base_model_path.exists():
-        raise SystemExit(f"Base model not found: {base_model_path}")
-    base_model = load_potts_model(str(base_model_path))
+    models = cluster_entry.get("potts_models")
+    if not isinstance(models, list):
+        models = []
+    models = [entry for entry in models if isinstance(entry, dict)]
+    selected_model_path = Path(str(args.base_model))
+    if not selected_model_path.is_absolute():
+        selected_model_path = store.resolve_path(project_id, system_id, str(args.base_model))
+    if not selected_model_path.exists():
+        raise SystemExit(f"Selected model not found: {selected_model_path}")
 
+    base_model_path = selected_model_path
     resume_model = None
     resume_path = None
+    resume_delta_entry = None
+    resume_combined_entry = None
     start_best_loss = None
     resume_raw = str(args.resume_model or "").strip()
     if resume_raw:
-        resume_path = Path(resume_raw)
-        if not resume_path.is_absolute():
-            resume_path = store.resolve_path(project_id, system_id, resume_raw)
+        selected_resume_path = Path(resume_raw)
+        if not selected_resume_path.is_absolute():
+            selected_resume_path = store.resolve_path(project_id, system_id, resume_raw)
+        if not selected_resume_path.exists():
+            raise SystemExit(f"Resume model not found: {selected_resume_path}")
+        selected_resume_entry = _find_model_entry_by_path(
+            models,
+            selected_resume_path,
+            store,
+            project_id,
+            system_id,
+        )
+        if not isinstance(selected_resume_entry, dict) or not _is_delta_model_entry(selected_resume_entry):
+            raise SystemExit("Resume requires a registered delta or combined-delta model.")
+        resume_delta_entry, resume_combined_entry, base_model_path = _resolve_resume_pair(
+            selected_resume_entry,
+            models,
+            store,
+            project_id,
+            system_id,
+        )
+        resume_path = _resolve_model_entry_path(resume_delta_entry, store, project_id, system_id)
         if not resume_path.exists():
-            raise SystemExit(f"Resume model not found: {resume_path}")
+            raise SystemExit(f"Paired delta checkpoint not found: {resume_path}")
         resume_model = load_potts_model(str(resume_path))
         resume_meta = load_potts_model_metadata(str(resume_path))
         if resume_meta:
             start_best_loss = _coerce_float(resume_meta.get("delta_best_loss"))
             if start_best_loss is None:
                 start_best_loss = _coerce_float(resume_meta.get("plm_best_loss"))
+        print(
+            "[delta] resume in place: "
+            f"base={base_model_path.name} delta={resume_path.name} "
+            f"combined={_resolve_model_entry_path(resume_combined_entry, store, project_id, system_id).name if resume_combined_entry else 'new paired checkpoint'}"
+        )
+
+    base_model = load_potts_model(str(base_model_path))
 
     state_ids = [s.strip() for s in str(args.state_ids or "").split(",") if s.strip()]
     if not state_ids:
@@ -258,6 +428,8 @@ def main(argv: list[str] | None = None) -> int:
         display_name: str,
         kind: str,
         model_path_override: Path | None = None,
+        existing_entry: dict | None = None,
+        paired_model_id: str | None = None,
     ) -> tuple[Path, dict]:
         model_dir = potts_models_dir / model_id
         model_dir.mkdir(parents=True, exist_ok=True)
@@ -269,7 +441,8 @@ def main(argv: list[str] | None = None) -> int:
 
         rel_model_path = _relativize_path(str(model_path), system_dir)
 
-        params = {
+        params = dict(_model_params(existing_entry))
+        params.update({
             "optimizer": "AdamW",
             "optimizer_weight_decay": 1e-2,
             "fit_mode": "delta",
@@ -290,11 +463,11 @@ def main(argv: list[str] | None = None) -> int:
             "delta_l2": float(args.delta_l2),
             "delta_group_h": float(args.delta_group_h),
             "delta_group_j": float(args.delta_group_j),
-            # Updated after each new best:
-            "delta_best_loss": None,
-            "delta_best_epoch": None,
-            "delta_last_loss": None,
-        }
+        })
+        if kind == "delta_patch" and paired_model_id:
+            params["combined_model_id"] = paired_model_id
+        if kind == "model_patch" and paired_model_id:
+            params["delta_model_id"] = paired_model_id
         # Remove Nones for a cleaner metadata file.
         params = {k: v for k, v in params.items() if v is not None}
 
@@ -302,20 +475,21 @@ def main(argv: list[str] | None = None) -> int:
             "model_id": model_id,
             "name": display_name,
             "path": rel_model_path,
-            "created_at": datetime.utcnow().isoformat(),
+            "created_at": str((existing_entry or {}).get("created_at") or datetime.utcnow().isoformat()),
             "source": str(args.model_source or "offline_delta_fit"),
             "params": params,
         }
 
-        models = cluster_entry.get("potts_models")
-        if not isinstance(models, list):
-            models = []
-        existing = next((m for m in models if m.get("model_id") == model_id), None)
+        registered_models = cluster_entry.get("potts_models")
+        if not isinstance(registered_models, list):
+            registered_models = []
+        existing = next((m for m in registered_models if m.get("model_id") == model_id), None)
         if existing is not None:
             existing.update(model_entry)
+            model_entry = existing
         else:
-            models.append(model_entry)
-        cluster_entry["potts_models"] = models
+            registered_models.append(model_entry)
+        cluster_entry["potts_models"] = registered_models
         system_meta.metastable_clusters = clusters
         store.save_system(system_meta)
         return model_path, model_entry
@@ -328,26 +502,50 @@ def main(argv: list[str] | None = None) -> int:
             return None
         return None
 
-    # Delta model bucket: reuse when resuming.
-    delta_model_id = _model_id_from_path(resume_path) if resume_path else None
+    # Resume reuses both paired buckets. A new delta-over-delta fit allocates a
+    # fresh pair because RESUME_MODEL is intentionally left empty by the shell.
+    delta_model_id = str((resume_delta_entry or {}).get("model_id") or "") or None
+    if not delta_model_id:
+        delta_model_id = _model_id_from_path(resume_path) if resume_path else None
     if not delta_model_id:
         delta_model_id = str(uuid.uuid4())
+    combined_id = str((resume_combined_entry or {}).get("model_id") or "") or (None if args.no_combined else str(uuid.uuid4()))
     delta_path_override = resume_path if resume_path is not None else None
+    delta_display_name = (
+        str((resume_delta_entry or {}).get("name") or "").strip()
+        if resume_delta_entry is not None and not str(args.model_name or "").strip()
+        else f"{base_label} (delta)"
+    )
     delta_path, delta_entry = _ensure_model_entry(
         model_id=delta_model_id,
-        display_name=f"{base_label} (delta)",
+        display_name=delta_display_name,
         kind="delta_patch",
         model_path_override=delta_path_override,
+        existing_entry=resume_delta_entry,
+        paired_model_id=combined_id,
     )
 
     combined_path = None
     combined_entry = None
     if not bool(args.no_combined):
-        combined_id = str(uuid.uuid4())
+        assert combined_id is not None
+        combined_path_override = (
+            _resolve_model_entry_path(resume_combined_entry, store, project_id, system_id)
+            if resume_combined_entry is not None
+            else None
+        )
+        combined_display_name = (
+            str(resume_combined_entry.get("name") or "").strip()
+            if resume_combined_entry is not None and not str(args.model_name or "").strip()
+            else f"{base_label} (combined)"
+        )
         combined_path, combined_entry = _ensure_model_entry(
             model_id=combined_id,
-            display_name=f"{base_label} (combined)",
+            display_name=combined_display_name,
             kind="model_patch",
+            model_path_override=combined_path_override,
+            existing_entry=resume_combined_entry,
+            paired_model_id=delta_model_id,
         )
 
     # ------------------------------------------------------------------
