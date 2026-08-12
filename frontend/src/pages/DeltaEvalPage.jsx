@@ -952,8 +952,8 @@ export default function DeltaEvalPage() {
   const deltaEnergyPlot = useMemo(() => buildEnergyDistributionPlot({
     series: visibleDeltaEnergySeries,
     mode: deltaEnergyGraphMode,
-    title: 'ΔE distributions over selected trajectories',
-    xTitle: 'ΔE = E_model_A - E_model_B',
+    title: '',
+    xTitle: '',
     height: 340,
     background: 'dark',
   }), [visibleDeltaEnergySeries, deltaEnergyGraphMode]);

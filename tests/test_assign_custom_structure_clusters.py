@@ -34,6 +34,18 @@ def test_chi2_symmetry_does_not_fold_non_symmetric_input_residue():
     np.testing.assert_allclose(folded, samples)
 
 
+def test_chi2_symmetry_does_not_fold_leucine():
+    samples = np.asarray([[0.1, 0.2, 0.3, 0.4, -np.pi / 2]], dtype=np.float64)
+
+    folded = _fold_samples_for_model_symmetry(
+        samples,
+        _model(enabled=True, resname="LEU"),
+        residue_resname="LEU",
+    )
+
+    np.testing.assert_allclose(folded, samples)
+
+
 def test_chi2_symmetry_rejects_incorrect_model_residue_metadata():
     samples = np.asarray([[0.1, 0.2, 0.3, 0.4, -np.pi / 2]], dtype=np.float64)
 

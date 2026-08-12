@@ -45,14 +45,30 @@ def test_symmetric_chi2_is_folded_for_clustering_copy_only():
     assert np.allclose(samples[:, 4], [-np.pi / 2.0, np.pi / 2.0, 3.0 * np.pi / 2.0, 0.0, np.pi, np.pi / 3.0, -2.0 * np.pi / 3.0])
 
 
-def test_symmetric_chi2_folding_is_not_applied_to_non_symmetric_residue():
+def test_symmetric_chi2_folding_is_not_applied_to_leucine():
     samples = np.asarray([[0.0, 0.0, 0.0, 0.0, -np.pi / 2.0]], dtype=float)
 
-    folded, meta = _fold_symmetric_chi2_for_clustering(samples, "res_88_ARG")
+    folded, meta = _fold_symmetric_chi2_for_clustering(samples, "res_54_LEU")
 
     assert meta["enabled"] is False
+    assert meta["resname"] == "LEU"
     assert "applied" not in meta
     assert np.allclose(folded[:, 4], samples[:, 4])
+
+
+def test_chi2_symmetry_allowlist_is_exact():
+    samples = np.asarray([[0.0, 0.0, 0.0, 0.0, -np.pi / 2.0]], dtype=float)
+
+    for resname in ("PHE", "TYR", "ASP"):
+        folded, meta = _fold_symmetric_chi2_for_clustering(samples, f"res_54_{resname}")
+        assert meta["enabled"] is True
+        assert meta["resname"] == resname
+        assert np.isclose(folded[0, 4], np.pi)
+
+    for resname in ("LEU", "ARG", "VAL", "GLU", "ASN"):
+        folded, meta = _fold_symmetric_chi2_for_clustering(samples, f"res_54_{resname}")
+        assert meta["enabled"] is False
+        assert np.allclose(folded, samples)
 
 
 def test_numeric_residue_keys_can_be_augmented_for_symmetry_detection():
