@@ -126,12 +126,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--sa-reads", type=int, default=2000)
     parser.add_argument("--sa-chains", type=int, default=1, help="Independent SA chains (processes). Total reads are split across chains.")
     parser.add_argument("--sa-sweeps", type=int, default=2000)
-    parser.add_argument("--sa-beta-hot", type=float, default=0.0)
-    parser.add_argument("--sa-beta-cold", type=float, default=0.0)
+    parser.add_argument("--sa-beta-hot", type=float, default=None, help="Default: 0.01, or 0 with --sa-beta-cold 0 for neal auto range.")
+    parser.add_argument("--sa-beta-cold", type=float, default=None, help="Default: 2.0, or 0 with --sa-beta-hot 0 for neal auto range.")
     parser.add_argument("--sa-schedule-type", type=str, default="geometric", choices=["geometric", "linear", "custom"])
     parser.add_argument("--sa-custom-beta-schedule", type=str, default="", help="Comma-separated custom beta schedule.")
-    parser.add_argument("--sa-num-sweeps-per-beta", type=int, default=1)
-    parser.add_argument("--sa-randomize-order", action="store_true", help="Randomize variable update order within each sweep.")
+    parser.add_argument("--sa-num-sweeps-per-beta", type=int, default=2)
+    parser.add_argument(
+        "--sa-randomize-order",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Randomize variable update order within each sweep (recommended default).",
+    )
     parser.add_argument("--sa-acceptance-criteria", type=str, default="Metropolis", choices=["Metropolis", "Gibbs"])
     parser.add_argument("--sa-init", type=str, default="md", choices=["md", "md-frame", "random-h", "random-uniform"])
     parser.add_argument("--sa-init-md-frame", type=int, default=-1)
@@ -148,7 +153,7 @@ def main(argv: list[str] | None = None) -> int:
         default="",
         help="Comma-separated state IDs to restrict MD frames used for SA init (when using md/md-frame restart/init).",
     )
-    parser.add_argument("--penalty-safety", type=float, default=8.0)
+    parser.add_argument("--penalty-safety", type=float, default=4.0)
     parser.add_argument("--repair", type=str, default="none", choices=["none", "argmax"])
 
     parser.add_argument("--project-id", default="")
@@ -210,6 +215,18 @@ def main(argv: list[str] | None = None) -> int:
             raise SystemExit(f"MD sample NPZ missing on disk: {sample_path}")
         sa_md_sample_npz = str(sample_path)
 
+    custom_sa_schedule = str(args.sa_custom_beta_schedule or "").strip()
+    if args.sa_beta_hot is None and args.sa_beta_cold is None:
+        sa_beta_hot = 0.0 if custom_sa_schedule else 0.01
+        sa_beta_cold = 0.0 if custom_sa_schedule else 2.0
+    elif args.sa_beta_hot is None or args.sa_beta_cold is None:
+        raise SystemExit("Provide both --sa-beta-hot and --sa-beta-cold, or neither.")
+    else:
+        sa_beta_hot = float(args.sa_beta_hot)
+        sa_beta_cold = float(args.sa_beta_cold)
+    args.sa_beta_hot = sa_beta_hot
+    args.sa_beta_cold = sa_beta_cold
+
     try:
         results = run_sampling(
             cluster_npz=str(args.npz),
@@ -238,8 +255,8 @@ def main(argv: list[str] | None = None) -> int:
             sa_reads=int(args.sa_reads),
             sa_chains=int(args.sa_chains),
             sa_sweeps=int(args.sa_sweeps),
-            sa_beta_hot=float(args.sa_beta_hot),
-            sa_beta_cold=float(args.sa_beta_cold),
+            sa_beta_hot=sa_beta_hot,
+            sa_beta_cold=sa_beta_cold,
             sa_schedule_type=str(args.sa_schedule_type),
             sa_custom_beta_schedule=str(args.sa_custom_beta_schedule),
             sa_num_sweeps_per_beta=int(args.sa_num_sweeps_per_beta),
@@ -274,6 +291,7 @@ def main(argv: list[str] | None = None) -> int:
             params=_filter_sampling_params(args, parser),
             model_paths=model_paths,
             sample_id=args.sample_id or None,
+            sa_diagnostics=results.sa_diagnostics,
         )
     return 0
 

@@ -173,7 +173,7 @@ source .venv-potts-fit/bin/activate
 ### SA/QUBO sampling (QA proxy)
 
 * `--sa-reads`, `--sa-sweeps`
-* `--penalty-safety`: scales one-hot constraint penalties (higher = fewer invalid samples). Default is `8.0`.
+* `--penalty-safety`: scales one-hot constraint penalties (higher = fewer invalid samples but larger categorical barriers). Default is `4.0`.
 * `--repair`: `none` or `argmax`
 
   * `none`: keep samples as-is; report invalid rates (best for honesty)
@@ -208,7 +208,7 @@ python main.py --npz data.npz \
   --fit pmi --beta 1.0 \
   --gibbs-method single --gibbs-samples 200 --gibbs-burnin 200 --gibbs-thin 2 \
   --sa-reads 200 --sa-sweeps 500 --sa-tstart 10 --sa-tend 0.1 \
-  --penalty-safety 8.0 --repair none
+  --penalty-safety 4.0 --repair none
 ```
 
 What you want to see:
@@ -227,7 +227,7 @@ python main.py --npz data.npz \
   --fit pmi+plm --beta 1.0 \
   --gibbs-method single --gibbs-samples 5000 --gibbs-burnin 2000 --gibbs-thin 2 \
   --sa-reads 1000 --sa-sweeps 2000 \
-  --penalty-safety 8.0 --repair none \
+  --penalty-safety 4.0 --repair none \
   --results-dir results/run_beta1 --progress
 ```
 
@@ -249,7 +249,7 @@ python main.py --npz data.npz \
   --rex-beta-min 0.2 --rex-beta-max 1 --rex-n-replicas 10 --rex-spacing geom \
   --rex-rounds 4000 --rex-burnin-rounds 1000 --rex-sweeps-per-round 2 --rex-thin-rounds 1 \
   --sa-reads 1000 --sa-sweeps 2000 \
-  --penalty-safety 8.0 --repair none \
+  --penalty-safety 4.0 --repair none \
   --results-dir results/run_rex --progress
 ```
 
@@ -297,7 +297,7 @@ python main.py --npz data.npz \
   --fit plm --beta 1.0 \
   --gibbs-method rex \
   --sa-reads 1000 --sa-sweeps 2000 \
-  --penalty-safety 8.0 --repair none
+  --penalty-safety 4.0 --repair none
 ```
 
 ---

@@ -16,20 +16,20 @@ export default function SimulationAnalysisForm({ clusterRuns, onSubmit }) {
   const [saReads, setSaReads] = useState('');
   const [saSweeps, setSaSweeps] = useState('');
   const [saChains, setSaChains] = useState('1');
-  const [saScheduleMode, setSaScheduleMode] = useState('auto');
+  const [saScheduleMode, setSaScheduleMode] = useState('range');
   const [saScheduleType, setSaScheduleType] = useState('geometric');
   const [saCustomBetaSchedule, setSaCustomBetaSchedule] = useState('');
-  const [saNumSweepsPerBeta, setSaNumSweepsPerBeta] = useState('1');
-  const [saBetaHot, setSaBetaHot] = useState('');
-  const [saBetaCold, setSaBetaCold] = useState('');
-  const [saRandomizeOrder, setSaRandomizeOrder] = useState(false);
+  const [saNumSweepsPerBeta, setSaNumSweepsPerBeta] = useState('2');
+  const [saBetaHot, setSaBetaHot] = useState('0.01');
+  const [saBetaCold, setSaBetaCold] = useState('2.0');
+  const [saRandomizeOrder, setSaRandomizeOrder] = useState(true);
   const [saAcceptanceCriteria, setSaAcceptanceCriteria] = useState('Metropolis');
   const [saInit, setSaInit] = useState('md');
   const [saInitMdFrame, setSaInitMdFrame] = useState('');
   const [saRestart, setSaRestart] = useState('independent');
   const [saMdSampleId, setSaMdSampleId] = useState('');
   const [saMdStateIds, setSaMdStateIds] = useState('');
-  const [penaltySafety, setPenaltySafety] = useState('8.0');
+  const [penaltySafety, setPenaltySafety] = useState('4.0');
   const [repair, setRepair] = useState('none');
   const [pottsModelIds, setPottsModelIds] = useState([]);
   const [modelPage, setModelPage] = useState(0);
@@ -559,14 +559,14 @@ export default function SimulationAnalysisForm({ clusterRuns, onSubmit }) {
               <label className="flex items-center gap-2 text-sm text-gray-300 mb-1">
                 <span>Sweeps / beta</span>
                 <InfoTooltip
-                  ariaLabel="SA sweeps per beta help"
+                ariaLabel="SA sweeps per beta help"
                   text="Number of update sweeps spent at each beta value in the annealing schedule. In custom mode, total sweeps are approximately len(beta_schedule) × sweeps_per_beta."
                 />
               </label>
               <input
                 type="number"
                 min={1}
-                placeholder="Default: 1"
+                placeholder="Default: 2"
                 value={saNumSweepsPerBeta}
                 onChange={(event) => setSaNumSweepsPerBeta(event.target.value)}
                 className="w-full bg-gray-900 border border-gray-700 rounded-md px-3 py-2 text-white focus:ring-cyan-500"
@@ -586,7 +586,7 @@ export default function SimulationAnalysisForm({ clusterRuns, onSubmit }) {
                 <input
                   type="number"
                   step="0.01"
-                  placeholder="beta_hot (e.g. 0.8)"
+                  placeholder="beta_hot (default 0.01)"
                   value={saBetaHot}
                   onChange={(event) => setSaBetaHot(event.target.value)}
                   className="w-full bg-gray-900 border border-gray-700 rounded-md px-3 py-2 text-white focus:ring-cyan-500"
@@ -594,7 +594,7 @@ export default function SimulationAnalysisForm({ clusterRuns, onSubmit }) {
                 <input
                   type="number"
                   step="0.01"
-                  placeholder="beta_cold (e.g. 10.0)"
+                  placeholder="beta_cold (default 2.0)"
                   value={saBetaCold}
                   onChange={(event) => setSaBetaCold(event.target.value)}
                   className="w-full bg-gray-900 border border-gray-700 rounded-md px-3 py-2 text-white focus:ring-cyan-500"
@@ -731,7 +731,7 @@ export default function SimulationAnalysisForm({ clusterRuns, onSubmit }) {
                 <span>Penalty safety</span>
                 <InfoTooltip
                   ariaLabel="Penalty safety help"
-                  text="Scales the one-hot QUBO penalty. Larger values enforce validity more strongly. The default is now 8.0 because 3.0 was too permissive and could produce many invalid SA frames."
+                  text="Scales the one-hot QUBO penalty. Larger values enforce validity more strongly but also raise barriers between categorical states. The exploratory default is 4.0; monitor invalid-read and movement diagnostics."
                 />
               </label>
               <input

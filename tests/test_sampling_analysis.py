@@ -11,7 +11,11 @@ from backend import tasks
 from backend.api.v1.analysis_payloads import apply_model_energy_residue_selection, downsample_model_energy_payload
 from backend.tasks import run_md_samples_refresh_job
 from phase.potts.analysis_run import analyze_cluster_samples, compute_sample_energies
-from phase.potts.orchestration import _filter_potts_analysis_samples, _load_additive_potts_analysis_model
+from phase.potts.orchestration import (
+    _filter_potts_analysis_samples,
+    _load_additive_potts_analysis_model,
+    aggregate_sampling_batch,
+)
 from phase.potts.potts_model import PottsModel, save_potts_model
 from phase.potts.sample_io import save_sample_npz
 from phase.services.project_store import DescriptorState, ProjectStore
@@ -137,6 +141,40 @@ def test_sample_energy_components_reconstruct_total_and_support_residue_selectio
     )
     expected = payload["node_energies"][:, 0] + payload["edge_energies"][:, 0]
     assert np.allclose(selected["energies"], expected)
+
+
+def test_sa_aggregation_persists_exact_warm_start_diagnostics(tmp_path):
+    sample_path = tmp_path / "sample.npz"
+    prepared = {
+        "sample_path": str(sample_path),
+        "n_residues": 3,
+        "sampling_method": "sa",
+    }
+    starts = np.asarray([[0, 1, 0], [1, 1, 1], [0, 0, 0]], dtype=np.int32)
+    labels = np.asarray([[0, 1, 0], [1, 0, 1], [1, 1, 0]], dtype=np.int32)
+    result = aggregate_sampling_batch(
+        prepared,
+        [{
+            "labels": labels,
+            "invalid_mask": np.asarray([False, False, True]),
+            "valid_counts": np.asarray([3, 3, 2]),
+            "sa_initial_labels": starts,
+            "sa_initial_md_frame_indices": np.asarray([10, 20, 30]),
+        }],
+        workers_used=1,
+    )
+
+    diagnostics = result["sa_diagnostics"]
+    assert diagnostics["valid_reads"] == 2
+    assert diagnostics["invalid_reads"] == 1
+    assert diagnostics["exact_start_match_fraction"] == 0.5
+    assert diagnostics["hamming_distance_mean"] == 0.5
+    assert diagnostics["hamming_hist_counts"][:2] == [1, 1]
+    assert diagnostics["per_residue_change_fraction"] == [0.0, 0.5, 0.0]
+    with np.load(sample_path, allow_pickle=False) as data:
+        assert data["sa_initial_labels"].tolist() == starts.tolist()
+        assert data["sa_initial_md_frame_indices"].tolist() == [10, 20, 30]
+        assert data["sa_hamming_distance"].tolist() == [0, 1, 2]
 
 
 def _write_sample(system_dir: Path, cluster_id: str, sample_id: str, meta: dict, *, labels: np.ndarray, invalid_mask=None):

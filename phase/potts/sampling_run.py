@@ -23,6 +23,7 @@ class SamplingResult:
     sample_path: Path
     n_samples: int
     n_residues: int
+    sa_diagnostics: Optional[Dict[str, object]] = None
 
 
 def _normalize_sa_restart(value: object) -> str:
@@ -116,25 +117,25 @@ def _build_sa_initial_labels(
     n_reads: int,
     md_frame: int,
     rng: np.random.Generator,
-) -> np.ndarray:
+) -> tuple[np.ndarray, np.ndarray]:
     mode = (mode or "md").lower()
     if mode in {"md", "md-frame"}:
         if md_labels is None or md_labels.size == 0:
             if mode == "md-frame":
                 raise ValueError("SA init set to md-frame, but MD labels are unavailable.")
-            return _sample_labels_from_fields(model, beta=beta, n_samples=n_reads, rng=rng)
+            return _sample_labels_from_fields(model, beta=beta, n_samples=n_reads, rng=rng), np.full(n_reads, -1, dtype=np.int64)
         if mode == "md-frame":
             if md_frame < 0:
                 raise ValueError("--sa-init md-frame requires --sa-init-md-frame >= 0.")
             if md_frame >= md_labels.shape[0]:
                 raise ValueError(f"--sa-init-md-frame {md_frame} out of range (0..{md_labels.shape[0]-1}).")
-            return np.repeat(md_labels[md_frame : md_frame + 1], n_reads, axis=0)
+            return np.repeat(md_labels[md_frame : md_frame + 1], n_reads, axis=0), np.full(n_reads, md_frame, dtype=np.int64)
         idx = rng.integers(0, md_labels.shape[0], size=n_reads)
-        return md_labels[idx]
+        return md_labels[idx], np.asarray(idx, dtype=np.int64)
     if mode in {"random-h", "h"}:
-        return _sample_labels_from_fields(model, beta=beta, n_samples=n_reads, rng=rng)
+        return _sample_labels_from_fields(model, beta=beta, n_samples=n_reads, rng=rng), np.full(n_reads, -1, dtype=np.int64)
     if mode in {"random-uniform", "uniform"}:
-        return _sample_labels_uniform(model.K_list(), n_reads, rng)
+        return _sample_labels_uniform(model.K_list(), n_reads, rng), np.full(n_reads, -1, dtype=np.int64)
     raise ValueError(f"Unknown sa-init mode: {mode}")
 
 
@@ -205,29 +206,30 @@ def _run_rex_chain_worker(payload: dict[str, object]) -> dict[str, object]:
         progress_mode=str(payload.get("progress_mode", "samples")),
     )
 
-def _filter_md_labels_for_states(
+def _filter_md_pool_for_states(
     labels: np.ndarray,
     frame_state_ids: np.ndarray | None,
+    frame_indices: np.ndarray,
     *,
     state_ids: Sequence[str] | None,
-) -> np.ndarray:
+) -> tuple[np.ndarray, np.ndarray]:
     if labels is None:
-        return labels
+        return labels, frame_indices
     if not state_ids:
-        return labels
+        return labels, frame_indices
     if frame_state_ids is None:
         raise ValueError("MD frame_state_ids missing in cluster NPZ; cannot filter by --sa-md-state-ids.")
     ids = [str(s).strip() for s in state_ids if str(s).strip()]
     if not ids:
-        return labels
+        return labels, frame_indices
     frame_ids = np.asarray(frame_state_ids).astype(str)
     mask = np.isin(frame_ids, ids)
     if not np.any(mask):
         raise ValueError(f"No MD frames matched sa_md_state_ids={ids}.")
-    return np.asarray(labels)[mask]
+    return np.asarray(labels)[mask], np.asarray(frame_indices, dtype=np.int64)[mask]
 
 
-def _load_sa_md_labels(payload: dict[str, object]) -> tuple[np.ndarray, np.ndarray | None]:
+def _load_sa_md_labels(payload: dict[str, object]) -> tuple[np.ndarray, np.ndarray | None, np.ndarray]:
     sample_path = str(payload.get("sa_md_sample_npz") or "").strip()
     sample_id = str(payload.get("sa_md_sample_id") or "").strip()
     if not sample_path:
@@ -242,7 +244,12 @@ def _load_sa_md_labels(payload: dict[str, object]) -> tuple[np.ndarray, np.ndarr
         if sample.frame_state_ids is not None and sample.frame_state_ids.shape[0] == labels.shape[0]
         else None
     )
-    return labels, frame_state_ids
+    frame_indices = (
+        np.asarray(sample.frame_indices, dtype=np.int64)
+        if sample.frame_indices is not None and sample.frame_indices.shape[0] == labels.shape[0]
+        else np.arange(labels.shape[0], dtype=np.int64)
+    )
+    return labels, frame_state_ids, frame_indices
 
 
 def _parse_str_list(raw: str) -> List[str]:
@@ -294,20 +301,22 @@ def _run_sa_independent_worker(payload: dict[str, object]) -> dict[str, object]:
     beta_range = payload.get("beta_range")  # type: ignore[assignment]
     beta_schedule_type = _normalize_sa_schedule_type(payload.get("sa_schedule_type", "geometric"))
     beta_schedule = _parse_sa_custom_schedule(payload.get("sa_custom_beta_schedule"))
-    sweeps_per_beta = int(payload.get("sa_num_sweeps_per_beta", 1))
-    randomize_order = bool(payload.get("sa_randomize_order", False))
+    sweeps_per_beta = int(payload.get("sa_num_sweeps_per_beta", 2))
+    randomize_order = bool(payload.get("sa_randomize_order", True))
     acceptance = str(payload.get("sa_acceptance_criteria", "Metropolis"))
     sa_init = str(payload.get("sa_init", "md"))
     sa_init_md_frame = int(payload.get("sa_init_md_frame", -1))
     repair = str(payload.get("repair", "none"))
 
-    md_labels, md_frame_state_ids = _load_sa_md_labels(payload)
+    md_labels, md_frame_state_ids, md_frame_indices = _load_sa_md_labels(payload)
     md_state_ids = _parse_str_list(str(payload.get("sa_md_state_ids", "")))
-    md_labels = _filter_md_labels_for_states(md_labels, md_frame_state_ids, state_ids=md_state_ids)
+    md_labels, md_frame_indices = _filter_md_pool_for_states(
+        md_labels, md_frame_state_ids, md_frame_indices, state_ids=md_state_ids
+    )
 
     qubo = potts_to_qubo_onehot(model, beta=beta, penalty_safety=penalty_safety)
     init_rng = np.random.default_rng(seed + 1000)
-    init_labels = _build_sa_initial_labels(
+    init_labels, init_pool_indices = _build_sa_initial_labels(
         mode=sa_init,
         md_labels=md_labels,
         model=model,
@@ -316,6 +325,9 @@ def _run_sa_independent_worker(payload: dict[str, object]) -> dict[str, object]:
         md_frame=sa_init_md_frame,
         rng=init_rng,
     )
+    init_frame_indices = np.full(n_reads, -1, dtype=np.int64)
+    has_md_start = init_pool_indices >= 0
+    init_frame_indices[has_md_start] = md_frame_indices[init_pool_indices[has_md_start]]
     init_states = encode_onehot(init_labels, qubo) if init_labels is not None and init_labels.size else None
 
     Z = sa_sample_qubo_neal(
@@ -333,7 +345,13 @@ def _run_sa_independent_worker(payload: dict[str, object]) -> dict[str, object]:
         initial_states=init_states,
     )
     labels, invalid_mask, valid_counts = _sa_decode_labels(Z, qubo, repair=repair)
-    return {"labels": labels, "invalid_mask": invalid_mask, "valid_counts": valid_counts}
+    return {
+        "labels": labels,
+        "invalid_mask": invalid_mask,
+        "valid_counts": valid_counts,
+        "sa_initial_labels": np.asarray(init_labels, dtype=np.int32),
+        "sa_initial_md_frame_indices": init_frame_indices,
+    }
 
 
 def _run_sa_chain_worker(payload: dict[str, object]) -> dict[str, object]:
@@ -356,8 +374,8 @@ def _run_sa_chain_worker(payload: dict[str, object]) -> dict[str, object]:
     beta_range = payload.get("beta_range")  # type: ignore[assignment]
     beta_schedule_type = _normalize_sa_schedule_type(payload.get("sa_schedule_type", "geometric"))
     beta_schedule = _parse_sa_custom_schedule(payload.get("sa_custom_beta_schedule"))
-    sweeps_per_beta = int(payload.get("sa_num_sweeps_per_beta", 1))
-    randomize_order = bool(payload.get("sa_randomize_order", False))
+    sweeps_per_beta = int(payload.get("sa_num_sweeps_per_beta", 2))
+    randomize_order = bool(payload.get("sa_randomize_order", True))
     acceptance = str(payload.get("sa_acceptance_criteria", "Metropolis"))
     sa_init = str(payload.get("sa_init", "md"))
     sa_init_md_frame = int(payload.get("sa_init_md_frame", -1))
@@ -367,9 +385,11 @@ def _run_sa_chain_worker(payload: dict[str, object]) -> dict[str, object]:
     if sa_restart not in {"previous", "md"}:
         raise ValueError("--sa-restart must be one of: previous, md (for chain mode).")
 
-    md_labels, md_frame_state_ids = _load_sa_md_labels(payload)
+    md_labels, md_frame_state_ids, md_frame_indices = _load_sa_md_labels(payload)
     md_state_ids = _parse_str_list(str(payload.get("sa_md_state_ids", "")))
-    md_labels = _filter_md_labels_for_states(md_labels, md_frame_state_ids, state_ids=md_state_ids)
+    md_labels, md_frame_indices = _filter_md_pool_for_states(
+        md_labels, md_frame_state_ids, md_frame_indices, state_ids=md_state_ids
+    )
 
     # Build QUBO and corresponding BQM once.
     qubo = potts_to_qubo_onehot(model, beta=beta, penalty_safety=penalty_safety)
@@ -379,7 +399,7 @@ def _run_sa_chain_worker(payload: dict[str, object]) -> dict[str, object]:
     sampler = neal.SimulatedAnnealingSampler()
 
     init_rng = np.random.default_rng(seed + 1000)
-    next_init = _build_sa_initial_labels(
+    next_init_rows, next_pool_indices = _build_sa_initial_labels(
         mode=sa_init,
         md_labels=md_labels,
         model=model,
@@ -387,12 +407,16 @@ def _run_sa_chain_worker(payload: dict[str, object]) -> dict[str, object]:
         n_reads=1,
         md_frame=sa_init_md_frame,
         rng=init_rng,
-    )[0]
+    )
+    next_init = next_init_rows[0]
+    next_frame_index = int(md_frame_indices[next_pool_indices[0]]) if int(next_pool_indices[0]) >= 0 else -1
 
     repair_mode = None if str(repair) == "none" else str(repair)
     labels = np.zeros((n_samples, len(qubo.var_slices)), dtype=np.int32)
     valid_counts = np.zeros(n_samples, dtype=np.int32)
     invalid_mask = np.zeros(n_samples, dtype=bool)
+    initial_labels = np.zeros((n_samples, len(qubo.var_slices)), dtype=np.int32)
+    initial_md_frame_indices = np.full(n_samples, -1, dtype=np.int64)
     sample_counter = _ProgressCounter(
         n_samples,
         str(payload.get("progress_desc") or "SA samples"),
@@ -402,6 +426,8 @@ def _run_sa_chain_worker(payload: dict[str, object]) -> dict[str, object]:
 
     try:
         for i in range(n_samples):
+            initial_labels[i] = next_init
+            initial_md_frame_indices[i] = next_frame_index
             init_state = encode_onehot(next_init, qubo)
             init = np.asarray(init_state, dtype=np.int8)[None, :]
             init_min = int(init.min()) if init.size else 0
@@ -459,9 +485,10 @@ def _run_sa_chain_worker(payload: dict[str, object]) -> dict[str, object]:
 
             if sa_restart == "previous":
                 next_init = _sa_project_labels_for_restart(z, qubo)
+                next_frame_index = -1
             else:
                 # fresh MD init for each sample
-                next_init = _build_sa_initial_labels(
+                next_rows, next_indices = _build_sa_initial_labels(
                     mode="md",
                     md_labels=md_labels,
                     model=model,
@@ -469,12 +496,20 @@ def _run_sa_chain_worker(payload: dict[str, object]) -> dict[str, object]:
                     n_reads=1,
                     md_frame=-1,
                     rng=init_rng,
-                )[0]
+                )
+                next_init = next_rows[0]
+                next_frame_index = int(md_frame_indices[next_indices[0]]) if int(next_indices[0]) >= 0 else -1
             sample_counter.update(1)
     finally:
         sample_counter.close()
 
-    return {"labels": labels, "invalid_mask": invalid_mask, "valid_counts": valid_counts}
+    return {
+        "labels": labels,
+        "invalid_mask": invalid_mask,
+        "valid_counts": valid_counts,
+        "sa_initial_labels": initial_labels,
+        "sa_initial_md_frame_indices": initial_md_frame_indices,
+    }
 
 
 def run_sampling(
@@ -508,12 +543,12 @@ def run_sampling(
     sa_reads: int = 2000,
     sa_chains: int = 1,
     sa_sweeps: int = 2000,
-    sa_beta_hot: float = 0.0,
-    sa_beta_cold: float = 0.0,
+    sa_beta_hot: float = 0.01,
+    sa_beta_cold: float = 2.0,
     sa_schedule_type: str = "geometric",
     sa_custom_beta_schedule: Sequence[float] | str | None = None,
-    sa_num_sweeps_per_beta: int = 1,
-    sa_randomize_order: bool = False,
+    sa_num_sweeps_per_beta: int = 2,
+    sa_randomize_order: bool = True,
     sa_acceptance_criteria: str = "Metropolis",
     sa_init: str = "md",
     sa_init_md_frame: int = -1,
@@ -521,7 +556,7 @@ def run_sampling(
     sa_restart_topk: int = 200,
     sa_md_sample_id: str = "",
     sa_md_state_ids: str = "",
-    penalty_safety: float = 8.0,
+    penalty_safety: float = 4.0,
     repair: str = "none",
     progress_callback: Callable[[str, int], None] | None = None,
 ) -> SamplingResult:
@@ -582,4 +617,5 @@ def run_sampling(
         sample_path=sample_path,
         n_samples=int(out["n_samples"]),
         n_residues=int(out["n_residues"]),
+        sa_diagnostics=out.get("sa_diagnostics"),
     )

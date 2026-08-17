@@ -946,8 +946,8 @@ def run_simulation_job(
             sa_beta_cold=float(sim_params.get("sa_beta_cold") or 0.0),
             sa_schedule_type=str(sim_params.get("sa_schedule_type") or "geometric"),
             sa_custom_beta_schedule=sim_params.get("sa_custom_beta_schedule"),
-            sa_num_sweeps_per_beta=int(sim_params.get("sa_num_sweeps_per_beta") or 1),
-            sa_randomize_order=bool(sim_params.get("sa_randomize_order") or False),
+            sa_num_sweeps_per_beta=int(sim_params.get("sa_num_sweeps_per_beta") or 2),
+            sa_randomize_order=bool(sim_params.get("sa_randomize_order", True)),
             sa_acceptance_criteria=str(sim_params.get("sa_acceptance_criteria") or "Metropolis"),
             sa_init=str(sim_params.get("sa_init") or "md"),
             sa_init_md_frame=int(sim_params.get("sa_init_md_frame") or -1),
@@ -955,7 +955,7 @@ def run_simulation_job(
             sa_restart_topk=int(sim_params.get("sa_restart_topk") or 200),
             sa_md_sample_id=sa_md_sample_id,
             sa_md_state_ids=str(sim_params.get("sa_md_state_ids") or ""),
-            penalty_safety=float(sim_params.get("penalty_safety") or 8.0),
+            penalty_safety=float(sim_params.get("penalty_safety") or 4.0),
             repair=str(sim_params.get("repair") or "none"),
         )
         payloads = prepared.get("payloads") or []
@@ -1065,12 +1065,15 @@ def run_simulation_job(
                 "sa_reads": 2000,
                 "sa_sweeps": 2000,
                 "sa_schedule_type": "geometric",
-                "sa_num_sweeps_per_beta": 1,
-                "sa_randomize_order": False,
+                "sa_beta_hot": 0.01,
+                "sa_beta_cold": 2.0,
+                "sa_num_sweeps_per_beta": 2,
+                "sa_randomize_order": True,
                 "sa_acceptance_criteria": "Metropolis",
                 "sa_init": "md",
                 "sa_restart": "independent",
                 "sa_chains": 1,
+                "penalty_safety": 4.0,
             }
 
             def _maybe(key: str, value: Any) -> None:
@@ -1132,6 +1135,8 @@ def run_simulation_job(
                 _maybe("sa_chains", int(raw.get("sa_chains")) if raw.get("sa_chains") is not None else None)
                 _maybe("sa_md_state_ids", str(raw.get("sa_md_state_ids") or ""))
                 _maybe("sa_restart_topk", int(raw.get("sa_restart_topk")) if raw.get("sa_restart_topk") is not None else None)
+                _maybe("penalty_safety", float(raw.get("penalty_safety")) if raw.get("penalty_safety") is not None else None)
+                _maybe("repair", str(raw.get("repair")) if raw.get("repair") is not None else None)
 
             return out
 
@@ -1148,6 +1153,7 @@ def run_simulation_job(
             "path": primary_path,
             "paths": sample_paths,
             "params": _filter_sampling_params(sim_params),
+            "sa_diagnostics": sampling_out.get("sa_diagnostics") if sampling_method == "sa" else None,
         }
         if isinstance(entry, dict):
             samples = entry.get("samples")

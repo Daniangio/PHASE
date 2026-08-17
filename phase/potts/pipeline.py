@@ -1247,7 +1247,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         default=200,
         help="If --sa-restart prev-topk, sample initial states from the top-k lowest-energy previous samples.",
     )
-    ap.add_argument("--penalty-safety", type=float, default=8.0, help="Controls how strong the one-hot constraint penalties are in the QUBO. Higher = fewer invalid assignments, but can make the QUBO landscape harder.")
+    ap.add_argument("--penalty-safety", type=float, default=4.0, help="Controls how strong the one-hot constraint penalties are in the QUBO. Higher = fewer invalid assignments, but can make the QUBO landscape harder.")
     ap.add_argument("--repair", type=str, default="none", choices=["none", "argmax"], help="What to do when a QUBO bitstring violates one-hot constraints: none: decode invalid slices as “invalid” (still assigns label 0, but validity is tracked; best for honesty). argmax: forcibly repair each residue by picking the largest bit (hides violations but produces a valid label vector).")
 
     # beta_eff estimation

@@ -190,6 +190,7 @@ export default function SamplingVizPage() {
   const [helpOpen, setHelpOpen] = useState(false);
   const [runPanelOpen, setRunPanelOpen] = useState(false);
   const [activeExplorerTab, setActiveExplorerTab] = useState('js');
+  const [selectedSaDiagnosticSampleId, setSelectedSaDiagnosticSampleId] = useState('');
   const [activeJsSubtab, setActiveJsSubtab] = useState('nodes');
   const [selectedAnalysisModelIds, setSelectedAnalysisModelIds] = useState([]);
   const [analysisSearch, setAnalysisSearch] = useState('');
@@ -210,6 +211,24 @@ export default function SamplingVizPage() {
   const sampleEntries = useMemo(() => selectedCluster?.samples || [], [selectedCluster]);
   const pottsModels = useMemo(() => selectedCluster?.potts_models || [], [selectedCluster]);
   const mdSamples = useMemo(() => sampleEntries.filter((s) => s.type === 'md_eval'), [sampleEntries]);
+  const diagnosticSaSamples = useMemo(
+    () => sampleEntries.filter((sample) => String(sample?.method || '').toLowerCase() === 'sa'),
+    [sampleEntries]
+  );
+  const selectedSaDiagnosticSample = useMemo(
+    () => diagnosticSaSamples.find((sample) => String(sample.sample_id) === String(selectedSaDiagnosticSampleId)) || diagnosticSaSamples[0] || null,
+    [diagnosticSaSamples, selectedSaDiagnosticSampleId]
+  );
+
+  useEffect(() => {
+    if (!diagnosticSaSamples.length) {
+      setSelectedSaDiagnosticSampleId('');
+      return;
+    }
+    if (!diagnosticSaSamples.some((sample) => String(sample.sample_id) === String(selectedSaDiagnosticSampleId))) {
+      setSelectedSaDiagnosticSampleId(String(diagnosticSaSamples[0].sample_id));
+    }
+  }, [diagnosticSaSamples, selectedSaDiagnosticSampleId]);
 
   const analysisLinkedSampleIds = useMemo(() => {
     if (!selectedAnalysisModelId) return new Set();
@@ -1504,6 +1523,13 @@ export default function SamplingVizPage() {
             >
               Energies
             </button>
+            <button
+              type="button"
+              onClick={() => setActiveExplorerTab('sa_diagnostics')}
+              className={`rounded-md px-3 py-2 text-sm ${activeExplorerTab === 'sa_diagnostics' ? 'bg-cyan-600 text-white' : 'text-gray-300 hover:bg-gray-800'}`}
+            >
+              SA diagnostics
+            </button>
           </div>
 
           {activeExplorerTab === 'js' && (
@@ -1806,6 +1832,119 @@ export default function SamplingVizPage() {
               })}
             </div>
           </section>
+          )}
+
+          {activeExplorerTab === 'sa_diagnostics' && (
+            <section className="space-y-4 rounded-lg border border-gray-800 bg-gray-900/40 p-4">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <h2 className="text-sm font-semibold text-gray-200">SA warm-start movement diagnostics</h2>
+                  <p className="mt-1 max-w-3xl text-[11px] text-gray-500">
+                    Each final SA read is compared directly with the exact labels supplied as that read's initial state. This distinguishes genuine movement from merely finding a nearby MD frame afterward.
+                  </p>
+                </div>
+                <select
+                  value={selectedSaDiagnosticSampleId}
+                  onChange={(event) => setSelectedSaDiagnosticSampleId(event.target.value)}
+                  className="min-w-[18rem] rounded border border-gray-700 bg-gray-950 px-3 py-2 text-xs text-gray-100"
+                >
+                  {diagnosticSaSamples.map((sample) => (
+                    <option key={sample.sample_id} value={sample.sample_id}>{sample.name || sample.sample_id}</option>
+                  ))}
+                </select>
+              </div>
+
+              {!diagnosticSaSamples.length && (
+                <div className="rounded-md border border-gray-700 bg-gray-950/40 p-4 text-sm text-gray-300">
+                  No SA samples exist in this cluster.
+                </div>
+              )}
+
+              {!!selectedSaDiagnosticSample && !selectedSaDiagnosticSample.sa_diagnostics && (
+                <div className="rounded-md border border-amber-800 bg-amber-950/30 p-4 text-sm text-amber-200">
+                  This sample predates direct warm-start diagnostics. Rerun SA sampling to record its exact initial states.
+                </div>
+              )}
+
+              {selectedSaDiagnosticSample?.sa_diagnostics && (() => {
+                const diagnostics = selectedSaDiagnosticSample.sa_diagnostics;
+                const histogram = Array.isArray(diagnostics.hamming_hist_counts) ? diagnostics.hamming_hist_counts : [];
+                const residueRates = Array.isArray(diagnostics.per_residue_change_fraction)
+                  ? diagnostics.per_residue_change_fraction
+                  : [];
+                const residueLabels = Array.isArray(clusterInfo?.residue_keys) && clusterInfo.residue_keys.length === residueRates.length
+                  ? clusterInfo.residue_keys
+                  : residueRates.map((_, index) => `res_${index}`);
+                const percent = (value) => Number.isFinite(Number(value)) ? `${(100 * Number(value)).toFixed(1)}%` : 'n/a';
+                return (
+                  <>
+                    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+                      {[
+                        ['Valid reads', `${diagnostics.valid_reads ?? 0} / ${diagnostics.total_reads ?? 0}`],
+                        ['Exact start matches', percent(diagnostics.exact_start_match_fraction)],
+                        ['Mean changed residues', Number.isFinite(Number(diagnostics.hamming_distance_mean)) ? Number(diagnostics.hamming_distance_mean).toFixed(2) : 'n/a'],
+                        ['Mean changed fraction', percent(diagnostics.changed_residue_fraction_mean)],
+                        ['MD warm-started reads', `${diagnostics.md_warm_started_reads ?? 0}`],
+                      ].map(([label, value]) => (
+                        <div key={label} className="rounded-md border border-gray-800 bg-gray-950/50 p-3">
+                          <p className="text-[10px] uppercase tracking-wide text-gray-500">{label}</p>
+                          <p className="mt-1 text-lg font-semibold text-gray-100">{value}</p>
+                        </div>
+                      ))}
+                    </div>
+                    <div className="grid gap-4 xl:grid-cols-2">
+                      <div className="rounded-md border border-gray-800 bg-white p-3">
+                        <p className="mb-2 text-xs font-semibold text-gray-800">Final-versus-start Hamming distance</p>
+                        <Plot
+                          data={[{
+                            type: 'bar',
+                            x: histogram.map((_, index) => index),
+                            y: histogram,
+                            marker: { color: '#0891b2' },
+                            hovertemplate: 'Changed residues: %{x}<br>Valid reads: %{y}<extra></extra>',
+                          }]}
+                          layout={{
+                            height: 330,
+                            margin: { l: 60, r: 20, t: 10, b: 55 },
+                            paper_bgcolor: '#ffffff', plot_bgcolor: '#ffffff', font: { color: '#111827' },
+                            xaxis: { title: 'Number of residues changed from own initial state' },
+                            yaxis: { title: 'Valid reads' },
+                          }}
+                          config={{ displayModeBar: false, responsive: true }}
+                          useResizeHandler
+                          style={{ width: '100%', height: '330px' }}
+                        />
+                      </div>
+                      <div className="rounded-md border border-gray-800 bg-white p-3">
+                        <p className="mb-2 text-xs font-semibold text-gray-800">Per-residue movement frequency</p>
+                        <Plot
+                          data={[{
+                            type: 'bar',
+                            x: residueLabels,
+                            y: residueRates,
+                            marker: { color: residueRates, colorscale: 'Turbo', cmin: 0, cmax: 1 },
+                            hovertemplate: '%{x}<br>Changed in %{y:.1%} of valid reads<extra></extra>',
+                          }]}
+                          layout={{
+                            height: 330,
+                            margin: { l: 60, r: 20, t: 10, b: 100 },
+                            paper_bgcolor: '#ffffff', plot_bgcolor: '#ffffff', font: { color: '#111827' },
+                            xaxis: { title: 'Residue', tickangle: -60, automargin: true },
+                            yaxis: { title: 'Fraction changed', range: [0, 1] },
+                          }}
+                          config={{ displayModeBar: false, responsive: true }}
+                          useResizeHandler
+                          style={{ width: '100%', height: '330px' }}
+                        />
+                      </div>
+                    </div>
+                    <div className="rounded-md border border-gray-800 bg-gray-950/40 p-3 text-xs text-gray-400">
+                      <strong className="text-gray-200">Interpretation:</strong> a high exact-match fraction or a Hamming distribution concentrated near zero indicates trapping around warm starts. Invalid one-hot reads are reported above but excluded from movement summaries. Lower penalty safety can improve movement while increasing invalid reads, so inspect both together.
+                    </div>
+                  </>
+                );
+              })()}
+            </section>
           )}
         </main>
       </div>

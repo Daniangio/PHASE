@@ -111,6 +111,28 @@ Console parameters:
 - **Keep invalid SA rows**: if off, rows flagged by `invalid_mask` are dropped before comparison and energy evaluation.
 - **Workers**: local multiprocessing fan-out. `0` means auto.
 
+## SA Diagnostics
+
+New SA samples retain the exact initial categorical labels supplied to every
+annealing read. The **SA diagnostics** tab compares each final read with its own
+initial state and reports:
+
+- exact-start match fraction
+- distribution of the number of changed residues (Hamming distance)
+- mean changed-residue fraction
+- per-residue movement frequency
+- valid and invalid one-hot read counts
+
+Invalid reads are counted but excluded from movement summaries because their
+decoded labels can be arbitrary when repair is disabled. A high exact-match
+fraction or a Hamming distribution concentrated near zero indicates trapping
+around warm starts.
+
+The exploratory SA defaults are an explicit geometric beta range of `0.01` to
+`2.0`, `2` sweeps per beta, randomized update order, and one-hot penalty safety
+`4.0`. Lower penalties can improve movement but may increase invalid reads, so
+these diagnostics should be interpreted together.
+
 ## Practical Limitation
 
 This job can create many small tasks. That is correct for the current design, but if a cluster has many MD samples and many generated samples, queue overhead can become noticeable.

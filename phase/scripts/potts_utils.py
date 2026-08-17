@@ -179,6 +179,7 @@ def persist_sample(
     params: dict,
     model_paths: list[Path] | None = None,
     sample_id: str | None = None,
+    sa_diagnostics: dict | None = None,
 ) -> str | None:
     data_root = Path(os.getenv("PHASE_DATA_ROOT", "/app/data"))
     store = ProjectStore(base_dir=data_root / "projects")
@@ -306,6 +307,7 @@ def persist_sample(
         "path": primary_path,
         "paths": paths,
         "params": params,
+        "sa_diagnostics": sa_diagnostics,
     }
     if existing is not None:
         existing.update(entry_payload)

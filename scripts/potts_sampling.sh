@@ -238,7 +238,7 @@ else
   SA_READS="$(prompt "SA reads" "2000")"
   SA_CHAINS="$(prompt "SA chain count (parallel independent chains)" "1")"
   SA_SWEEPS="$(prompt "SA sweeps" "2000")"
-  SA_SCHEDULE_MODE="$(prompt "SA schedule mode (auto/range/custom)" "auto")"
+  SA_SCHEDULE_MODE="$(prompt "SA schedule mode (auto/range/custom)" "range")"
   SA_SCHEDULE_MODE="$(printf "%s" "$SA_SCHEDULE_MODE" | tr '[:upper:]' '[:lower:]')"
   if [ "$SA_SCHEDULE_MODE" != "range" ] && [ "$SA_SCHEDULE_MODE" != "custom" ]; then
     SA_SCHEDULE_MODE="auto"
@@ -256,17 +256,17 @@ else
       SA_SCHEDULE_TYPE="geometric"
     fi
     if [ "$SA_SCHEDULE_MODE" = "range" ]; then
-      SA_BETA_HOT="$(prompt "SA beta hot" "0.8")"
-      SA_BETA_COLD="$(prompt "SA beta cold" "10.0")"
+      SA_BETA_HOT="$(prompt "SA beta hot" "0.01")"
+      SA_BETA_COLD="$(prompt "SA beta cold" "2.0")"
     fi
   fi
-  SA_NUM_SWEEPS_PER_BETA="$(prompt "SA sweeps per beta" "1")"
+  SA_NUM_SWEEPS_PER_BETA="$(prompt "SA sweeps per beta" "2")"
   SA_ACCEPTANCE_CRITERIA="$(prompt "SA acceptance criteria (Metropolis/Gibbs)" "Metropolis")"
   if [ "$SA_ACCEPTANCE_CRITERIA" != "Gibbs" ]; then
     SA_ACCEPTANCE_CRITERIA="Metropolis"
   fi
   SA_RANDOMIZE_ORDER="false"
-  if prompt_bool "Randomize SA update order? (y/N)" "N"; then
+  if prompt_bool "Randomize SA update order? (Y/n)" "Y"; then
     SA_RANDOMIZE_ORDER="true"
   fi
   SA_RESTART="$(prompt "SA restart (previous/md/independent)" "independent")"
@@ -284,7 +284,7 @@ else
     SA_INIT_MD_FRAME="$(prompt "SA init MD frame index" "0")"
   fi
   SA_MD_STATE_IDS="$(prompt "SA MD state IDs (comma separated, blank = all)" "")"
-  PENALTY_SAFETY="$(prompt "Penalty safety" "8.0")"
+  PENALTY_SAFETY="$(prompt "Penalty safety" "4.0")"
   REPAIR="$(prompt "Decode repair (none/argmax)" "none")"
   if [ "$REPAIR" != "argmax" ]; then
     REPAIR="none"
@@ -354,6 +354,8 @@ if [ "$SAMPLING_METHOD" = "sa" ]; then
   )
   if [ "$SA_RANDOMIZE_ORDER" = "true" ]; then
     CMD+=(--sa-randomize-order)
+  else
+    CMD+=(--no-sa-randomize-order)
   fi
   if [ -n "$(trim "$SA_INIT_MD_FRAME")" ]; then
     CMD+=(--sa-init-md-frame "$(trim "$SA_INIT_MD_FRAME")")
@@ -365,6 +367,9 @@ fi
 
 if [ "$SAMPLING_METHOD" = "sa" ] && [ "$SA_BETA_HOT" != "0" ] && [ "$SA_BETA_COLD" != "0" ]; then
   CMD+=(--sa-beta-hot "$SA_BETA_HOT" --sa-beta-cold "$SA_BETA_COLD")
+fi
+if [ "$SAMPLING_METHOD" = "sa" ] && { [ "$SA_SCHEDULE_MODE" = "auto" ] || [ "$SA_SCHEDULE_MODE" = "custom" ]; }; then
+  CMD+=(--sa-beta-hot 0 --sa-beta-cold 0)
 fi
 if [ "$SAMPLING_METHOD" = "sa" ] && [ "$SA_SCHEDULE_MODE" = "custom" ] && [ -n "$(trim "$SA_CUSTOM_BETA_SCHEDULE")" ]; then
   CMD+=(--sa-custom-beta-schedule "$(trim "$SA_CUSTOM_BETA_SCHEDULE")" --sa-schedule-type custom)

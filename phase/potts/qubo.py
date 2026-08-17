@@ -73,7 +73,7 @@ def potts_to_qubo_onehot(
     *,
     beta: float = 1.0,
     penalty_lambda: np.ndarray | None = None,
-    penalty_safety: float = 8.0,
+    penalty_safety: float = 4.0,
 ) -> QUBO:
     """
     Map Potts to QUBO with one-hot constraints per residue:

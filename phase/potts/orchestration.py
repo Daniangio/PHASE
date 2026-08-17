@@ -2669,12 +2669,12 @@ def prepare_sampling_batch(
     sa_reads: int = 2000,
     sa_chains: int = 1,
     sa_sweeps: int = 2000,
-    sa_beta_hot: float = 0.0,
-    sa_beta_cold: float = 0.0,
+    sa_beta_hot: float | None = None,
+    sa_beta_cold: float | None = None,
     sa_schedule_type: str = "geometric",
     sa_custom_beta_schedule: Sequence[float] | str | None = None,
-    sa_num_sweeps_per_beta: int = 1,
-    sa_randomize_order: bool = False,
+    sa_num_sweeps_per_beta: int = 2,
+    sa_randomize_order: bool = True,
     sa_acceptance_criteria: str = "Metropolis",
     sa_init: str = "md",
     sa_init_md_frame: int = -1,
@@ -2682,7 +2682,7 @@ def prepare_sampling_batch(
     sa_restart_topk: int = 200,
     sa_md_sample_id: str = "",
     sa_md_state_ids: str = "",
-    penalty_safety: float = 8.0,
+    penalty_safety: float = 4.0,
     repair: str = "none",
 ) -> dict[str, Any]:
     from phase.potts.sampling_run import (
@@ -2805,11 +2805,19 @@ def prepare_sampling_batch(
                 raise ValueError("--sa-custom-beta-schedule values must be finite and >= 0.")
         elif schedule_type not in {"geometric", "linear"}:
             raise ValueError("--sa-schedule-type must be geometric or linear unless using a custom schedule.")
-        if (sa_beta_hot and not sa_beta_cold) or (sa_beta_cold and not sa_beta_hot):
+        if (sa_beta_hot is None) != (sa_beta_cold is None):
             raise ValueError("Provide both --sa-beta-hot and --sa-beta-cold, or neither.")
         beta_range = None
-        if sa_beta_hot and sa_beta_cold:
-            beta_range = (float(sa_beta_hot), float(sa_beta_cold))
+        if sa_beta_hot is None and sa_beta_cold is None and not custom_schedule:
+            beta_range = (0.01, 2.0)
+        elif sa_beta_hot is not None and sa_beta_cold is not None:
+            hot, cold = float(sa_beta_hot), float(sa_beta_cold)
+            if hot < 0.0 or cold < 0.0 or hot > cold:
+                raise ValueError("SA beta bounds must satisfy 0 <= beta_hot <= beta_cold.")
+            if (hot == 0.0) != (cold == 0.0):
+                raise ValueError("Provide two positive SA beta bounds, or use 0,0 for neal auto range.")
+            if hot > 0.0 and cold > 0.0:
+                beta_range = (hot, cold)
         if custom_schedule and beta_range is not None:
             raise ValueError("Choose either --sa-custom-beta-schedule or --sa-beta-hot/--sa-beta-cold, not both.")
         restart = _normalize_sa_restart(sa_restart or "independent")
@@ -2871,6 +2879,22 @@ def prepare_sampling_batch(
         "gibbs_method": (gibbs_method or "single").strip().lower(),
         "sa_md_sample_npz": str(sa_md_sample_npz or ""),
         "sa_md_sample_id": str(sa_md_sample_id or ""),
+        "sa_config": {
+            "warm_start_sample_id": str(sa_md_sample_id or ""),
+            "init": str(sa_init),
+            "restart": str(sa_restart),
+            "reads": int(sa_reads),
+            "sweeps": int(sa_sweeps),
+            "beta_hot": float(beta_range[0]) if beta_range is not None else 0.0,
+            "beta_cold": float(beta_range[1]) if beta_range is not None else 0.0,
+            "schedule_type": str(sa_schedule_type),
+            "custom_beta_count": len(_parse_sa_custom_schedule(sa_custom_beta_schedule)),
+            "sweeps_per_beta": int(sa_num_sweeps_per_beta),
+            "randomize_order": bool(sa_randomize_order),
+            "acceptance_criteria": str(sa_acceptance_criteria),
+            "penalty_safety": float(penalty_safety),
+            "repair": str(repair),
+        } if method == "sa" else None,
         "n_residues": int(n_residues),
         "requested_workers": int(requested_workers),
         "progress_label": progress_label,
@@ -2895,6 +2919,8 @@ def aggregate_sampling_batch(
     parts_labels: list[np.ndarray] = []
     parts_invalid: list[np.ndarray] = []
     parts_valid_counts: list[np.ndarray] = []
+    parts_initial_labels: list[np.ndarray] = []
+    parts_initial_frames: list[np.ndarray] = []
     burnin_clipped = False
 
     for out in out_rows:
@@ -2907,6 +2933,10 @@ def aggregate_sampling_batch(
             parts_invalid.append(np.asarray(invalid_mask, dtype=bool))
         if valid_counts is not None:
             parts_valid_counts.append(np.asarray(valid_counts, dtype=np.int32))
+        if out.get("sa_initial_labels") is not None:
+            parts_initial_labels.append(np.asarray(out["sa_initial_labels"], dtype=np.int32))
+        if out.get("sa_initial_md_frame_indices") is not None:
+            parts_initial_frames.append(np.asarray(out["sa_initial_md_frame_indices"], dtype=np.int64))
         burnin_clipped = burnin_clipped or bool(out.get("burnin_clipped", False))
 
     labels = (
@@ -2925,8 +2955,63 @@ def aggregate_sampling_batch(
             if parts_valid_counts
             else np.zeros((labels.shape[0],), dtype=np.int32)
         )
-        save_sample_npz(sample_path, labels=labels, invalid_mask=invalid_mask, valid_counts=valid_counts)
+        initial_labels = (
+            np.concatenate(parts_initial_labels, axis=0)
+            if parts_initial_labels
+            else np.zeros((0, n_residues), dtype=np.int32)
+        )
+        initial_frames = (
+            np.concatenate(parts_initial_frames, axis=0)
+            if parts_initial_frames
+            else np.full((labels.shape[0],), -1, dtype=np.int64)
+        )
+        if initial_labels.shape != labels.shape:
+            raise ValueError(
+                f"SA initialization audit shape {initial_labels.shape} does not match sampled labels {labels.shape}."
+            )
+        hamming = np.count_nonzero(labels != initial_labels, axis=1).astype(np.int32)
+        changed_fraction = hamming.astype(np.float64) / float(max(1, n_residues))
+        valid_reads = ~invalid_mask
+        diagnostic_hamming = hamming[valid_reads]
+        diagnostic_changed = changed_fraction[valid_reads]
+        if np.any(valid_reads):
+            per_residue_change_fraction = np.mean(labels[valid_reads] != initial_labels[valid_reads], axis=0)
+        else:
+            per_residue_change_fraction = np.zeros((n_residues,), dtype=float)
+        hist_counts = np.bincount(diagnostic_hamming, minlength=n_residues + 1).astype(np.int64)
+        sa_diagnostics = {
+            "version": 1,
+            "comparison": "final sampled labels versus the exact initial labels supplied to the same SA read",
+            "total_reads": int(labels.shape[0]),
+            "valid_reads": int(np.count_nonzero(valid_reads)),
+            "invalid_reads": int(np.count_nonzero(invalid_mask)),
+            "md_warm_started_reads": int(np.count_nonzero(initial_frames >= 0)),
+            "exact_start_match_count": int(np.count_nonzero(diagnostic_hamming == 0)),
+            "exact_start_match_fraction": float(np.mean(diagnostic_hamming == 0)) if diagnostic_hamming.size else None,
+            "hamming_distance_mean": float(np.mean(diagnostic_hamming)) if diagnostic_hamming.size else None,
+            "hamming_distance_median": float(np.median(diagnostic_hamming)) if diagnostic_hamming.size else None,
+            "hamming_distance_std": float(np.std(diagnostic_hamming)) if diagnostic_hamming.size else None,
+            "hamming_distance_min": int(np.min(diagnostic_hamming)) if diagnostic_hamming.size else None,
+            "hamming_distance_max": int(np.max(diagnostic_hamming)) if diagnostic_hamming.size else None,
+            "changed_residue_fraction_mean": float(np.mean(diagnostic_changed)) if diagnostic_changed.size else None,
+            "hamming_hist_counts": hist_counts.tolist(),
+            "per_residue_change_fraction": np.asarray(per_residue_change_fraction, dtype=float).tolist(),
+            "configuration": dict(prepared.get("sa_config") or {}),
+        }
+        save_sample_npz(
+            sample_path,
+            labels=labels,
+            invalid_mask=invalid_mask,
+            valid_counts=valid_counts,
+            extra={
+                "sa_initial_labels": initial_labels,
+                "sa_initial_md_frame_indices": initial_frames,
+                "sa_hamming_distance": hamming,
+                "sa_changed_residue_fraction": changed_fraction.astype(np.float32),
+            },
+        )
     else:
+        sa_diagnostics = None
         save_sample_npz(sample_path, labels=labels)
 
     result = {
@@ -2935,6 +3020,7 @@ def aggregate_sampling_batch(
         "n_residues": int(labels.shape[1]) if labels.ndim == 2 else int(n_residues),
         "workers_used": int(max(1, workers_used)),
         "burnin_clipped": bool(burnin_clipped),
+        "sa_diagnostics": sa_diagnostics,
     }
     atomic_pickle_dump(orchestration_paths(sample_path.parent)["aggregate"], result)
     return result

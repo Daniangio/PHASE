@@ -35,6 +35,11 @@ class SampleNPZ:
       - labels_halo: (T, N) int32 (MD-only; "halo" label mode)
       - frame_indices: (T,) int64 (MD-only; original trajectory frame indices)
       - frame_state_ids: (T,) str (MD-only; original state id per frame, when mixing sources)
+
+    SA artifacts can additionally contain audit arrays written through ``extra``:
+      - sa_initial_labels: (T, N) exact labels supplied to each annealing read
+      - sa_initial_md_frame_indices: (T,) source MD frame, or -1 for non-MD/chain starts
+      - sa_hamming_distance: (T,) changed residues from that read's initial state
     """
 
     labels: np.ndarray
