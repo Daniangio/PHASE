@@ -115,7 +115,7 @@ if [ "$EDGE_MODE" = "contact" ]; then
   fi
   CONTACT_PDBS="$(prompt "Extra contact PDB paths (comma separated, optional)" "")"
   CONTACT_PDBS="$(trim "$CONTACT_PDBS")"
-  CONTACT_CUTOFF="$(prompt "Contact cutoff (A)" "10.0")"
+  CONTACT_CUTOFF="$(prompt "Contact cutoff (A)" "6.0")"
   CONTACT_ATOM_MODE="$(prompt "Contact atom mode (CA/CM)" "CA")"
   CONTACT_ATOM_MODE="$(printf "%s" "$CONTACT_ATOM_MODE" | tr '[:lower:]' '[:upper:]')"
   if [ "$CONTACT_ATOM_MODE" != "CM" ]; then CONTACT_ATOM_MODE="CA"; fi

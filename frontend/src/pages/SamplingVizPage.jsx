@@ -8,11 +8,14 @@ import ErrorMessage from '../components/common/ErrorMessage';
 import HelpDrawer from '../components/common/HelpDrawer';
 import EnergyDistributionPlot, {
   buildEnergyDistributionPlot,
+  EnergySeriesSelectorButton,
+  useEnergySeriesSelection,
 } from '../components/common/EnergyDistributionPlot';
 import {
   deleteClusterAnalysis,
   fetchClusterAnalyses,
   fetchClusterAnalysisData,
+  fetchClusterUiSetups,
   fetchPottsClusterInfo,
   fetchSystem,
 } from '../api/projects';
@@ -169,6 +172,8 @@ export default function SamplingVizPage() {
   const [runAnalysisModelIds, setRunAnalysisModelIds] = useState([]);
   const [energyLoadLimit, setEnergyLoadLimit] = useState(1500);
   const [energyGraphMode, setEnergyGraphMode] = useState('histogram');
+  const [energyResidueSelectionId, setEnergyResidueSelectionId] = useState('');
+  const [residueSelectionSetups, setResidueSelectionSetups] = useState([]);
   const [analysisEdgeMode, setAnalysisEdgeMode] = useState('model');
   const [analysisContactCutoff, setAnalysisContactCutoff] = useState('10');
   const [analysisContactAtomMode, setAnalysisContactAtomMode] = useState('CA');
@@ -361,7 +366,12 @@ export default function SamplingVizPage() {
     analysisDataCacheRef.current = {};
     analysisDataInFlightRef.current = {};
     setSelectedMdSampleId('');
-  }, [selectedClusterId, loadClusterInfo, loadAnalyses]);
+    setEnergyResidueSelectionId('');
+    setResidueSelectionSetups([]);
+    fetchClusterUiSetups(projectId, systemId, selectedClusterId, { setupType: 'residue_selection' })
+      .then((response) => setResidueSelectionSetups(Array.isArray(response?.setups) ? response.setups : []))
+      .catch(() => setResidueSelectionSetups([]));
+  }, [selectedClusterId, loadClusterInfo, loadAnalyses, projectId, systemId]);
 
   useEffect(() => {
     if (!selectedClusterId) return;
@@ -616,7 +626,10 @@ export default function SamplingVizPage() {
       const maxRowsKey = options?.maxRows != null ? `:maxRows=${Number(options.maxRows)}` : '';
       const summaryOnlyKey = options?.summaryOnly ? ':summaryOnly=1' : '';
       const sampleSeedKey = options?.sampleSeed != null ? `:seed=${Number(options.sampleSeed)}` : '';
-      const cacheKey = `${analysisType}:${analysisId}${maxRowsKey}${summaryOnlyKey}${sampleSeedKey}`;
+      const residueSelectionKey = options?.residueSelectionSetupId
+        ? `:residueSelection=${String(options.residueSelectionSetupId)}`
+        : '';
+      const cacheKey = `${analysisType}:${analysisId}${maxRowsKey}${summaryOnlyKey}${sampleSeedKey}${residueSelectionKey}`;
       const cached = analysisDataCacheRef.current;
       if (Object.prototype.hasOwnProperty.call(cached, cacheKey)) return cached[cacheKey];
 
@@ -924,10 +937,13 @@ export default function SamplingVizPage() {
   const [energyLoading, setEnergyLoading] = useState(false);
 
   useEffect(() => {
+    let cancelled = false;
     const run = async () => {
       setEnergyError(null);
-      setEnergyGraphs([]);
-      if (!selectedAnalysisModelIds.length) return;
+      if (!selectedAnalysisModelIds.length) {
+        setEnergyGraphs([]);
+        return;
+      }
       setEnergyLoading(true);
       try {
         const graphs = [];
@@ -948,6 +964,7 @@ export default function SamplingVizPage() {
             const payload = await loadAnalysisData('model_energy', meta.analysis_id, {
               maxRows: energyLoadLimit > 0 ? energyLoadLimit : undefined,
               sampleSeed: 0,
+              residueSelectionSetupId: energyResidueSelectionId || undefined,
             });
             const energies = payload?.data?.energies || [];
             if (!Array.isArray(energies) || !energies.length) continue;
@@ -964,14 +981,20 @@ export default function SamplingVizPage() {
           }
           graphs.push({ modelId: group.modelId, modelName: group.modelName, series });
         }
-        setEnergyGraphs(graphs);
+        if (!cancelled) setEnergyGraphs(graphs);
       } catch (err) {
-        setEnergyError(err.message || 'Failed to load selected model energies.');
+        if (!cancelled) {
+          setEnergyGraphs([]);
+          setEnergyError(err.message || 'Failed to load selected model energies.');
+        }
       } finally {
-        setEnergyLoading(false);
+        if (!cancelled) setEnergyLoading(false);
       }
     };
     run();
+    return () => {
+      cancelled = true;
+    };
   }, [
     selectedAnalysisModelIds,
     selectedAnalysisGroups,
@@ -980,12 +1003,38 @@ export default function SamplingVizPage() {
     dropInvalid,
     loadAnalysisData,
     energyLoadLimit,
+    energyResidueSelectionId,
     sampleEntries,
   ]);
 
-  const globalEnergyRange = useMemo(() => {
-    return finiteRangeFromEnergyGraphs(energyGraphs);
+  const energySampleOptions = useMemo(() => {
+    const bySampleId = new Map();
+    energyGraphs.forEach((graph) => {
+      graph.series.forEach((series) => {
+        const sampleId = String(series.sample_id || '').trim();
+        if (!sampleId || bySampleId.has(sampleId)) return;
+        bySampleId.set(sampleId, { ...series, id: sampleId });
+      });
+    });
+    return Array.from(bySampleId.values());
   }, [energyGraphs]);
+
+  const {
+    selectedIds: selectedEnergySampleIds,
+    setSelectedIds: setSelectedEnergySampleIds,
+  } = useEnergySeriesSelection(energySampleOptions);
+  const selectedEnergySampleSet = useMemo(() => new Set(selectedEnergySampleIds), [selectedEnergySampleIds]);
+  const visibleEnergyGraphs = useMemo(
+    () => energyGraphs.map((graph) => ({
+      ...graph,
+      series: graph.series.filter((series) => selectedEnergySampleSet.has(String(series.sample_id || ''))),
+    })),
+    [energyGraphs, selectedEnergySampleSet]
+  );
+
+  const globalEnergyRange = useMemo(() => {
+    return finiteRangeFromEnergyGraphs(visibleEnergyGraphs);
+  }, [visibleEnergyGraphs]);
 
   if (loadingSystem) return <Loader message="Loading sampling explorer..." />;
   if (systemError) return <ErrorMessage message={systemError} />;
@@ -1666,6 +1715,33 @@ export default function SamplingVizPage() {
               </div>
               <div className="flex items-center gap-2">
                 <select
+                  value={energyResidueSelectionId}
+                  onChange={(event) => setEnergyResidueSelectionId(event.target.value)}
+                  className="rounded border border-gray-700 bg-gray-950 px-2 py-1.5 text-xs text-gray-100"
+                  title="Use total model energy, or sum selected node terms and every model edge touching the selection."
+                >
+                  <option value="">Total protein energy</option>
+                  {residueSelectionSetups.map((setup) => (
+                    <option key={setup.setup_id} value={setup.setup_id}>
+                      Selection: {setup.name || setup.setup_id}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  onClick={() => navigate(`/projects/${projectId}/systems/${systemId}/residue_selections?cluster_id=${encodeURIComponent(selectedClusterId)}`)}
+                  className="rounded border border-gray-700 bg-gray-950 px-2 py-1.5 text-xs text-gray-100 hover:border-gray-500"
+                >
+                  Manage selections
+                </button>
+                <EnergySeriesSelectorButton
+                  series={energySampleOptions}
+                  selectedIds={selectedEnergySampleIds}
+                  onChange={setSelectedEnergySampleIds}
+                  dark
+                  label="Select samples"
+                />
+                <select
                   value={energyGraphMode}
                   onChange={(e) => setEnergyGraphMode(e.target.value)}
                   className="rounded border border-gray-700 bg-gray-950 px-2 py-1.5 text-xs text-gray-100"
@@ -1673,7 +1749,9 @@ export default function SamplingVizPage() {
                   <option value="histogram">histograms + fitted curves</option>
                   <option value="curves">fitted curves only</option>
                 </select>
-                <span className="text-[11px] text-gray-500">{energyGraphs.length} model graph(s)</span>
+                <span className="text-[11px] text-gray-500">
+                  {visibleEnergyGraphs.filter((graph) => graph.series.length).length} model graph(s)
+                </span>
               </div>
             </div>
 
@@ -1689,9 +1767,14 @@ export default function SamplingVizPage() {
                 No energy analyses found for the selected models/settings. Run a new analysis first.
               </div>
             )}
+            {!!energySampleOptions.length && !energyLoading && !selectedEnergySampleIds.length && (
+              <div className="rounded-md border border-gray-700 bg-gray-950/40 p-3 text-sm text-gray-300">
+                No samples selected. Use <strong>Select samples</strong> to add trajectories to the graphs.
+              </div>
+            )}
 
             <div className="space-y-4">
-              {energyGraphs.filter((graph) => graph.series.length).map((graph) => {
+              {visibleEnergyGraphs.filter((graph) => graph.series.length).map((graph) => {
                 const plot = buildEnergyDistributionPlot({
                   series: graph.series,
                   mode: energyGraphMode,

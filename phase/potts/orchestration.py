@@ -536,6 +536,7 @@ def prepare_potts_analysis_batch(
 
     ds = load_npz(str(cluster_path), unassigned_policy="drop_frames", allow_missing_edges=True)
     K = [int(v) for v in np.asarray(ds.cluster_counts, dtype=int).tolist()]
+    residue_keys = [str(v) for v in np.asarray(ds.residue_keys).tolist()]
     cluster_edges = list(ds.edges or [])
 
     samples = store.list_samples(project_id, system_id, cluster_id)
@@ -712,6 +713,7 @@ def prepare_potts_analysis_batch(
                         "npz_path": str(sample_npz_path or ""),
                     },
                     "model_paths": [str(path) for path in resolved_model_paths],
+                    "residue_keys": residue_keys,
                     "md_mode": str(sample_entry.get("type") or "").strip().lower() == "md_eval",
                     "md_label_mode": str(md_label_mode or "assigned"),
                     "drop_invalid": bool(drop_invalid),
@@ -740,6 +742,7 @@ def prepare_potts_analysis_batch(
         "md_label_mode": str(md_label_mode or "assigned"),
         "drop_invalid": bool(drop_invalid),
         "edges_for_metrics": [tuple(map(int, edge)) for edge in edges_for_metrics],
+        "residue_keys": residue_keys,
         "edge_selection": {
             "mode": edge_mode,
             "contact_cutoff": (float(contact_cutoff) if edge_mode == "contact" else None),
@@ -846,6 +849,10 @@ def _potts_analysis_payload_worker(payload: dict[str, Any]) -> dict[str, Any]:
             "kind": "model_energy",
             "sample": sample,
             "energies": np.asarray(energy_payload["energies"], dtype=float),
+            "node_energies": np.asarray(energy_payload["node_energies"], dtype=np.float32),
+            "edge_energies": np.asarray(energy_payload["edge_energies"], dtype=np.float32),
+            "edge_index": np.asarray(energy_payload["edge_index"], dtype=np.int32),
+            "residue_keys": [str(value) for value in (payload.get("residue_keys") or [])],
             "frame_indices": np.asarray(loaded.get("frame_indices"), dtype=np.int64),
             "summary": {
                 "energy_mean": float(energy_payload["energy_mean"]),
@@ -937,10 +944,19 @@ def aggregate_potts_analysis_batch(
             analysis_dir = energies_root / analysis_id
             analysis_dir.mkdir(parents=True, exist_ok=True)
             npz_path = analysis_dir / "analysis.npz"
+            components_path = analysis_dir / "energy_components.npz"
             np.savez_compressed(
                 npz_path,
                 energies=np.asarray(row.get("energies"), dtype=float),
+                residue_keys=np.asarray(row.get("residue_keys") or prepared.get("residue_keys") or [], dtype=str),
                 frame_indices=np.asarray(row.get("frame_indices"), dtype=np.int64),
+            )
+            np.savez_compressed(
+                components_path,
+                node_energies=np.asarray(row.get("node_energies"), dtype=np.float32),
+                edge_energies=np.asarray(row.get("edge_energies"), dtype=np.float32),
+                edge_index=np.asarray(row.get("edge_index"), dtype=np.int32).reshape((-1, 2)),
+                residue_keys=np.asarray(row.get("residue_keys") or prepared.get("residue_keys") or [], dtype=str),
             )
             sample = row.get("sample") or {}
             meta = {
@@ -962,8 +978,11 @@ def aggregate_potts_analysis_batch(
                 "md_label_mode": md_label_mode,
                 "paths": {
                     "analysis_npz": _relativize(npz_path, system_dir),
+                    "energy_components_npz": _relativize(components_path, system_dir),
                 },
                 "summary": row.get("summary") or {},
+                "energy_components_available": True,
+                "energy_component_semantics": "selected nodes plus every model edge touching a selected node",
                 "edge_selection": edge_selection,
             }
             (analysis_dir / ANALYSIS_METADATA_FILENAME).write_text(json.dumps(_convert_nan_to_none(meta), indent=2), encoding="utf-8")

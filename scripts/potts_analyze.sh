@@ -93,7 +93,7 @@ fi
 CONTACT_CUTOFF="10.0"
 CONTACT_ATOM_MODE="CA"
 if [ "$ANALYSIS_EDGE_MODE" = "contact" ]; then
-  CONTACT_CUTOFF="$(prompt "Contact cutoff (A)" "10.0")"
+  CONTACT_CUTOFF="$(prompt "Contact cutoff (A)" "6.0")"
   CONTACT_ATOM_MODE="$(prompt "Contact atom mode (CA/CM)" "CA")"
   CONTACT_ATOM_MODE="$(printf "%s" "$CONTACT_ATOM_MODE" | tr '[:lower:]' '[:upper:]')"
   if [ "$CONTACT_ATOM_MODE" != "CM" ]; then CONTACT_ATOM_MODE="CA"; fi

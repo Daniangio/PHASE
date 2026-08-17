@@ -151,7 +151,7 @@ if [ "$RESUME_EXISTING" = "false" ]; then
     CONTACT_PDBS="$(printf "%s\n" "$PDB_ROWS" | awk -F'|' '{print $3}' | paste -sd, -)"
     CONTACT_MODE="$(prompt "Contact mode (CA/CM)" "CA")"
     CONTACT_MODE="$(printf "%s" "$CONTACT_MODE" | tr '[:lower:]' '[:upper:]')"
-    CONTACT_CUTOFF="$(prompt "Contact cutoff (A)" "10.0")"
+    CONTACT_CUTOFF="$(prompt "Contact cutoff (A)" "6.0")"
   fi
 else
   echo "Using contact edges from existing model: ${SELECTED_MODEL_NAME:-$SELECTED_MODEL_PATH}"

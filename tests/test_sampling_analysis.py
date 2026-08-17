@@ -8,9 +8,9 @@ import numpy as np
 os.environ.setdefault("PHASE_DATA_ROOT", "/tmp/phase-test-data")
 
 from backend import tasks
-from backend.api.v1.analysis_payloads import downsample_model_energy_payload
+from backend.api.v1.analysis_payloads import apply_model_energy_residue_selection, downsample_model_energy_payload
 from backend.tasks import run_md_samples_refresh_job
-from phase.potts.analysis_run import analyze_cluster_samples
+from phase.potts.analysis_run import analyze_cluster_samples, compute_sample_energies
 from phase.potts.orchestration import _filter_potts_analysis_samples, _load_additive_potts_analysis_model
 from phase.potts.potts_model import PottsModel, save_potts_model
 from phase.potts.sample_io import save_sample_npz
@@ -102,6 +102,41 @@ def test_sampling_explorer_adds_selected_potts_hamiltonians(tmp_path):
 
     expected = model_a.energy_batch(labels) + model_b.energy_batch(labels)
     assert np.allclose(additive.energy_batch(labels), expected)
+
+
+def test_sample_energy_components_reconstruct_total_and_support_residue_selection():
+    model = PottsModel(
+        h=[np.asarray([1.0, 2.0]), np.asarray([3.0, 5.0]), np.asarray([-1.0, 4.0])],
+        J={
+            (0, 1): np.asarray([[0.0, 0.5], [1.0, 1.5]]),
+            (1, 2): np.asarray([[2.0, 3.0], [4.0, 6.0]]),
+        },
+        edges=[(0, 1), (1, 2)],
+    )
+    labels = np.asarray([[0, 0, 1], [1, 1, 0]], dtype=np.int32)
+
+    payload = compute_sample_energies(model, labels)
+
+    assert payload["node_energies"].shape == (2, 3)
+    assert payload["edge_energies"].shape == (2, 2)
+    assert payload["edge_index"].tolist() == [[0, 1], [1, 2]]
+    assert np.allclose(
+        payload["energies"],
+        payload["node_energies"].sum(axis=1) + payload["edge_energies"].sum(axis=1),
+    )
+    assert np.allclose(payload["energies"], model.energy_batch(labels))
+
+    selected = apply_model_energy_residue_selection(
+        {
+            "energies": payload["energies"],
+            "node_energies": payload["node_energies"],
+            "edge_energies": payload["edge_energies"],
+            "edge_index": payload["edge_index"],
+        },
+        {0},
+    )
+    expected = payload["node_energies"][:, 0] + payload["edge_energies"][:, 0]
+    assert np.allclose(selected["energies"], expected)
 
 
 def _write_sample(system_dir: Path, cluster_id: str, sample_id: str, meta: dict, *, labels: np.ndarray, invalid_mask=None):
@@ -334,6 +369,13 @@ def test_analyze_cluster_samples_supports_parallel_local_workers(monkeypatch, tm
     assert out["comparisons_written"] == 1
     assert out["energies_written"] == 2
     assert out["workers_used"] == 2
+    energy_paths = sorted((cluster_dir / "analyses" / "model_energy").glob("*/analysis.npz"))
+    assert len(energy_paths) == 2
+    with np.load(energy_paths[0].with_name("energy_components.npz"), allow_pickle=False) as energy_data:
+        assert energy_data["node_energies"].shape[1] == 2
+        assert energy_data["edge_energies"].shape[1] == 1
+        assert energy_data["edge_index"].tolist() == [[0, 1]]
+        assert energy_data["residue_keys"].tolist() == ["res_1", "res_2"]
 
 
 def test_run_potts_analysis_job_uses_distributed_rq_workers(tmp_path, monkeypatch):

@@ -962,10 +962,30 @@ def compute_md_vs_sample_metrics(
 
 
 def compute_sample_energies(model: PottsModel, X: np.ndarray) -> Dict[str, Any]:
-    energies = model.energy_batch(X)
+    X = np.asarray(X, dtype=int)
+    if X.ndim != 2:
+        raise ValueError(f"Potts energy labels must have shape (frames, residues); got {X.shape}.")
+    if X.shape[1] != len(model.h):
+        raise ValueError(
+            f"Potts energy labels contain {X.shape[1]} residues, but the model contains {len(model.h)}."
+        )
+
+    # Persist the decomposition used to obtain the total. This keeps analysis
+    # generation independent from later residue-selection visualization.
+    node_energies = np.column_stack(
+        [np.asarray(field)[X[:, residue]] for residue, field in enumerate(model.h)]
+    ) if model.h else np.zeros((X.shape[0], 0), dtype=float)
+    edge_index = np.asarray(model.edges, dtype=np.int32).reshape((-1, 2))
+    edge_energies = np.column_stack(
+        [model.J[(int(r), int(s))][X[:, int(r)], X[:, int(s)]] for r, s in model.edges]
+    ) if model.edges else np.zeros((X.shape[0], 0), dtype=float)
+    energies = np.sum(node_energies, axis=1) + np.sum(edge_energies, axis=1)
     if energies is None or energies.size == 0:
         return {
             "energies": np.asarray([], dtype=float),
+            "node_energies": node_energies,
+            "edge_energies": edge_energies,
+            "edge_index": edge_index,
             "energy_mean": None,
             "energy_median": None,
             "energy_min": None,
@@ -973,6 +993,9 @@ def compute_sample_energies(model: PottsModel, X: np.ndarray) -> Dict[str, Any]:
         }
     payload: Dict[str, Any] = {
         "energies": energies,
+        "node_energies": node_energies,
+        "edge_energies": edge_energies,
+        "edge_index": edge_index,
         "energy_mean": float(np.mean(energies)) if np.isfinite(np.mean(energies)) else None,
         "energy_median": float(np.median(energies)) if np.isfinite(np.median(energies)) else None,
         "energy_min": float(np.min(energies)) if np.isfinite(np.min(energies)) else None,

@@ -55,6 +55,22 @@ How to interpret:
 Energies are computed under the selected Potts model, or under the sum of all
 selected models.
 
+The **Select samples** control removes unwanted MD or generated trajectories
+from every selected-model graph and from its legend. The x-axis range is then
+recomputed from only the visible trajectories, while remaining shared across
+all visible model graphs.
+
+New energy analyses also store the framewise Hamiltonian decomposition:
+
+- one field contribution per residue
+- one coupling contribution per model edge
+
+Choose a saved residue selection to visualize a regional energy. PHASE sums
+the selected residue fields and every coupling edge with at least one endpoint
+in the selection. This is computed on demand from the stored components; the
+analysis does not need to be rerun for each selection. Analyses created before
+this component format must be rerun before regional filtering is available.
+
 Interpretation:
 
 - Different samples can have different energy ranges.

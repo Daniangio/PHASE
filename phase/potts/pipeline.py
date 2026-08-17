@@ -1102,7 +1102,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         default="",
         help="Comma-separated PDB paths to compute contact edges if the NPZ has none.",
     )
-    ap.add_argument("--contact-cutoff", type=float, default=10.0, help="Contact cutoff (Angstrom).")
+    ap.add_argument("--contact-cutoff", type=float, default=6.0, help="Contact cutoff (Angstrom).")
     ap.add_argument("--contact-atom-mode", choices=["CA", "CM"], default="CA")
     ap.add_argument(
         "--contact-all-vs-all",

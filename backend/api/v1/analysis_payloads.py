@@ -5,6 +5,36 @@ from typing import Any
 import numpy as np
 
 
+def apply_model_energy_residue_selection(
+    payload_np: dict[str, np.ndarray],
+    selected_residue_indices: set[int],
+) -> dict[str, np.ndarray]:
+    """Replace total energies with selected-node and touching-edge contributions."""
+    node = np.asarray(payload_np.get("node_energies", np.asarray([])), dtype=np.float32)
+    edge = np.asarray(payload_np.get("edge_energies", np.asarray([])), dtype=np.float32)
+    edge_index = np.asarray(payload_np.get("edge_index", np.asarray([])), dtype=np.int32)
+    if node.ndim != 2:
+        raise ValueError("This energy analysis has no per-node components. Rerun Sampling Explorer analysis.")
+    selected = {int(idx) for idx in selected_residue_indices if 0 <= int(idx) < node.shape[1]}
+    if not selected:
+        raise ValueError("Residue selection did not match any residue in this energy analysis.")
+
+    node_columns = sorted(selected)
+    energies = np.sum(node[:, node_columns], axis=1, dtype=np.float64)
+    if edge.ndim != 2 or edge_index.ndim != 2 or edge_index.shape[1] != 2 or edge.shape[1] != edge_index.shape[0]:
+        raise ValueError("This energy analysis has invalid per-edge components. Rerun Sampling Explorer analysis.")
+    edge_mask = np.asarray(
+        [(int(r) in selected) or (int(s) in selected) for r, s in edge_index.tolist()],
+        dtype=bool,
+    )
+    if np.any(edge_mask):
+        energies += np.sum(edge[:, edge_mask], axis=1, dtype=np.float64)
+
+    out = dict(payload_np)
+    out["energies"] = np.asarray(energies, dtype=np.float64)
+    return out
+
+
 def compact_potts_nn_payload(payload_np: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
     keep_keys = {
         "analysis_format_version",
@@ -105,10 +135,10 @@ def downsample_model_energy_payload(payload_np: dict[str, np.ndarray], *, row_li
     rng = np.random.default_rng(int(seed))
     keep_rows = np.sort(rng.choice(row_count, size=int(row_limit), replace=False).astype(np.int32))
     out = dict(payload_np)
-    out["energies"] = np.asarray(energies[keep_rows], dtype=energies.dtype)
-    frame_indices = np.asarray(out.get("frame_indices", np.asarray([], dtype=np.int64)))
-    if frame_indices.ndim == 1 and frame_indices.shape[0] == row_count:
-        out["frame_indices"] = np.asarray(frame_indices[keep_rows], dtype=frame_indices.dtype)
+    for key in ("energies", "frame_indices", "node_energies", "edge_energies"):
+        arr = np.asarray(out.get(key, np.asarray([])))
+        if arr.ndim >= 1 and arr.shape[0] == row_count:
+            out[key] = np.asarray(arr[keep_rows], dtype=arr.dtype)
     out["sampled_row_indices"] = np.asarray(keep_rows, dtype=np.int32)
     out["sampled_row_count"] = np.asarray([int(keep_rows.shape[0])], dtype=np.int32)
     out["original_row_count"] = np.asarray([row_count], dtype=np.int32)

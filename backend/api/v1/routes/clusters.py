@@ -16,6 +16,7 @@ import numpy as np
 
 from backend.api.v1.common import DATA_ROOT, get_queue, project_store, stream_upload, get_cluster_entry
 from backend.api.v1.analysis_payloads import (
+    apply_model_energy_residue_selection,
     compact_potts_nn_payload,
     downsample_model_energy_payload,
     downsample_potts_nn_payload,
@@ -1493,6 +1494,42 @@ async def get_cluster_analysis_data(
                             payload_np["frame_indices"] = source_frames
                     except Exception:
                         pass
+            applied_energy_selection: dict[str, Any] | None = None
+            if normalized_type == "model_energy" and str(residue_selection_setup_id or "").strip():
+                setup_id = str(residue_selection_setup_id).strip()
+                meta_paths = meta.get("paths") if isinstance(meta.get("paths"), dict) else {}
+                component_ref = str(meta_paths.get("energy_components_npz") or "").strip()
+                if not component_ref:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="This energy analysis has no per-node/pair components. Rerun Sampling Explorer analysis.",
+                    )
+                component_path = Path(component_ref)
+                if not component_path.is_absolute():
+                    component_path = cluster_dirs["system_dir"] / component_ref
+                if not component_path.exists():
+                    raise HTTPException(status_code=404, detail="Energy component file is missing. Rerun Sampling Explorer analysis.")
+                with np.load(component_path, allow_pickle=False) as component_data:
+                    component_payload = {key: np.asarray(component_data[key]) for key in component_data.files}
+                residue_keys = [str(value) for value in np.asarray(component_payload.get("residue_keys", [])).tolist()]
+                if not residue_keys:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="This energy analysis has no per-residue metadata. Rerun Sampling Explorer analysis.",
+                    )
+                setup = _load_residue_selection_setup(project_id, system_id, cluster_id, setup_id)
+                selected = _selected_residue_indices_from_setup(setup, residue_keys)
+                try:
+                    selected_payload = apply_model_energy_residue_selection(component_payload, selected)
+                    payload_np["energies"] = np.asarray(selected_payload["energies"], dtype=np.float64)
+                except ValueError as exc:
+                    raise HTTPException(status_code=400, detail=str(exc)) from exc
+                applied_energy_selection = {
+                    "residue_selection_applied": True,
+                    "residue_selection_setup_id": setup_id,
+                    "residue_selection_name": setup.get("name") or setup_id,
+                    "residue_selection_indices": sorted(selected),
+                }
             if normalized_type == "potts_nn_mapping":
                 if bool(summary_only):
                     payload_np = compact_potts_nn_payload(payload_np)
@@ -1500,12 +1537,20 @@ async def get_cluster_analysis_data(
                     payload_np = downsample_potts_nn_payload(payload_np, row_limit=int(max_rows), seed=int(sample_seed))
             elif normalized_type == "model_energy" and max_rows is not None:
                 payload_np = downsample_model_energy_payload(payload_np, row_limit=int(max_rows), seed=int(sample_seed))
+            if normalized_type == "model_energy":
+                # Component matrices can be very large and are only an internal
+                # source for server-side regional aggregation.
+                payload_np.pop("node_energies", None)
+                payload_np.pop("edge_energies", None)
+                payload_np.pop("edge_index", None)
             payload: dict[str, Any] = {}
             for key, value in payload_np.items():
                 if isinstance(value, np.ndarray):
                     payload[key] = value.tolist()
                 else:
                     payload[key] = value
+            if applied_energy_selection:
+                payload.update(applied_energy_selection)
             if str(analysis_type or "").strip().lower() == "delta_energy" and str(residue_selection_setup_id or "").strip():
                 payload = _apply_delta_energy_residue_selection(
                     project_id=project_id,
