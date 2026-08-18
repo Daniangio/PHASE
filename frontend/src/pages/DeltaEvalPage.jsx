@@ -299,6 +299,7 @@ export default function DeltaEvalPage() {
   const [edgeLimit, setEdgeLimit] = useState(80);
   const [deltaEnergyGraphMode, setDeltaEnergyGraphMode] = useState('histogram');
   const [deltaEnergySeriesColors, setDeltaEnergySeriesColors] = useState({});
+  const [deltaEnergySeriesStyles, setDeltaEnergySeriesStyles] = useState({});
   const [activeTab, setActiveTab] = useState('delta_energy');
   const [runPanelOpen, setRunPanelOpen] = useState(false);
   const [deltaEnergySeed, setDeltaEnergySeed] = useState(0);
@@ -930,6 +931,7 @@ export default function DeltaEvalPage() {
     if (bins.length < 2 || !hist.length) return [];
     return hist.map((row, idx) => {
       const id = sampleIds[idx] || `sample-${idx + 1}`;
+      const style = deltaEnergySeriesStyles[id] || {};
       return {
         id,
         sample_id: sampleIds[idx] || '',
@@ -939,9 +941,13 @@ export default function DeltaEvalPage() {
         bins,
         density: Array.isArray(row) ? row.map(Number) : [],
         color: deltaEnergySeriesColors[id] || pickEnergyColor(idx),
+        lineDash: style.lineDash || 'solid',
+        showPeakLine: Boolean(style.showPeakLine),
+        peakLineDash: style.peakLineDash || 'dash',
+        peakLineHeight: style.peakLineHeight ?? null,
       };
     });
-  }, [analysisData, deltaEnergySeriesColors, sampleLabels, sampleIds, sampleTypes]);
+  }, [analysisData, deltaEnergySeriesColors, deltaEnergySeriesStyles, sampleLabels, sampleIds, sampleTypes]);
 
   const {
     selectedIds: selectedDeltaEnergySeriesIds,
@@ -1553,6 +1559,11 @@ export default function DeltaEvalPage() {
                       onColorChange={(seriesId, color) => setDeltaEnergySeriesColors((previous) => ({
                         ...previous,
                         [seriesId]: color,
+                      }))}
+                      showLineStyles
+                      onStyleChange={(seriesId, patch) => setDeltaEnergySeriesStyles((previous) => ({
+                        ...previous,
+                        [seriesId]: { ...(previous[seriesId] || {}), ...patch },
                       }))}
                       dark
                     />

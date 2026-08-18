@@ -60,6 +60,11 @@ from every selected-model graph and from its legend. The x-axis range is then
 recomputed from only the visible trajectories, while remaining shared across
 all visible model graphs.
 
+The same control configures each sample's curve color and line style. An
+optional vertical peak marker is placed at the maximum of the fitted curve;
+its dash style and absolute density-axis height are configurable. Leaving the
+height blank sets it automatically to 110% of the tallest visible fitted curve.
+
 New energy analyses also store the framewise Hamiltonian decomposition:
 
 - one field contribution per residue

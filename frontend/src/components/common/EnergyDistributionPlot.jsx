@@ -15,6 +15,21 @@ export function pickEnergyColor(index) {
   return palette[index % palette.length];
 }
 
+export const ENERGY_LINE_DASH_OPTIONS = [
+  { value: 'solid', label: 'Solid' },
+  { value: 'dash', label: 'Dashed' },
+  { value: 'dot', label: 'Dotted' },
+  { value: 'dashdot', label: 'Dash-dot' },
+  { value: 'longdash', label: 'Long dash' },
+];
+
+const ENERGY_LINE_DASH_VALUES = new Set(ENERGY_LINE_DASH_OPTIONS.map((option) => option.value));
+
+function energyLineDash(value, fallback = 'solid') {
+  const normalized = String(value || '').trim().toLowerCase();
+  return ENERGY_LINE_DASH_VALUES.has(normalized) ? normalized : fallback;
+}
+
 function hexToTransparent(hex, alpha) {
   const clean = String(hex || '#64748b').replace('#', '');
   const normalized = clean.length === 3 ? clean.split('').map((value) => `${value}${value}`).join('') : clean;
@@ -166,6 +181,8 @@ export function EnergySeriesSelectorButton({
   onChange,
   onColorChange = null,
   showColors = false,
+  showLineStyles = false,
+  onStyleChange = null,
   dark = false,
   label = 'Select trajectories',
 }) {
@@ -178,6 +195,12 @@ export function EnergySeriesSelectorButton({
         type: s?.type || s?.kind || s?.sample_type || 'sample',
         isMd: isMdEnergySeries(s),
         color: s?.color || pickEnergyColor(idx),
+        lineDash: energyLineDash(s?.lineDash),
+        showPeakLine: Boolean(s?.showPeakLine),
+        peakLineDash: energyLineDash(s?.peakLineDash, 'dash'),
+        peakLineHeight: s?.peakLineHeight !== null && s?.peakLineHeight !== '' && Number.isFinite(Number(s?.peakLineHeight))
+          ? Number(s.peakLineHeight)
+          : '',
       })),
     [series]
   );
@@ -202,12 +225,12 @@ export function EnergySeriesSelectorButton({
       </button>
       {open ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
-          <div className="w-full max-w-xl rounded-lg border border-gray-700 bg-gray-950 shadow-xl">
+          <div className="w-full max-w-3xl rounded-lg border border-gray-700 bg-gray-950 shadow-xl">
             <div className="flex items-start justify-between gap-3 border-b border-gray-800 px-4 py-3">
               <div>
                 <h3 className="text-sm font-semibold text-gray-100">Energy trajectories</h3>
                 <p className="mt-1 text-xs text-gray-400">
-                  Hidden trajectories are removed from the graph and from the legend.
+                  Hidden trajectories are removed from the graph and legend. A blank peak-line height uses 110% of the tallest displayed fitted curve.
                 </p>
               </div>
               <button type="button" className="text-gray-400 hover:text-gray-100" onClick={() => setOpen(false)}>
@@ -245,13 +268,13 @@ export function EnergySeriesSelectorButton({
                   {entries.map((entry) => (
                     <div
                       key={entry.id}
-                      className="flex items-center justify-between gap-3 rounded-md border border-gray-800 bg-gray-900/60 px-3 py-2 text-sm text-gray-100"
+                      className="grid gap-3 rounded-md border border-gray-800 bg-gray-900/60 px-3 py-2 text-sm text-gray-100 md:grid-cols-[minmax(0,1fr)_auto] md:items-center"
                     >
                       <span className="min-w-0">
                         <span className="block truncate">{entry.label}</span>
                         <span className="text-[11px] uppercase tracking-wide text-gray-500">{entry.type}</span>
                       </span>
-                      <span className="flex items-center gap-3">
+                      <span className="flex flex-wrap items-center justify-end gap-3">
                         {showColors && onColorChange ? (
                           <input
                             type="color"
@@ -261,6 +284,64 @@ export function EnergySeriesSelectorButton({
                             title={`Color for ${entry.label}`}
                             aria-label={`Color for ${entry.label}`}
                           />
+                        ) : null}
+                        {showLineStyles && onStyleChange ? (
+                          <label className="flex items-center gap-1 text-[11px] text-gray-400">
+                            Curve
+                            <select
+                              value={entry.lineDash}
+                              onChange={(event) => onStyleChange(entry.id, { lineDash: event.target.value })}
+                              className="rounded border border-gray-700 bg-gray-950 px-1.5 py-1 text-xs text-gray-100"
+                              aria-label={`Curve line style for ${entry.label}`}
+                            >
+                              {ENERGY_LINE_DASH_OPTIONS.map((option) => (
+                                <option key={option.value} value={option.value}>{option.label}</option>
+                              ))}
+                            </select>
+                          </label>
+                        ) : null}
+                        {showLineStyles && onStyleChange ? (
+                          <label className="flex items-center gap-1 text-[11px] text-gray-400">
+                            <input
+                              type="checkbox"
+                              checked={entry.showPeakLine}
+                              onChange={(event) => onStyleChange(entry.id, { showPeakLine: event.target.checked })}
+                            />
+                            Peak line
+                          </label>
+                        ) : null}
+                        {showLineStyles && onStyleChange && entry.showPeakLine ? (
+                          <label className="flex items-center gap-1 text-[11px] text-gray-400">
+                            Style
+                            <select
+                              value={entry.peakLineDash}
+                              onChange={(event) => onStyleChange(entry.id, { peakLineDash: event.target.value })}
+                              className="rounded border border-gray-700 bg-gray-950 px-1.5 py-1 text-xs text-gray-100"
+                              aria-label={`Peak line style for ${entry.label}`}
+                            >
+                              {ENERGY_LINE_DASH_OPTIONS.map((option) => (
+                                <option key={option.value} value={option.value}>{option.label}</option>
+                              ))}
+                            </select>
+                          </label>
+                        ) : null}
+                        {showLineStyles && onStyleChange && entry.showPeakLine ? (
+                          <label className="flex items-center gap-1 text-[11px] text-gray-400">
+                            Height
+                            <input
+                              type="number"
+                              min="0"
+                              step="any"
+                              value={entry.peakLineHeight}
+                              placeholder="auto"
+                              onChange={(event) => onStyleChange(entry.id, {
+                                peakLineHeight: event.target.value === '' ? null : Number(event.target.value),
+                              })}
+                              className="w-20 rounded border border-gray-700 bg-gray-950 px-1.5 py-1 text-xs text-gray-100"
+                              title="Absolute density-axis height; leave blank for automatic height"
+                              aria-label={`Peak line height for ${entry.label}`}
+                            />
+                          </label>
                         ) : null}
                         <input
                           type="checkbox"
@@ -332,8 +413,11 @@ export function buildEnergyDistributionPlot({
   const traces = [];
   const shapes = [];
   const annotations = [];
+  const peakMarkers = [];
+  let tallestCurve = 0;
   valid.forEach((s, idx) => {
     const color = s.color || pickEnergyColor(idx);
+    const lineDash = energyLineDash(s.lineDash);
     const label = s.label || s.name || `series ${idx + 1}`;
     const values = finiteValues(s.values || s.energies);
     const isPose = values.length === 1;
@@ -347,7 +431,7 @@ export function buildEnergyDistributionPlot({
         x1: x,
         y0: 0,
         y1: 1,
-        line: { color, width: 2, dash: 'dot' },
+        line: { color, width: 2, dash: lineDash === 'solid' ? 'dot' : lineDash },
       });
       annotations.push({
         x,
@@ -415,11 +499,23 @@ export function buildEnergyDistributionPlot({
         type: 'scatter',
         mode: 'lines',
         name: label,
-        line: { color, width: 2.5 },
+        line: { color, width: 2.5, dash: lineDash },
         fill: mode === 'curves' ? 'tozeroy' : undefined,
         fillcolor: mode === 'curves' ? `${color}22` : undefined,
         hovertemplate: `${label}<br>energy: %{x:.3f}<br>density: %{y:.4f}<extra></extra>`,
       });
+      curve.forEach((value) => { if (Number.isFinite(value)) tallestCurve = Math.max(tallestCurve, value); });
+      if (s.showPeakLine && curve.length) {
+        const peakIndex = curve.reduce((best, value, index) => (value > curve[best] ? index : best), 0);
+        peakMarkers.push({
+          x: xs[peakIndex],
+          color,
+          dash: energyLineDash(s.peakLineDash, 'dash'),
+          requestedHeight: Number.isFinite(Number(s.peakLineHeight)) && Number(s.peakLineHeight) > 0
+            ? Number(s.peakLineHeight)
+            : null,
+        });
+      }
     } else {
       const smooth = smoothHistogramCurve(s.bins, s.density || s.hist || s.histogram || []);
       if (smooth.x.length) {
@@ -429,14 +525,58 @@ export function buildEnergyDistributionPlot({
           type: 'scatter',
           mode: 'lines',
           name: label,
-          line: { color, width: 2.5 },
+          line: { color, width: 2.5, dash: lineDash },
           fill: mode === 'curves' ? 'tozeroy' : undefined,
           fillcolor: mode === 'curves' ? `${color}22` : undefined,
           hovertemplate: `${label}<br>energy: %{x:.3f}<br>density: %{y:.4f}<extra></extra>`,
         });
+        smooth.y.forEach((value) => { if (Number.isFinite(value)) tallestCurve = Math.max(tallestCurve, value); });
+        if (s.showPeakLine && smooth.y.length) {
+          const peakIndex = smooth.y.reduce((best, value, index) => (value > smooth.y[best] ? index : best), 0);
+          peakMarkers.push({
+            x: smooth.x[peakIndex],
+            color,
+            dash: energyLineDash(s.peakLineDash, 'dash'),
+            requestedHeight: Number.isFinite(Number(s.peakLineHeight)) && Number(s.peakLineHeight) > 0
+              ? Number(s.peakLineHeight)
+              : null,
+          });
+        }
       }
     }
   });
+
+  const automaticPeakHeight = tallestCurve > 0 ? tallestCurve * 1.1 : 1;
+  let tallestPeakLine = 0;
+  peakMarkers.forEach((marker) => {
+    const markerHeight = marker.requestedHeight || automaticPeakHeight;
+    tallestPeakLine = Math.max(tallestPeakLine, markerHeight);
+    shapes.push({
+      type: 'line',
+      xref: 'x',
+      yref: 'y',
+      x0: marker.x,
+      x1: marker.x,
+      y0: 0,
+      y1: markerHeight,
+      line: { color: marker.color, width: 2, dash: marker.dash },
+      layer: 'above',
+    });
+  });
+  if (tallestPeakLine > 0 && peakMarkers.length) {
+    // Shapes do not participate in Plotly autorange. This invisible point keeps
+    // custom and automatic peak markers inside the density axis without
+    // imposing a range that could clip histogram bars.
+    traces.push({
+      x: [peakMarkers[0].x],
+      y: [tallestPeakLine],
+      type: 'scatter',
+      mode: 'markers',
+      marker: { opacity: 0 },
+      hoverinfo: 'skip',
+      showlegend: false,
+    });
+  }
 
   const dark = background === 'dark';
   const textColor = dark ? '#e5e7eb' : '#111827';

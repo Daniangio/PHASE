@@ -9,6 +9,7 @@ import HelpDrawer from '../components/common/HelpDrawer';
 import EnergyDistributionPlot, {
   buildEnergyDistributionPlot,
   EnergySeriesSelectorButton,
+  pickEnergyColor,
   useEnergySeriesSelection,
 } from '../components/common/EnergyDistributionPlot';
 import {
@@ -172,6 +173,7 @@ export default function SamplingVizPage() {
   const [runAnalysisModelIds, setRunAnalysisModelIds] = useState([]);
   const [energyLoadLimit, setEnergyLoadLimit] = useState(1500);
   const [energyGraphMode, setEnergyGraphMode] = useState('histogram');
+  const [energySampleStyles, setEnergySampleStyles] = useState({});
   const [energyResidueSelectionId, setEnergyResidueSelectionId] = useState('');
   const [residueSelectionSetups, setResidueSelectionSetups] = useState([]);
   const [analysisEdgeMode, setAnalysisEdgeMode] = useState('model');
@@ -1032,23 +1034,44 @@ export default function SamplingVizPage() {
       graph.series.forEach((series) => {
         const sampleId = String(series.sample_id || '').trim();
         if (!sampleId || bySampleId.has(sampleId)) return;
-        bySampleId.set(sampleId, { ...series, id: sampleId });
+        const style = energySampleStyles[sampleId] || {};
+        bySampleId.set(sampleId, {
+          ...series,
+          ...style,
+          id: sampleId,
+          color: style.color || series.color || pickEnergyColor(bySampleId.size),
+        });
       });
     });
     return Array.from(bySampleId.values());
-  }, [energyGraphs]);
+  }, [energyGraphs, energySampleStyles]);
 
   const {
     selectedIds: selectedEnergySampleIds,
     setSelectedIds: setSelectedEnergySampleIds,
   } = useEnergySeriesSelection(energySampleOptions);
+  const energySampleDisplayStyles = useMemo(
+    () => new Map(energySampleOptions.map((series) => [String(series.id), {
+      color: series.color,
+      lineDash: series.lineDash || 'solid',
+      showPeakLine: Boolean(series.showPeakLine),
+      peakLineDash: series.peakLineDash || 'dash',
+      peakLineHeight: series.peakLineHeight ?? null,
+    }])),
+    [energySampleOptions]
+  );
   const selectedEnergySampleSet = useMemo(() => new Set(selectedEnergySampleIds), [selectedEnergySampleIds]);
   const visibleEnergyGraphs = useMemo(
     () => energyGraphs.map((graph) => ({
       ...graph,
-      series: graph.series.filter((series) => selectedEnergySampleSet.has(String(series.sample_id || ''))),
+      series: graph.series
+        .filter((series) => selectedEnergySampleSet.has(String(series.sample_id || '')))
+        .map((series) => ({
+          ...series,
+          ...(energySampleDisplayStyles.get(String(series.sample_id || '')) || {}),
+        })),
     })),
-    [energyGraphs, selectedEnergySampleSet]
+    [energyGraphs, energySampleDisplayStyles, selectedEnergySampleSet]
   );
 
   const globalEnergyRange = useMemo(() => {
@@ -1764,6 +1787,16 @@ export default function SamplingVizPage() {
                   series={energySampleOptions}
                   selectedIds={selectedEnergySampleIds}
                   onChange={setSelectedEnergySampleIds}
+                  showColors
+                  onColorChange={(seriesId, color) => setEnergySampleStyles((previous) => ({
+                    ...previous,
+                    [seriesId]: { ...(previous[seriesId] || {}), color },
+                  }))}
+                  showLineStyles
+                  onStyleChange={(seriesId, patch) => setEnergySampleStyles((previous) => ({
+                    ...previous,
+                    [seriesId]: { ...(previous[seriesId] || {}), ...patch },
+                  }))}
                   dark
                   label="Select samples"
                 />

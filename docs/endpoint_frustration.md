@@ -77,7 +77,7 @@ Interpretation:
 - `ΔE > 0`: the frame is energetically lower under model B
 - distribution overlap between trajectories suggests that the endpoint pair does not separate those trajectories globally
 
-The web page shows these values on the `Delta energy distributions` tab. Histogram bars are kept neutral gray; the fitted/smoothed distribution curves carry the sample colors. A display toggle can show either histograms plus fitted curves or fitted curves only. When launching this analysis, each selected trajectory can use all frames or a random subset with a per-trajectory frame limit.
+The web page shows these values on the `Delta energy distributions` tab. Histogram bars are kept neutral gray; the fitted/smoothed distribution curves carry the sample colors. A display toggle can show either histograms plus fitted curves or fitted curves only. The trajectory selector also controls each curve's color and line style and can add a vertical marker at the fitted-curve maximum. Peak-marker dash and height are configurable; a blank height uses 110% of the tallest displayed curve. When launching this analysis, each selected trajectory can use all frames or a random subset with a per-trajectory frame limit.
 
 ## Saved outputs
 

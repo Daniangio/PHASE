@@ -266,7 +266,7 @@ else
     SA_ACCEPTANCE_CRITERIA="Metropolis"
   fi
   SA_RANDOMIZE_ORDER="false"
-  if prompt_bool "Randomize SA update order? (Y/n)" "Y"; then
+  if prompt_bool "Randomize SA update order? (y/N)" "N"; then
     SA_RANDOMIZE_ORDER="true"
   fi
   SA_RESTART="$(prompt "SA restart (previous/md/independent)" "independent")"
