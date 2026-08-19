@@ -15,6 +15,62 @@ export function pickEnergyColor(index) {
   return palette[index % palette.length];
 }
 
+const DISTINCT_ENERGY_COLORS = [
+  '#1f77b4', '#d62728', '#2ca02c', '#9467bd', '#ff7f0e',
+  '#17becf', '#e377c2', '#8c564b', '#bcbd22', '#0f766e',
+  '#2563eb', '#be123c', '#65a30d', '#7c3aed', '#ea580c',
+  '#0891b2', '#c026d3', '#a16207', '#475569', '#059669',
+];
+const ENERGY_COLOR_SETS_STORAGE_KEY = 'phase.energyColorSets.v1';
+
+function readSavedEnergyColorSets() {
+  if (typeof window === 'undefined') return [];
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(ENERGY_COLOR_SETS_STORAGE_KEY) || '[]');
+    return Array.isArray(parsed)
+      ? parsed.filter((item) => item && Array.isArray(item.colors) && item.colors.length)
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeSavedEnergyColorSets(colorSets) {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(ENERGY_COLOR_SETS_STORAGE_KEY, JSON.stringify(colorSets));
+  } catch {
+    // Color presets are a convenience; plotting must still work if browser
+    // storage is disabled or full.
+  }
+}
+
+function hslToHex(hue, saturation, lightness) {
+  const s = saturation / 100;
+  const l = lightness / 100;
+  const chroma = (1 - Math.abs(2 * l - 1)) * s;
+  const h = ((hue % 360) + 360) % 360 / 60;
+  const x = chroma * (1 - Math.abs((h % 2) - 1));
+  const [r1, g1, b1] = h < 1 ? [chroma, x, 0]
+    : h < 2 ? [x, chroma, 0]
+      : h < 3 ? [0, chroma, x]
+        : h < 4 ? [0, x, chroma]
+          : h < 5 ? [x, 0, chroma]
+            : [chroma, 0, x];
+  const offset = l - chroma / 2;
+  return `#${[r1, g1, b1]
+    .map((channel) => Math.round((channel + offset) * 255).toString(16).padStart(2, '0'))
+    .join('')}`;
+}
+
+export function distinctEnergyColor(index, variant = 0) {
+  if (variant === 0 && index < DISTINCT_ENERGY_COLORS.length) return DISTINCT_ENERGY_COLORS[index];
+  const hueOffset = variant * 47.3;
+  const saturation = 66 + ((variant * 7) % 18);
+  const lightness = (index + variant) % 2 === 0 ? 42 : 57;
+  return hslToHex(hueOffset + index * 137.508, saturation, lightness);
+}
+
 export const ENERGY_LINE_DASH_OPTIONS = [
   { value: 'solid', label: 'Solid' },
   { value: 'dash', label: 'Dashed' },
@@ -187,6 +243,10 @@ export function EnergySeriesSelectorButton({
   label = 'Select trajectories',
 }) {
   const [open, setOpen] = useState(false);
+  const [autoColorVariant, setAutoColorVariant] = useState(0);
+  const [copyColorSourceId, setCopyColorSourceId] = useState('');
+  const [savedColorSets, setSavedColorSets] = useState(readSavedEnergyColorSets);
+  const [selectedColorSetId, setSelectedColorSetId] = useState('');
   const entries = useMemo(
     () =>
       (Array.isArray(series) ? series : []).map((s, idx) => ({
@@ -206,6 +266,14 @@ export function EnergySeriesSelectorButton({
   );
   const selectedSet = useMemo(() => new Set(selectedIds || []), [selectedIds]);
   const selectedCount = entries.filter((entry) => selectedSet.has(entry.id)).length;
+  const selectedEntries = entries.filter((entry) => selectedSet.has(entry.id));
+  const copyColorSource = entries.find((entry) => entry.id === copyColorSourceId) || null;
+  const selectedColorSet = savedColorSets.find((item) => item.id === selectedColorSetId) || null;
+
+  const updateSavedColorSets = (next) => {
+    setSavedColorSets(next);
+    writeSavedEnergyColorSets(next);
+  };
 
   const setEntry = (id, checked) => {
     const next = new Set(selectedIds || []);
@@ -259,7 +327,101 @@ export function EnergySeriesSelectorButton({
               >
                 Clear
               </button>
+              {showColors && onColorChange ? (
+                <button
+                  type="button"
+                  className="rounded border border-cyan-700 bg-cyan-950/40 px-2 py-1 text-xs text-black-100 hover:bg-cyan-900/50 disabled:cursor-not-allowed disabled:opacity-40"
+                  disabled={!selectedCount}
+                  onClick={() => {
+                    entries
+                      .filter((entry) => selectedSet.has(entry.id))
+                      .forEach((entry, index) => onColorChange(entry.id, distinctEnergyColor(index, autoColorVariant)));
+                    setAutoColorVariant((current) => current + 1);
+                  }}
+                  title="Assign distinct colors to all active samples. Click again to generate a different combination."
+                >
+                  Generate distinct colors for active samples
+                </button>
+              ) : null}
+              {copyColorSource ? (
+                <button
+                  type="button"
+                  className="rounded border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-900"
+                  onClick={() => setCopyColorSourceId('')}
+                >
+                  Cancel color copy
+                </button>
+              ) : null}
             </div>
+            {showColors && onColorChange ? (
+              <div className="flex flex-wrap items-center gap-2 border-b border-gray-800 px-4 py-3">
+                <button
+                  type="button"
+                  disabled={!selectedEntries.length}
+                  className="rounded border border-gray-700 px-2 py-1 text-xs text-gray-200 hover:bg-gray-900 disabled:cursor-not-allowed disabled:opacity-40"
+                  onClick={() => {
+                    const proposed = window.prompt('Name for this color set:', `Palette ${savedColorSets.length + 1}`);
+                    const name = String(proposed || '').trim();
+                    if (!name) return;
+                    const existing = savedColorSets.find((item) => String(item.name).toLowerCase() === name.toLowerCase());
+                    const item = {
+                      id: existing?.id || `energy-colors-${Date.now()}`,
+                      name,
+                      colors: selectedEntries.map((entry) => entry.color),
+                      updatedAt: new Date().toISOString(),
+                    };
+                    const next = existing
+                      ? savedColorSets.map((entry) => (entry.id === existing.id ? item : entry))
+                      : [...savedColorSets, item];
+                    updateSavedColorSets(next);
+                    setSelectedColorSetId(item.id);
+                  }}
+                  title="Save the colors of the currently active samples in their displayed order"
+                >
+                  Save active color set
+                </button>
+                <select
+                  value={selectedColorSetId}
+                  onChange={(event) => setSelectedColorSetId(event.target.value)}
+                  className="min-w-48 rounded border border-gray-700 bg-gray-950 px-2 py-1 text-xs text-gray-100"
+                  aria-label="Saved energy color set"
+                >
+                  <option value="">Select a saved color set</option>
+                  {savedColorSets.map((item) => (
+                    <option key={item.id} value={item.id}>{item.name} ({item.colors.length} colors)</option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  disabled={!selectedColorSet || !selectedEntries.length}
+                  className="rounded border border-cyan-700 bg-cyan-950/40 px-2 py-1 text-xs text-black-100 hover:bg-cyan-900/50 disabled:cursor-not-allowed disabled:opacity-40"
+                  onClick={() => {
+                    selectedEntries.forEach((entry, index) => {
+                      onColorChange(entry.id, selectedColorSet.colors[index] || '#000000');
+                    });
+                  }}
+                  title="Apply colors by active-sample order; additional active samples become black"
+                >
+                  Load onto active samples
+                </button>
+                <button
+                  type="button"
+                  disabled={!selectedColorSet}
+                  className="rounded border border-gray-800 px-2 py-1 text-xs text-gray-400 hover:border-red-800 hover:text-red-300 disabled:cursor-not-allowed disabled:opacity-40"
+                  onClick={() => {
+                    updateSavedColorSets(savedColorSets.filter((item) => item.id !== selectedColorSet.id));
+                    setSelectedColorSetId('');
+                  }}
+                >
+                  Delete set
+                </button>
+              </div>
+            ) : null}
+            {showColors && onColorChange ? (
+              <div className="border-b border-gray-800 px-4 py-2 text-[11px] text-gray-400">
+                Click the generator repeatedly to try different palettes. Saved sets preserve active-sample order and length; loading onto more samples colors the extras black. To reuse one exact color, click <strong className="text-gray-200">Copy color</strong> beside its sample, then <strong className="text-gray-200">Apply here</strong> beside the target.
+              </div>
+            ) : null}
             <div className="max-h-[60vh] overflow-y-auto px-4 py-3">
               {!entries.length ? (
                 <p className="text-sm text-gray-400">No energy trajectories are available.</p>
@@ -276,14 +438,42 @@ export function EnergySeriesSelectorButton({
                       </span>
                       <span className="flex flex-wrap items-center justify-end gap-3">
                         {showColors && onColorChange ? (
-                          <input
-                            type="color"
-                            value={entry.color}
-                            onChange={(event) => onColorChange(entry.id, event.target.value)}
-                            className="h-7 w-9 cursor-pointer rounded border border-gray-700 bg-transparent p-0.5"
-                            title={`Color for ${entry.label}`}
-                            aria-label={`Color for ${entry.label}`}
-                          />
+                          <span className="flex items-center gap-1">
+                            <input
+                              type="color"
+                              value={entry.color}
+                              onChange={(event) => onColorChange(entry.id, event.target.value)}
+                              className="h-7 w-9 cursor-pointer rounded border border-gray-700 bg-transparent p-0.5"
+                              title={`Color for ${entry.label}`}
+                              aria-label={`Color for ${entry.label}`}
+                            />
+                            {!copyColorSource ? (
+                              <button
+                                type="button"
+                                className="rounded border border-gray-700 px-1.5 py-1 text-[10px] text-gray-300 hover:bg-gray-800"
+                                onClick={() => setCopyColorSourceId(entry.id)}
+                                title={`Copy ${entry.label}'s color to another sample`}
+                              >
+                                Copy color
+                              </button>
+                            ) : copyColorSource.id === entry.id ? (
+                              <span className="rounded border border-cyan-700 bg-cyan-950/40 px-1.5 py-1 text-[10px] text-cyan-200">
+                                Source color
+                              </span>
+                            ) : (
+                              <button
+                                type="button"
+                                className="rounded border border-cyan-700 bg-cyan-950/40 px-1.5 py-1 text-[10px] text-cyan-100 hover:bg-cyan-900/50"
+                                onClick={() => {
+                                  onColorChange(entry.id, copyColorSource.color);
+                                  setCopyColorSourceId('');
+                                }}
+                                title={`Apply ${copyColorSource.label}'s color to ${entry.label}`}
+                              >
+                                Apply here
+                              </button>
+                            )}
+                          </span>
                         ) : null}
                         {showLineStyles && onStyleChange ? (
                           <label className="flex items-center gap-1 text-[11px] text-gray-400">

@@ -1544,13 +1544,6 @@ export default function DeltaEvalPage() {
                         </option>
                       ))}
                     </select>
-                    <button
-                      type="button"
-                      onClick={() => navigate(`/projects/${projectId}/systems/${systemId}/residue_selections${selectedClusterId ? `?cluster_id=${encodeURIComponent(selectedClusterId)}` : ''}`)}
-                      className="rounded-md border border-gray-700 bg-gray-950 px-2 py-1.5 text-xs text-gray-100 hover:border-gray-500"
-                    >
-                      Manage selections
-                    </button>
                     <EnergySeriesSelectorButton
                       series={deltaEnergySeries}
                       selectedIds={selectedDeltaEnergySeriesIds}
