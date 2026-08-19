@@ -9,7 +9,17 @@ from phase.services.project_store import ProjectStore
 
 
 def _print_rows(rows: List[List[str]]) -> None:
-    for row in rows:
+    # Every interactive shell selector treats column 2 as its human-facing
+    # label. Sort here so all current and future bash menus are alphabetical
+    # by that label rather than by UUID-backed filesystem insertion order.
+    ordered = sorted(
+        rows,
+        key=lambda row: (
+            str(row[1] if len(row) > 1 and row[1] else row[0] if row else "").casefold(),
+            str(row[0] if row else "").casefold(),
+        ),
+    )
+    for row in ordered:
         print("|".join(row))
 
 

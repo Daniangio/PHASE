@@ -681,7 +681,13 @@ class ProjectStore:
                     except Exception:
                         meta["path"] = str(npz_files[0])
             entries.append(meta)
-        return entries
+        return sorted(
+            entries,
+            key=lambda item: (
+                str(item.get("name") or item.get("model_id") or "").casefold(),
+                str(item.get("model_id") or "").casefold(),
+            ),
+        )
 
     def list_samples(self, project_id: str, system_id: str, cluster_id: str) -> List[Dict[str, Any]]:
         system_dir = self._system_dir(project_id, system_id)
@@ -707,7 +713,13 @@ class ProjectStore:
                     except Exception:
                         meta["path"] = str(npz_files[0])
             entries.append(meta)
-        return entries
+        return sorted(
+            entries,
+            key=lambda item: (
+                str(item.get("name") or item.get("sample_id") or "").casefold(),
+                str(item.get("sample_id") or "").casefold(),
+            ),
+        )
 
     def get_sample_entry(self, project_id: str, system_id: str, cluster_id: str, sample_id: str) -> Dict[str, Any]:
         meta_path = self._sample_metadata_path(project_id, system_id, cluster_id, sample_id)
